@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,7 +69,7 @@ enum EffectiveStatus {
     Future(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ConsistencyCheck {
     CliObjVsSystemAs,
     CliAsmReproducible,
@@ -158,6 +158,7 @@ struct Outcome {
     kind: OutcomeKind,
     detail: String,
     bundle: Option<PathBuf>,
+    consistency_observations: Vec<ConsistencyObservation>,
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +168,26 @@ struct Summary {
     xfailed: usize,
     xpassed: usize,
     future: usize,
+    consistency: BTreeMap<ConsistencyCheck, ConsistencyRollup>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ConsistencyRollup {
+    cells: usize,
+    repeat_counts: BTreeSet<usize>,
+    unique_variant_counts: BTreeSet<usize>,
+    varying_components: BTreeSet<String>,
+    stable_components: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConsistencyObservation {
+    check: ConsistencyCheck,
+    summary: String,
+    repeat_count: Option<usize>,
+    unique_variant_count: Option<usize>,
+    varying_components: Vec<String>,
+    stable_components: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,8 +225,63 @@ struct ReferenceResult {
 struct ConsistencyIssue {
     check: ConsistencyCheck,
     summary: String,
+    repeat_count: Option<usize>,
+    unique_variant_count: Option<usize>,
+    varying_components: Vec<String>,
+    stable_components: Vec<String>,
     detail: String,
     temp_root: PathBuf,
+}
+
+impl Summary {
+    fn record_outcome(&mut self, outcome: &Outcome) {
+        match outcome.kind {
+            OutcomeKind::Pass => self.passed += 1,
+            OutcomeKind::Fail => self.failed += 1,
+            OutcomeKind::Xfail => self.xfailed += 1,
+            OutcomeKind::Xpass => self.xpassed += 1,
+            OutcomeKind::Future => self.future += 1,
+        }
+        self.record_consistency(&outcome.consistency_observations);
+    }
+
+    fn record_consistency(&mut self, observations: &[ConsistencyObservation]) {
+        for observation in observations {
+            self.consistency
+                .entry(observation.check)
+                .or_default()
+                .record(observation);
+        }
+    }
+}
+
+impl ConsistencyRollup {
+    fn record(&mut self, observation: &ConsistencyObservation) {
+        self.cells += 1;
+        if let Some(repeat_count) = observation.repeat_count {
+            self.repeat_counts.insert(repeat_count);
+        }
+        if let Some(unique_variant_count) = observation.unique_variant_count {
+            self.unique_variant_counts.insert(unique_variant_count);
+        }
+        self.varying_components
+            .extend(observation.varying_components.iter().cloned());
+        self.stable_components
+            .extend(observation.stable_components.iter().cloned());
+    }
+}
+
+impl ConsistencyIssue {
+    fn observation(&self) -> ConsistencyObservation {
+        ConsistencyObservation {
+            check: self.check,
+            summary: self.summary.clone(),
+            repeat_count: self.repeat_count,
+            unique_variant_count: self.unique_variant_count,
+            varying_components: self.varying_components.clone(),
+            stable_components: self.stable_components.clone(),
+        }
+    }
 }
 
 impl ReferenceResult {
@@ -965,13 +1041,7 @@ fn run_suites(config: &RunConfig) -> Result<Summary, String> {
                 matched_cells += 1;
                 let outcome = execute_case_cell(suite, case, opt_level, config)?;
                 print_outcome(&outcome);
-                match outcome.kind {
-                    OutcomeKind::Pass => summary.passed += 1,
-                    OutcomeKind::Fail => summary.failed += 1,
-                    OutcomeKind::Xfail => summary.xfailed += 1,
-                    OutcomeKind::Xpass => summary.xpassed += 1,
-                    OutcomeKind::Future => summary.future += 1,
-                }
+                summary.record_outcome(&outcome);
 
                 if config.fail_fast
                     && matches!(outcome.kind, OutcomeKind::Fail | OutcomeKind::Xpass)
@@ -1019,6 +1089,7 @@ fn execute_case_cell(
                 kind: OutcomeKind::Future,
                 detail: reason.clone(),
                 bundle: None,
+                consistency_observations: Vec::new(),
             });
         }
     }
@@ -1123,6 +1194,12 @@ fn execute_case_cell(
         (None, None) => Err("armfortas produced neither a result nor a failure".into()),
     };
 
+    let consistency_observations = artifacts
+        .consistency_issues
+        .iter()
+        .map(ConsistencyIssue::observation)
+        .collect::<Vec<_>>();
+
     let mut outcome = match (effective_status, execution) {
         (EffectiveStatus::Normal, Ok(())) => Outcome {
             suite: suite.name.clone(),
@@ -1131,6 +1208,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Pass,
             detail: String::new(),
             bundle: None,
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Normal, Err(detail)) => Outcome {
             suite: suite.name.clone(),
@@ -1139,6 +1217,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Fail,
             detail,
             bundle: None,
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
             suite: suite.name.clone(),
@@ -1147,6 +1226,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Xpass,
             detail: reason,
             bundle: None,
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
             suite: suite.name.clone(),
@@ -1155,6 +1235,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Xfail,
             detail: format!("{}\n{}", reason, detail),
             bundle: None,
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Future(reason), Ok(())) => Outcome {
             suite: suite.name.clone(),
@@ -1163,6 +1244,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Pass,
             detail: reason,
             bundle: None,
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
             suite: suite.name.clone(),
@@ -1171,6 +1253,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Fail,
             detail: format!("{}\n{}", reason, detail),
             bundle: None,
+            consistency_observations,
         },
     };
 
@@ -1563,6 +1646,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliObjVsSystemAs,
             summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
             detail: format!(
                 "cannot create consistency temp dir '{}': {}",
                 temp_root.display(),
@@ -1582,6 +1669,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
             return Some(ConsistencyIssue {
                 check: ConsistencyCheck::CliObjVsSystemAs,
                 summary: "armfortas -S failed during consistency check".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
                 detail,
                 temp_root,
             })
@@ -1607,6 +1698,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
             return Some(ConsistencyIssue {
                 check: ConsistencyCheck::CliObjVsSystemAs,
                 summary: "system assembler invocation failed".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
                 detail: format!("{}\ncannot run assembler: {}", as_command, err),
                 temp_root,
             })
@@ -1617,6 +1712,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliObjVsSystemAs,
             summary: "system assembler rejected armfortas -S output".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
             detail: format!("{}\nassembler failed:\n{}", as_command, stderr),
             temp_root,
         });
@@ -1628,6 +1727,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
             return Some(ConsistencyIssue {
                 check: ConsistencyCheck::CliObjVsSystemAs,
                 summary: "armfortas -c failed during consistency check".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
                 detail,
                 temp_root,
             })
@@ -1640,6 +1743,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
             return Some(ConsistencyIssue {
                 check: ConsistencyCheck::CliObjVsSystemAs,
                 summary: "could not snapshot object assembled from -S output".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
                 detail: format!("{}\n{}", as_command, detail),
                 temp_root,
             })
@@ -1651,6 +1758,10 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
             return Some(ConsistencyIssue {
                 check: ConsistencyCheck::CliObjVsSystemAs,
                 summary: "could not snapshot object from armfortas -c".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
                 detail: format!("{}\n{}", obj_command, detail),
                 temp_root,
             })
@@ -1658,12 +1769,26 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
     };
 
     if asm_snapshot != obj_snapshot {
+        let snapshots = [&asm_snapshot, &obj_snapshot];
+        let varying = varying_object_components(&snapshots)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let stable = stable_object_components(&snapshots)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliObjVsSystemAs,
             summary: format!(
-                "{}",
-                join_or_none(&varying_object_components(&[&asm_snapshot, &obj_snapshot]))
+                "varying_components={} stable_components={}",
+                join_or_none_from_strings(&varying),
+                join_or_none_from_strings(&stable)
             ),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: varying,
+            stable_components: stable,
             detail: format!(
                 "object snapshot mismatch between armfortas -S | as and armfortas -c\n{}\n{}\n{}\n{}",
                 asm_command,
@@ -1689,6 +1814,10 @@ fn run_cli_asm_reproducible(
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliAsmReproducible,
             summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
             detail: format!(
                 "cannot create consistency temp dir '{}': {}",
                 temp_root.display(),
@@ -1707,6 +1836,10 @@ fn run_cli_asm_reproducible(
                 return Some(ConsistencyIssue {
                     check: ConsistencyCheck::CliAsmReproducible,
                     summary: "armfortas -S failed during reproducibility check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
                     detail,
                     temp_root,
                 })
@@ -1718,6 +1851,10 @@ fn run_cli_asm_reproducible(
                 return Some(ConsistencyIssue {
                     check: ConsistencyCheck::CliAsmReproducible,
                     summary: "could not read emitted assembly during reproducibility check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
                     detail,
                     temp_root,
                 })
@@ -1737,6 +1874,10 @@ fn run_cli_asm_reproducible(
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliAsmReproducible,
             summary: format!("repeat_count={} unique_variants={}", repeat_count, unique_variants),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variants),
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
             detail: format!(
                 "assembly output is not reproducible across repeated armfortas -S runs\nrepeat count: {}\nunique variants: {}\n{}\n{}\n{}",
                 repeat_count,
@@ -1763,6 +1904,10 @@ fn run_cli_obj_reproducible(
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliObjReproducible,
             summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
             detail: format!(
                 "cannot create consistency temp dir '{}': {}",
                 temp_root.display(),
@@ -1781,6 +1926,10 @@ fn run_cli_obj_reproducible(
                 return Some(ConsistencyIssue {
                     check: ConsistencyCheck::CliObjReproducible,
                     summary: "armfortas -c failed during reproducibility check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
                     detail,
                     temp_root,
                 })
@@ -1792,6 +1941,10 @@ fn run_cli_obj_reproducible(
                 return Some(ConsistencyIssue {
                     check: ConsistencyCheck::CliObjReproducible,
                     summary: "could not snapshot object during reproducibility check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
                     detail: format!("{}\n{}", command, detail),
                     temp_root,
                 })
@@ -1815,12 +1968,24 @@ fn run_cli_obj_reproducible(
             first_distinct_object_pair(&runs).expect("unique variants > 1 implies a distinct pair");
         let varying = join_or_none(&varying_object_components(&snapshots));
         let stable = join_or_none(&stable_object_components(&snapshots));
+        let varying_components = varying_object_components(&snapshots)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let stable_components = stable_object_components(&snapshots)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         return Some(ConsistencyIssue {
             check: ConsistencyCheck::CliObjReproducible,
             summary: format!(
                 "repeat_count={} unique_variants={} varying_components={} stable_components={}",
                 repeat_count, unique_variants, varying, stable
             ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variants),
+            varying_components,
+            stable_components,
             detail: format!(
                 "object output is not reproducible across repeated armfortas -c runs\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\n{}",
                 repeat_count,
@@ -2316,6 +2481,94 @@ fn join_or_none(values: &[&str]) -> String {
     }
 }
 
+fn join_or_none_from_strings(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn join_usize_set(values: &BTreeSet<usize>) -> String {
+    if values.is_empty() {
+        "n/a".to_string()
+    } else {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn join_string_set(values: &BTreeSet<String>) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.iter().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
+fn render_consistency_rollup(rollup: &ConsistencyRollup) -> String {
+    let mut parts = vec![format!("{} cells", rollup.cells)];
+    if !rollup.repeat_counts.is_empty() {
+        parts.push(format!("repeat_count={}", join_usize_set(&rollup.repeat_counts)));
+    }
+    if !rollup.unique_variant_counts.is_empty() {
+        parts.push(format!(
+            "unique_variants={}",
+            join_usize_set(&rollup.unique_variant_counts)
+        ));
+    }
+    if !rollup.varying_components.is_empty() {
+        parts.push(format!(
+            "varying={}",
+            join_string_set(&rollup.varying_components)
+        ));
+    }
+    if !rollup.stable_components.is_empty() {
+        parts.push(format!(
+            "stable={}",
+            join_string_set(&rollup.stable_components)
+        ));
+    }
+    parts.join("; ")
+}
+
+fn render_summary(summary: &Summary) -> String {
+    let mut lines = vec![
+        "Summary".to_string(),
+        format!("  passed: {}", summary.passed),
+        format!("  failed: {}", summary.failed),
+        format!("  xfailed: {}", summary.xfailed),
+        format!("  xpassed: {}", summary.xpassed),
+        format!("  future: {}", summary.future),
+    ];
+
+    if !summary.consistency.is_empty() {
+        lines.push(String::new());
+        lines.push("Consistency".to_string());
+        lines.push(format!("  affected_checks: {}", summary.consistency.len()));
+        lines.push(format!(
+            "  cells_with_issues: {}",
+            summary
+                .consistency
+                .values()
+                .map(|rollup| rollup.cells)
+                .sum::<usize>()
+        ));
+        for (check, rollup) in &summary.consistency {
+            lines.push(format!(
+                "  {}: {}",
+                check.as_str(),
+                render_consistency_rollup(rollup)
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn write_failure_bundle(
     suite: &SuiteSpec,
     case: &CaseSpec,
@@ -2474,23 +2727,110 @@ fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<()
     Ok(())
 }
 
+fn render_consistency_bundle_summary(issues: &[ConsistencyIssue]) -> String {
+    let mut rollups = BTreeMap::new();
+    for issue in issues {
+        rollups
+            .entry(issue.check)
+            .or_insert_with(ConsistencyRollup::default)
+            .record(&issue.observation());
+    }
+
+    let mut aggregate = ConsistencyRollup::default();
+    for issue in issues {
+        aggregate.record(&issue.observation());
+    }
+
+    let checks = if rollups.is_empty() {
+        "none".to_string()
+    } else {
+        rollups
+            .keys()
+            .map(ConsistencyCheck::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut lines = vec![
+        format!("issue_count: {}", issues.len()),
+        format!("checks: {}", checks),
+    ];
+
+    if !aggregate.repeat_counts.is_empty() {
+        lines.push(format!(
+            "repeat_counts: {}",
+            join_usize_set(&aggregate.repeat_counts)
+        ));
+    }
+    if !aggregate.unique_variant_counts.is_empty() {
+        lines.push(format!(
+            "unique_variants: {}",
+            join_usize_set(&aggregate.unique_variant_counts)
+        ));
+    }
+    if !aggregate.varying_components.is_empty() {
+        lines.push(format!(
+            "varying_components: {}",
+            join_string_set(&aggregate.varying_components)
+        ));
+    }
+    if !aggregate.stable_components.is_empty() {
+        lines.push(format!(
+            "stable_components: {}",
+            join_string_set(&aggregate.stable_components)
+        ));
+    }
+
+    if !rollups.is_empty() {
+        lines.push(String::new());
+        lines.push("per_check:".to_string());
+        for (check, rollup) in rollups {
+            lines.push(format!(
+                "  {}: {}",
+                check.as_str(),
+                render_consistency_rollup(&rollup)
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    for issue in issues {
+        lines.push(format!("check: {}", issue.check.as_str()));
+        lines.push(format!("summary: {}", issue.summary));
+        if let Some(repeat_count) = issue.repeat_count {
+            lines.push(format!("repeat_count: {}", repeat_count));
+        }
+        if let Some(unique_variant_count) = issue.unique_variant_count {
+            lines.push(format!("unique_variants: {}", unique_variant_count));
+        }
+        if !issue.varying_components.is_empty() {
+            lines.push(format!(
+                "varying_components: {}",
+                join_or_none_from_strings(&issue.varying_components)
+            ));
+        }
+        if !issue.stable_components.is_empty() {
+            lines.push(format!(
+                "stable_components: {}",
+                join_or_none_from_strings(&issue.stable_components)
+            ));
+        }
+        lines.push(format!(
+            "artifacts: {}",
+            sanitize_component(issue.check.as_str())
+        ));
+        lines.push(String::new());
+    }
+
+    lines.join("\n")
+}
+
 fn write_consistency_bundle(root: &Path, issues: &[ConsistencyIssue]) -> Result<(), String> {
     let consistency_root = root.join("consistency");
     fs::create_dir_all(&consistency_root)
         .map_err(|e| format!("cannot create consistency bundle dir: {}", e))?;
 
-    let summary = issues
-        .iter()
-        .map(|issue| {
-            format!(
-                "check: {}\nsummary: {}\nartifacts: {}\n",
-                issue.check.as_str(),
-                issue.summary,
-                sanitize_component(issue.check.as_str())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let summary = render_consistency_bundle_summary(issues);
     fs::write(consistency_root.join("summary.txt"), summary)
         .map_err(|e| format!("cannot write consistency summary bundle: {}", e))?;
 
@@ -2648,12 +2988,7 @@ fn print_outcome(outcome: &Outcome) {
 
 fn print_summary(summary: &Summary) {
     println!();
-    println!("Summary");
-    println!("  passed: {}", summary.passed);
-    println!("  failed: {}", summary.failed);
-    println!("  xfailed: {}", summary.xfailed);
-    println!("  xpassed: {}", summary.xpassed);
-    println!("  future: {}", summary.future);
+    println!("{}", render_summary(summary));
 }
 
 #[derive(Debug, Clone)]
@@ -2991,15 +3326,42 @@ end
                 run_error: None,
             }],
             consistency_issues: {
-                let temp_root = std::env::temp_dir().join("afs_tests_consistency_bundle_issue");
-                fs::create_dir_all(&temp_root).unwrap();
-                fs::write(temp_root.join("run_00.s"), "mov x19, x0\n").unwrap();
-                vec![ConsistencyIssue {
-                    check: ConsistencyCheck::CliAsmReproducible,
-                    summary: "repeat_count=3 unique_variants=3".into(),
-                    detail: "assembly output is not reproducible".into(),
-                    temp_root,
-                }]
+                let asm_temp_root =
+                    std::env::temp_dir().join("afs_tests_consistency_bundle_issue_asm");
+                fs::create_dir_all(&asm_temp_root).unwrap();
+                fs::write(asm_temp_root.join("run_00.s"), "mov x19, x0\n").unwrap();
+
+                let obj_temp_root =
+                    std::env::temp_dir().join("afs_tests_consistency_bundle_issue_obj");
+                fs::create_dir_all(&obj_temp_root).unwrap();
+                fs::write(obj_temp_root.join("run_00.o"), "fake object bytes\n").unwrap();
+
+                vec![
+                    ConsistencyIssue {
+                        check: ConsistencyCheck::CliAsmReproducible,
+                        summary: "repeat_count=3 unique_variants=3".into(),
+                        repeat_count: Some(3),
+                        unique_variant_count: Some(3),
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail: "assembly output is not reproducible".into(),
+                        temp_root: asm_temp_root,
+                    },
+                    ConsistencyIssue {
+                        check: ConsistencyCheck::CliObjReproducible,
+                        summary: "repeat_count=3 unique_variants=2 varying_components=text stable_components=load_commands, relocations, symbols".into(),
+                        repeat_count: Some(3),
+                        unique_variant_count: Some(2),
+                        varying_components: vec!["text".into()],
+                        stable_components: vec![
+                            "load_commands".into(),
+                            "relocations".into(),
+                            "symbols".into(),
+                        ],
+                        detail: "object output is not reproducible".into(),
+                        temp_root: obj_temp_root,
+                    },
+                ]
             },
         };
         let outcome = Outcome {
@@ -3009,6 +3371,7 @@ end
             kind: OutcomeKind::Fail,
             detail: "boom".into(),
             bundle: None,
+            consistency_observations: Vec::new(),
         };
 
         let bundle = write_failure_bundle(&suite, &case, &outcome, &artifacts).unwrap();
@@ -3024,6 +3387,14 @@ end
             .join("run.stdout.txt")
             .exists());
         assert!(bundle.join("consistency").join("summary.txt").exists());
+        let consistency_summary =
+            fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
+        assert!(consistency_summary.contains("issue_count: 2"));
+        assert!(consistency_summary.contains("checks: cli_asm_reproducible, cli_obj_reproducible"));
+        assert!(consistency_summary.contains("repeat_counts: 3"));
+        assert!(consistency_summary.contains("unique_variants: 2, 3"));
+        assert!(consistency_summary.contains("varying_components: text"));
+        assert!(consistency_summary.contains("stable_components: load_commands, relocations, symbols"));
         assert!(bundle
             .join("consistency")
             .join("cli_asm_reproducible")
@@ -3040,10 +3411,61 @@ end
             .join("artifacts")
             .join("run_00.s")
             .exists());
+        assert!(bundle
+            .join("consistency")
+            .join("cli_obj_reproducible")
+            .join("artifacts")
+            .join("run_00.o")
+            .exists());
 
         let _ = fs::remove_dir_all(bundle);
-        let _ = fs::remove_dir_all(std::env::temp_dir().join("afs_tests_consistency_bundle_issue"));
+        let _ = fs::remove_dir_all(
+            std::env::temp_dir().join("afs_tests_consistency_bundle_issue_asm"),
+        );
+        let _ = fs::remove_dir_all(
+            std::env::temp_dir().join("afs_tests_consistency_bundle_issue_obj"),
+        );
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn render_summary_includes_consistency_rollups() {
+        let mut summary = Summary::default();
+        summary.record_consistency(&[
+            ConsistencyObservation {
+                check: ConsistencyCheck::CliAsmReproducible,
+                summary: "repeat_count=3 unique_variants=3".into(),
+                repeat_count: Some(3),
+                unique_variant_count: Some(3),
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+            },
+            ConsistencyObservation {
+                check: ConsistencyCheck::CliObjReproducible,
+                summary:
+                    "repeat_count=3 unique_variants=2 varying_components=text stable_components=load_commands, relocations, symbols"
+                        .into(),
+                repeat_count: Some(3),
+                unique_variant_count: Some(2),
+                varying_components: vec!["text".into()],
+                stable_components: vec![
+                    "load_commands".into(),
+                    "relocations".into(),
+                    "symbols".into(),
+                ],
+            },
+        ]);
+
+        let rendered = render_summary(&summary);
+        assert!(rendered.contains("Consistency"));
+        assert!(rendered.contains("affected_checks: 2"));
+        assert!(rendered.contains("cells_with_issues: 2"));
+        assert!(rendered.contains(
+            "cli_asm_reproducible: 1 cells; repeat_count=3; unique_variants=3"
+        ));
+        assert!(rendered.contains(
+            "cli_obj_reproducible: 1 cells; repeat_count=3; unique_variants=2; varying=text; stable=load_commands, relocations, symbols"
+        ));
     }
 
     #[test]
