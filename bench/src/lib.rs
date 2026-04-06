@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use armfortas::driver::OptLevel;
+use armfortas::driver::{self, OptLevel};
 use armfortas::testing::{
     capture_from_path, CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage,
     RunCapture, Stage,
@@ -28,6 +28,7 @@ struct CaseSpec {
     requested: BTreeSet<Stage>,
     opt_levels: Vec<OptLevel>,
     reference_compilers: Vec<ReferenceCompiler>,
+    consistency_checks: Vec<ConsistencyCheck>,
     expectations: Vec<Expectation>,
     status_rules: Vec<StatusRule>,
 }
@@ -65,6 +66,26 @@ enum EffectiveStatus {
     Normal,
     Xfail(String),
     Future(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsistencyCheck {
+    CliObjVsSystemAs,
+}
+
+impl ConsistencyCheck {
+    fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "cli_obj_vs_system_as" | "cli-obj-vs-system-as" => Some(Self::CliObjVsSystemAs),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CliObjVsSystemAs => "cli_obj_vs_system_as",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +443,8 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
             builder.opt_levels = parse_opt_levels(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("differential =>") {
             builder.reference_compilers = parse_reference_compilers(rest, path, line_no)?;
+        } else if let Some(rest) = line.strip_prefix("consistency =>") {
+            builder.consistency_checks = parse_consistency_checks(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("expect-fail ") {
             builder
                 .expectations
@@ -471,6 +494,7 @@ struct CaseBuilder {
     requested: BTreeSet<Stage>,
     opt_levels: Vec<OptLevel>,
     reference_compilers: Vec<ReferenceCompiler>,
+    consistency_checks: Vec<ConsistencyCheck>,
     expectations: Vec<Expectation>,
     status_rules: Vec<StatusRule>,
 }
@@ -483,6 +507,7 @@ impl CaseBuilder {
             requested: BTreeSet::new(),
             opt_levels: Vec::new(),
             reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
             expectations: Vec::new(),
             status_rules: Vec::new(),
         }
@@ -514,6 +539,7 @@ impl CaseBuilder {
             requested,
             opt_levels,
             reference_compilers: self.reference_compilers,
+            consistency_checks: self.consistency_checks,
             expectations: self.expectations,
             status_rules: self.status_rules,
         })
@@ -601,6 +627,39 @@ fn parse_reference_compilers(
         ));
     }
     Ok(compilers.into_iter().collect())
+}
+
+fn parse_consistency_checks(
+    rest: &str,
+    path: &Path,
+    line_no: usize,
+) -> Result<Vec<ConsistencyCheck>, String> {
+    let mut checks = Vec::new();
+    for raw in rest.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let check = ConsistencyCheck::parse(name).ok_or_else(|| {
+            format!(
+                "{}:{}: unknown consistency check '{}'",
+                path.display(),
+                line_no,
+                name
+            )
+        })?;
+        if !checks.contains(&check) {
+            checks.push(check);
+        }
+    }
+    if checks.is_empty() {
+        return Err(format!(
+            "{}:{}: consistency check list is empty",
+            path.display(),
+            line_no
+        ));
+    }
+    Ok(checks)
 }
 
 fn parse_expectation(rest: &str, path: &Path, line_no: usize) -> Result<Expectation, String> {
@@ -935,6 +994,10 @@ fn execute_case_cell(
     if !case.reference_compilers.is_empty() {
         requested.insert(Stage::Run);
     }
+    if !case.consistency_checks.is_empty() {
+        requested.insert(Stage::Asm);
+        requested.insert(Stage::Obj);
+    }
 
     if config.verbose {
         let stage_list = requested
@@ -987,6 +1050,9 @@ fn execute_case_cell(
                 let mut execution = evaluate_positive_expectations(case, result);
                 if execution.is_ok() && !artifacts.references.is_empty() {
                     execution = compare_differential(result, &artifacts.references);
+                }
+                if execution.is_ok() && !case.consistency_checks.is_empty() {
+                    execution = run_consistency_checks(case, opt_level);
                 }
                 execution
             }
@@ -1401,6 +1467,111 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
     detail
 }
 
+fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for check in &case.consistency_checks {
+        let result = match check {
+            ConsistencyCheck::CliObjVsSystemAs => run_cli_obj_vs_system_as(&case.source, opt_level),
+        };
+        if let Err(detail) = result {
+            failures.push(format!(
+                "consistency check '{}' failed\n{}",
+                check.as_str(),
+                detail
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n\n"))
+    }
+}
+
+fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Result<(), String> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    fs::create_dir_all(&temp_root).map_err(|e| {
+        format!(
+            "cannot create consistency temp dir '{}': {}",
+            temp_root.display(),
+            e
+        )
+    })?;
+
+    let asm_path = temp_root.join("from_cli.s");
+    let asm_obj_path = temp_root.join("from_cli_asm.o");
+    let obj_path = temp_root.join("from_cli_obj.o");
+
+    let asm_command = compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path)
+        .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+
+    let as_args = vec![
+        "-o".to_string(),
+        asm_obj_path.display().to_string(),
+        asm_path.display().to_string(),
+    ];
+    let as_command = render_command("as", &as_args);
+    let as_output = Command::new("as")
+        .args([
+            "-o",
+            asm_obj_path.to_str().unwrap(),
+            asm_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| {
+            format!(
+                "{}\nartifacts kept at: {}\ncannot run assembler: {}",
+                as_command,
+                temp_root.display(),
+                e
+            )
+        })?;
+    if !as_output.status.success() {
+        let stderr = String::from_utf8_lossy(&as_output.stderr);
+        return Err(format!(
+            "{}\nartifacts kept at: {}\nassembler failed:\n{}",
+            as_command,
+            temp_root.display(),
+            stderr
+        ));
+    }
+
+    let obj_command = compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path)
+        .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+
+    let asm_snapshot = object_snapshot(&asm_obj_path).map_err(|detail| {
+        format!(
+            "{}\nartifacts kept at: {}\n{}",
+            as_command,
+            temp_root.display(),
+            detail
+        )
+    })?;
+    let obj_snapshot = object_snapshot(&obj_path).map_err(|detail| {
+        format!(
+            "{}\nartifacts kept at: {}\n{}",
+            obj_command,
+            temp_root.display(),
+            detail
+        )
+    })?;
+
+    if asm_snapshot != obj_snapshot {
+        return Err(format!(
+            "object snapshot mismatch between armfortas -S | as and armfortas -c\n{}\n{}\n{}\nartifacts kept at: {}\n{}",
+            asm_command,
+            as_command,
+            obj_command,
+            temp_root.display(),
+            describe_text_difference(&asm_snapshot, &obj_snapshot)
+        ));
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(())
+}
+
 fn run_reference_compilers(case: &CaseSpec, opt_level: OptLevel) -> Vec<ReferenceResult> {
     case.reference_compilers
         .iter()
@@ -1484,6 +1655,50 @@ fn source_uses_cpp(source: &Path) -> bool {
     fs::read_to_string(source)
         .map(|text| text.lines().any(|line| line.trim_start().starts_with('#')))
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverEmitMode {
+    Asm,
+    Obj,
+}
+
+fn compile_with_driver(
+    source: &Path,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+) -> Result<String, String> {
+    let command = render_armfortas_command(source, opt_level, mode, output);
+    let opts = driver::Options {
+        input: source.to_path_buf(),
+        output: Some(output.to_path_buf()),
+        emit_asm: matches!(mode, DriverEmitMode::Asm),
+        emit_obj: matches!(mode, DriverEmitMode::Obj),
+        emit_ir: false,
+        preprocess_only: false,
+        opt_level,
+    };
+
+    driver::compile(&opts).map_err(|detail| format!("{} failed:\n{}", command, detail))?;
+    Ok(command)
+}
+
+fn render_armfortas_command(
+    source: &Path,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+) -> String {
+    let mut args = vec![opt_level.as_flag().to_string()];
+    match mode {
+        DriverEmitMode::Asm => args.push("-S".to_string()),
+        DriverEmitMode::Obj => args.push("-c".to_string()),
+    }
+    args.push(source.display().to_string());
+    args.push("-o".to_string());
+    args.push(output.display().to_string());
+    render_command("armfortas", &args)
 }
 
 fn normalize_run_signature(run: &RunCapture) -> RunSignature {
@@ -1588,6 +1803,65 @@ fn format_run_capture(run: &RunCapture) -> String {
     )
 }
 
+fn object_snapshot(path: &Path) -> Result<String, String> {
+    let text = normalize_tool_output(&tool_output("otool", &["-t", path.to_str().unwrap()])?);
+    let load = normalize_tool_output(&tool_output("otool", &["-l", path.to_str().unwrap()])?);
+    let relocs = normalize_tool_output(&tool_output("otool", &["-rv", path.to_str().unwrap()])?);
+    let symbols = normalize_tool_output(&tool_output("nm", &["-m", path.to_str().unwrap()])?);
+
+    Ok(format!(
+        "== text ==\n{}\n\n== load_commands ==\n{}\n\n== relocations ==\n{}\n\n== symbols ==\n{}",
+        text, load, relocs, symbols
+    ))
+}
+
+fn tool_output(tool: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(tool)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run {}: {}", tool, e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "{} failed:\n{}",
+            tool,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn normalize_tool_output(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_end().ends_with(".o:"))
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn describe_text_difference(expected: &str, actual: &str) -> String {
+    let expected_lines: Vec<&str> = expected.lines().collect();
+    let actual_lines: Vec<&str> = actual.lines().collect();
+    let shared = expected_lines.len().min(actual_lines.len());
+
+    for index in 0..shared {
+        if expected_lines[index] != actual_lines[index] {
+            return format!(
+                "first differing line: {}\n-S | as: {}\n-c: {}",
+                index + 1,
+                expected_lines[index],
+                actual_lines[index]
+            );
+        }
+    }
+
+    format!(
+        "snapshot length differs\n-S | as lines: {}\n-c lines: {}",
+        expected_lines.len(),
+        actual_lines.len()
+    )
+}
+
 fn write_failure_bundle(
     suite: &SuiteSpec,
     case: &CaseSpec,
@@ -1621,15 +1895,25 @@ fn write_failure_bundle(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let consistency = if case.consistency_checks.is_empty() {
+        "none".to_string()
+    } else {
+        case.consistency_checks
+            .iter()
+            .map(ConsistencyCheck::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let metadata = format!(
-        "suite: {}\ncase: {}\noutcome: {:?}\nopt: {}\nsource: {}\nrequested_stages: {}\nreference_compilers: {}\n",
+        "suite: {}\ncase: {}\noutcome: {:?}\nopt: {}\nsource: {}\nrequested_stages: {}\nreference_compilers: {}\nconsistency_checks: {}\n",
         suite.name,
         case.name,
         outcome.kind,
         outcome.opt_level.as_str(),
         case.source.display(),
         stage_list,
-        refs
+        refs,
+        consistency
     );
     fs::write(bundle_root.join("metadata.txt"), metadata)
         .map_err(|e| format!("cannot write bundle metadata: {}", e))?;
@@ -1767,6 +2051,14 @@ fn next_report_temp_root(compiler: ReferenceCompiler, opt_level: OptLevel) -> Pa
     default_report_root().join(".tmp").join(format!(
         "{}_{}_{}",
         sanitize_component(compiler.as_str()),
+        opt_level.as_str().to_ascii_lowercase(),
+        next_report_suffix(opt_level)
+    ))
+}
+
+fn next_consistency_temp_root(opt_level: OptLevel) -> PathBuf {
+    default_report_root().join(".tmp").join(format!(
+        "consistency_{}_{}",
         opt_level.as_str().to_ascii_lowercase(),
         next_report_suffix(opt_level)
     ))
@@ -1966,6 +2258,32 @@ end
     }
 
     #[test]
+    fn parses_consistency_checks() {
+        let root = std::env::temp_dir().join("afs_tests_consistency_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "consistency/object"
+
+case "driver_paths"
+source "../../fixtures/backend/runtime_calls.f90"
+armfortas => asm, obj
+consistency => cli_obj_vs_system_as, cli-obj-vs-system-as
+expect obj contains "_main"
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root).unwrap();
+        let case = &suite.cases[0];
+        assert_eq!(
+            case.consistency_checks,
+            vec![ConsistencyCheck::CliObjVsSystemAs]
+        );
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
     fn parses_failure_expectation() {
         let root = std::env::temp_dir().join("afs_tests_failure_spec.afs");
         fs::write(
@@ -2048,6 +2366,7 @@ end
             requested: BTreeSet::from([Stage::Asm]),
             opt_levels: vec![OptLevel::O0],
             reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
             expectations: vec![Expectation::NotContains {
                 target: Target::Stage(Stage::Asm),
                 needle: "x18".into(),
@@ -2092,6 +2411,7 @@ end
             requested: BTreeSet::from([Stage::Ir, Stage::Run]),
             opt_levels: vec![OptLevel::O0],
             reference_compilers: vec![ReferenceCompiler::Gfortran],
+            consistency_checks: vec![ConsistencyCheck::CliObjVsSystemAs],
             expectations: Vec::new(),
             status_rules: Vec::new(),
         };
@@ -2188,6 +2508,14 @@ end
         ];
 
         assert!(compare_differential(&result, &refs).is_ok());
+    }
+
+    #[test]
+    fn consistency_diff_reports_first_mismatch() {
+        let detail = describe_text_difference("alpha\nbeta\n", "alpha\ngamma\n");
+        assert!(detail.contains("first differing line: 2"));
+        assert!(detail.contains("-S | as: beta"));
+        assert!(detail.contains("-c: gamma"));
     }
 
     #[test]
