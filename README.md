@@ -30,6 +30,9 @@ That means this repo already carries:
 - capture-vs-CLI triangulation coverage for both `asm` and `obj`, sampled over
   repeated CLI rebuilds so the bench can tell whether the library capture path
   itself stays aligned with driver output
+- capture-path reproducibility coverage for both `asm` and `obj`, so the bench
+  can prove whether `armfortas::testing` is stable on its own or is only
+  drifting relative to the CLI
 
 ## Layout
 
@@ -58,10 +61,11 @@ Next planned slice from this extraction point:
   current `xfail` consistency families into one rooted compiler issue
 - broader repeat-aware sampling once the current `repeat => 3` coverage has
   proven out as a practical default
-- deeper consistency coverage around library-capture reproducibility and other
-  adapter-local boundaries, now that CLI-vs-capture triangulation is in place
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
+- deeper consistency coverage around other adapter-local boundaries, now that
+  capture-path reproducibility and CLI-vs-capture triangulation are both in
+  place
 - report-surface follow-up beyond the current console/bundle rollups, once we
   want machine-readable or cross-run consistency summaries
 - sharper standalone boundaries between the generic bench and armfortas-local
