@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use armfortas::driver::OptLevel;
 use armfortas::testing::{
-    capture_from_path, CaptureRequest, CaptureResult, CapturedStage, RunCapture, Stage,
+    capture_from_path, CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage,
+    RunCapture, Stage,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -72,6 +73,8 @@ enum Expectation {
     Contains { target: Target, needle: String },
     Equals { target: Target, value: String },
     IntEquals { target: Target, value: i32 },
+    FailContains { stage: FailureStage, needle: String },
+    FailEquals { stage: FailureStage, value: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,7 +155,7 @@ struct RunConfig {
 struct ExecutionArtifacts {
     requested: BTreeSet<Stage>,
     armfortas: Option<CaptureResult>,
-    armfortas_error: Option<String>,
+    armfortas_failure: Option<CaptureFailure>,
     references: Vec<ReferenceResult>,
 }
 
@@ -418,6 +421,10 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
             builder.opt_levels = parse_opt_levels(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("differential =>") {
             builder.reference_compilers = parse_reference_compilers(rest, path, line_no)?;
+        } else if let Some(rest) = line.strip_prefix("expect-fail ") {
+            builder
+                .expectations
+                .push(parse_failure_expectation(rest, path, line_no)?);
         } else if let Some(rest) = line.strip_prefix("expect ") {
             builder
                 .expectations
@@ -631,6 +638,33 @@ fn parse_expectation(rest: &str, path: &Path, line_no: usize) -> Result<Expectat
     ))
 }
 
+fn parse_failure_expectation(
+    rest: &str,
+    path: &Path,
+    line_no: usize,
+) -> Result<Expectation, String> {
+    if let Some((target, value)) = rest.split_once(" contains ") {
+        return Ok(Expectation::FailContains {
+            stage: parse_failure_stage(target.trim(), path, line_no)?,
+            needle: parse_quoted(value.trim(), path, line_no)?,
+        });
+    }
+
+    if let Some((target, value)) = rest.split_once(" equals ") {
+        return Ok(Expectation::FailEquals {
+            stage: parse_failure_stage(target.trim(), path, line_no)?,
+            value: parse_quoted(value.trim(), path, line_no)?,
+        });
+    }
+
+    Err(format!(
+        "{}:{}: unsupported failure expectation '{}'",
+        path.display(),
+        line_no,
+        rest
+    ))
+}
+
 fn parse_status_rule(
     kind: StatusKind,
     rest: &str,
@@ -696,6 +730,17 @@ fn parse_target(raw: &str, path: &Path, line_no: usize) -> Result<Target, String
             Ok(Target::Stage(stage))
         }
     }
+}
+
+fn parse_failure_stage(raw: &str, path: &Path, line_no: usize) -> Result<FailureStage, String> {
+    FailureStage::parse(raw).ok_or_else(|| {
+        format!(
+            "{}:{}: unsupported failure stage '{}'",
+            path.display(),
+            line_no,
+            raw
+        )
+    })
 }
 
 fn parse_quoted(raw: &str, path: &Path, line_no: usize) -> Result<String, String> {
@@ -914,24 +959,48 @@ fn execute_case_cell(
     let mut artifacts = ExecutionArtifacts {
         requested,
         armfortas: None,
-        armfortas_error: None,
+        armfortas_failure: None,
         references,
     };
 
     match capture_from_path(&request) {
         Ok(result) => artifacts.armfortas = Some(result),
-        Err(err) => artifacts.armfortas_error = Some(err),
+        Err(failure) => artifacts.armfortas_failure = Some(failure),
     }
 
-    let execution = match &artifacts.armfortas {
-        Some(result) => {
-            let mut execution = evaluate_expectations(case, result);
+    let execution = match (&artifacts.armfortas, &artifacts.armfortas_failure) {
+        (Some(result), None) => {
+            if has_failure_expectation(case) {
+                Err(format!(
+                    "expected armfortas to fail ({}) but compilation succeeded",
+                    expected_failure_description(case)
+                ))
+            } else {
+                let mut execution = evaluate_positive_expectations(case, result);
+                if execution.is_ok() && !artifacts.references.is_empty() {
+                    execution = compare_differential(result, &artifacts.references);
+                }
+                execution
+            }
+        }
+        (None, Some(failure)) => {
+            let partial = failure.partial_result();
+            let mut execution = evaluate_positive_expectations(case, &partial);
+            if execution.is_ok() {
+                if has_failure_expectation(case) {
+                    execution = evaluate_failure_expectations(case, failure);
+                } else {
+                    execution = Err(compose_armfortas_failure_detail(&artifacts));
+                }
+            }
             if execution.is_ok() && !artifacts.references.is_empty() {
-                execution = compare_differential(result, &artifacts.references);
+                execution =
+                    Err("differential comparison requires a successful armfortas run".to_string());
             }
             execution
         }
-        None => Err(compose_armfortas_failure_detail(&artifacts)),
+        (Some(_), Some(_)) => Err("armfortas produced both a result and a failure".into()),
+        (None, None) => Err("armfortas produced neither a result nor a failure".into()),
     };
 
     let mut outcome = match (effective_status, execution) {
@@ -1030,10 +1099,11 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
                 requested.insert(Stage::Run);
             }
         },
+        Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
     }
 }
 
-fn evaluate_expectations(case: &CaseSpec, result: &CaptureResult) -> Result<(), String> {
+fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Result<(), String> {
     for expectation in &case.expectations {
         match expectation {
             Expectation::CheckComments(target) => {
@@ -1083,9 +1153,99 @@ fn evaluate_expectations(case: &CaseSpec, result: &CaptureResult) -> Result<(), 
                     ));
                 }
             }
+            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
         }
     }
     Ok(())
+}
+
+fn evaluate_failure_expectations(case: &CaseSpec, failure: &CaptureFailure) -> Result<(), String> {
+    let mut saw_failure_expectation = false;
+    for expectation in &case.expectations {
+        match expectation {
+            Expectation::FailContains { stage, needle } => {
+                saw_failure_expectation = true;
+                if failure.stage != *stage {
+                    return Err(format!(
+                        "expected failure stage {} but armfortas failed in {}\n{}",
+                        stage.as_str(),
+                        failure.stage.as_str(),
+                        failure.detail
+                    ));
+                }
+                if !failure.detail.contains(needle) {
+                    return Err(format!(
+                        "expected failure detail at {} to contain {:?}\nactual:\n{}",
+                        stage.as_str(),
+                        needle,
+                        failure.detail
+                    ));
+                }
+            }
+            Expectation::FailEquals { stage, value } => {
+                saw_failure_expectation = true;
+                if failure.stage != *stage {
+                    return Err(format!(
+                        "expected failure stage {} but armfortas failed in {}\n{}",
+                        stage.as_str(),
+                        failure.stage.as_str(),
+                        failure.detail
+                    ));
+                }
+                if failure.detail.trim_end() != value {
+                    return Err(format!(
+                        "expected failure detail at {} to equal {:?}\nactual:\n{}",
+                        stage.as_str(),
+                        value,
+                        failure.detail
+                    ));
+                }
+            }
+            Expectation::CheckComments(_)
+            | Expectation::Contains { .. }
+            | Expectation::Equals { .. }
+            | Expectation::IntEquals { .. } => {}
+        }
+    }
+
+    if !saw_failure_expectation {
+        return Err(format!(
+            "armfortas failed in {} but the case did not declare an expect-fail rule\n{}",
+            failure.stage.as_str(),
+            failure.detail
+        ));
+    }
+
+    Ok(())
+}
+
+fn has_failure_expectation(case: &CaseSpec) -> bool {
+    case.expectations.iter().any(|expectation| {
+        matches!(
+            expectation,
+            Expectation::FailContains { .. } | Expectation::FailEquals { .. }
+        )
+    })
+}
+
+fn expected_failure_description(case: &CaseSpec) -> String {
+    let mut items = Vec::new();
+    for expectation in &case.expectations {
+        match expectation {
+            Expectation::FailContains { stage, needle } => {
+                items.push(format!("{} contains {:?}", stage.as_str(), needle));
+            }
+            Expectation::FailEquals { stage, value } => {
+                items.push(format!("{} equals {:?}", stage.as_str(), value));
+            }
+            _ => {}
+        }
+    }
+    if items.is_empty() {
+        "declared failure".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 fn target_text<'a>(result: &'a CaptureResult, target: &Target) -> Result<&'a str, String> {
@@ -1202,8 +1362,12 @@ fn compare_differential(
 
 fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
     let mut detail = String::new();
-    if let Some(err) = &artifacts.armfortas_error {
-        detail.push_str(err);
+    if let Some(failure) = &artifacts.armfortas_failure {
+        detail.push_str(&format!(
+            "armfortas failed in {}\n{}",
+            failure.stage.as_str(),
+            failure.detail
+        ));
     } else {
         detail.push_str("armfortas failed without an error message");
     }
@@ -1441,9 +1605,13 @@ fn write_failure_bundle(
     if let Some(result) = &artifacts.armfortas {
         write_capture_result(&armfortas_root, result)?;
     }
-    if let Some(err) = &artifacts.armfortas_error {
-        fs::write(armfortas_root.join("error.txt"), err)
-            .map_err(|e| format!("cannot write armfortas error bundle: {}", e))?;
+    if let Some(failure) = &artifacts.armfortas_failure {
+        write_capture_result(&armfortas_root, &failure.partial_result())?;
+        fs::write(
+            armfortas_root.join("error.txt"),
+            format!("stage: {}\n{}\n", failure.stage.as_str(), failure.detail),
+        )
+        .map_err(|e| format!("cannot write armfortas error bundle: {}", e))?;
     }
 
     if !artifacts.references.is_empty() {
@@ -1718,6 +1886,29 @@ end
     }
 
     #[test]
+    fn parses_failure_expectation() {
+        let root = std::env::temp_dir().join("afs_tests_failure_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "frontend/parser"
+
+case "missing_then"
+source "../../fixtures/frontend/parser/missing_then.f90"
+armfortas => tokens
+expect tokens contains "if"
+expect-fail parser contains "expected"
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root).unwrap();
+        assert_eq!(suite.cases.len(), 1);
+        assert!(has_failure_expectation(&suite.cases[0]));
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
     fn check_matching_preserves_order() {
         let checks = vec![
             Check {
@@ -1764,12 +1955,14 @@ end
         );
         let artifacts = ExecutionArtifacts {
             requested: BTreeSet::from([Stage::Ir, Stage::Run]),
-            armfortas: Some(CaptureResult {
+            armfortas: None,
+            armfortas_failure: Some(CaptureFailure {
                 input: source.clone(),
                 opt_level: OptLevel::O0,
+                stage: FailureStage::Sema,
+                detail: "compiler failed".into(),
                 stages,
             }),
-            armfortas_error: Some("compiler failed".into()),
             references: vec![ReferenceResult {
                 compiler: ReferenceCompiler::Gfortran,
                 compile_command: "gfortran hello.f90 -o hello".into(),
@@ -1799,6 +1992,7 @@ end
         assert!(bundle.join("source.f90").exists());
         assert!(bundle.join("armfortas").join("ir.txt").exists());
         assert!(bundle.join("armfortas").join("run.stdout.txt").exists());
+        assert!(bundle.join("armfortas").join("error.txt").exists());
         assert!(bundle
             .join("references")
             .join("gfortran")
