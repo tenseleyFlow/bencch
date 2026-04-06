@@ -76,6 +76,8 @@ enum ConsistencyCheck {
     CliObjReproducible,
     CaptureAsmVsCliAsm,
     CaptureObjVsCliObj,
+    CaptureAsmReproducible,
+    CaptureObjReproducible,
 }
 
 impl ConsistencyCheck {
@@ -86,6 +88,12 @@ impl ConsistencyCheck {
             "cli_obj_reproducible" | "cli-obj-reproducible" => Some(Self::CliObjReproducible),
             "capture_asm_vs_cli_asm" | "capture-asm-vs-cli-asm" => Some(Self::CaptureAsmVsCliAsm),
             "capture_obj_vs_cli_obj" | "capture-obj-vs-cli-obj" => Some(Self::CaptureObjVsCliObj),
+            "capture_asm_reproducible" | "capture-asm-reproducible" => {
+                Some(Self::CaptureAsmReproducible)
+            }
+            "capture_obj_reproducible" | "capture-obj-reproducible" => {
+                Some(Self::CaptureObjReproducible)
+            }
             _ => None,
         }
     }
@@ -97,6 +105,8 @@ impl ConsistencyCheck {
             Self::CliObjReproducible => "cli_obj_reproducible",
             Self::CaptureAsmVsCliAsm => "capture_asm_vs_cli_asm",
             Self::CaptureObjVsCliObj => "capture_obj_vs_cli_obj",
+            Self::CaptureAsmReproducible => "capture_asm_reproducible",
+            Self::CaptureObjReproducible => "capture_obj_reproducible",
         }
     }
 }
@@ -1634,6 +1644,18 @@ fn run_consistency_checks(
                 case.repeat_count,
                 capture_result,
             ),
+            ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
+                &case.source,
+                opt_level,
+                case.repeat_count,
+                capture_result,
+            ),
+            ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
+                &case.source,
+                opt_level,
+                case.repeat_count,
+                capture_result,
+            ),
         };
         if let Some(issue) = issue {
             failures.push(issue);
@@ -2353,6 +2375,296 @@ fn run_capture_obj_vs_cli_obj(
     None
 }
 
+fn run_capture_asm_reproducible(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    capture_result: &CaptureResult,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureAsmReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let mut runs = Vec::new();
+    let command = render_capture_command(source, opt_level, Stage::Asm);
+    let initial_text = match capture_text_stage(capture_result, Stage::Asm) {
+        Ok(text) => text,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureAsmReproducible,
+                summary: "initial capture result did not include assembly text".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    if let Err(err) = fs::write(temp_root.join("capture_run_00.s"), initial_text) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureAsmReproducible,
+            summary: "could not write captured assembly artifact".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!("cannot write captured assembly artifact: {}", err),
+            temp_root,
+        });
+    }
+    runs.push(TextRun {
+        label: "capture run 1".into(),
+        command: command.clone(),
+        normalized: normalize_text_artifact(initial_text),
+    });
+
+    for index in 1..repeat_count {
+        let text = match capture_text_from_testing(source, opt_level, Stage::Asm) {
+            Ok(text) => text,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureAsmReproducible,
+                    summary: "armfortas::testing capture failed during asm reproducibility check"
+                        .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        if let Err(err) = fs::write(temp_root.join(format!("capture_run_{:02}.s", index)), &text) {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureAsmReproducible,
+                summary: "could not write captured assembly artifact".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!("cannot write captured assembly artifact: {}", err),
+                temp_root,
+            });
+        }
+        runs.push(TextRun {
+            label: format!("capture run {}", index + 1),
+            command: command.clone(),
+            normalized: normalize_text_artifact(&text),
+        });
+    }
+
+    let unique_variants = count_unique_strings(runs.iter().map(|run| run.normalized.as_str()));
+    if unique_variants > 1 {
+        let (left, right) =
+            first_distinct_text_pair(&runs).expect("unique variants > 1 implies a distinct pair");
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureAsmReproducible,
+            summary: format!("repeat_count={} unique_variants={}", repeat_count, unique_variants),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variants),
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "captured assembly is not reproducible across repeated armfortas::testing runs\nrepeat count: {}\nunique variants: {}\n{}\n{}\n{}",
+                repeat_count,
+                unique_variants,
+                left.command,
+                right.command,
+                describe_text_difference(&left.normalized, &right.normalized, &left.label, &right.label)
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
+fn run_capture_obj_reproducible(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    capture_result: &CaptureResult,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureObjReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let command = render_capture_command(source, opt_level, Stage::Obj);
+    let initial_text = match capture_text_stage(capture_result, Stage::Obj) {
+        Ok(text) => text,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureObjReproducible,
+                summary: "initial capture result did not include object snapshot text".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    let initial_snapshot = match parse_object_snapshot_text(initial_text) {
+        Ok(snapshot) => snapshot,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureObjReproducible,
+                summary: "captured object snapshot had an unexpected format".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    if let Err(err) = fs::write(temp_root.join("capture_run_00.obj.txt"), initial_text) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureObjReproducible,
+            summary: "could not write captured object snapshot artifact".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!("cannot write captured object snapshot artifact: {}", err),
+            temp_root,
+        });
+    }
+
+    let mut runs = vec![ObjectRun {
+        label: "capture run 1".into(),
+        command: command.clone(),
+        snapshot: initial_snapshot,
+    }];
+
+    for index in 1..repeat_count {
+        let text = match capture_text_from_testing(source, opt_level, Stage::Obj) {
+            Ok(text) => text,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureObjReproducible,
+                    summary: "armfortas::testing capture failed during obj reproducibility check"
+                        .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        if let Err(err) = fs::write(temp_root.join(format!("capture_run_{:02}.obj.txt", index)), &text)
+        {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureObjReproducible,
+                summary: "could not write captured object snapshot artifact".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!("cannot write captured object snapshot artifact: {}", err),
+                temp_root,
+            });
+        }
+        let snapshot = match parse_object_snapshot_text(&text) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureObjReproducible,
+                    summary: "captured object snapshot had an unexpected format".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        runs.push(ObjectRun {
+            label: format!("capture run {}", index + 1),
+            command: command.clone(),
+            snapshot,
+        });
+    }
+
+    let rendered = runs
+        .iter()
+        .map(|run| render_object_snapshot(&run.snapshot))
+        .collect::<Vec<_>>();
+    let unique_variants = count_unique_strings(rendered.iter().map(String::as_str));
+    if unique_variants > 1 {
+        let snapshots = runs.iter().map(|run| &run.snapshot).collect::<Vec<_>>();
+        let (left, right) =
+            first_distinct_object_pair(&runs).expect("unique variants > 1 implies a distinct pair");
+        let varying = varying_object_components(&snapshots);
+        let stable = stable_object_components(&snapshots);
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureObjReproducible,
+            summary: format!(
+                "repeat_count={} unique_variants={} varying_components={} stable_components={}",
+                repeat_count,
+                unique_variants,
+                join_or_none(&varying),
+                join_or_none(&stable)
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variants),
+            varying_components: varying.iter().map(|value| (*value).to_string()).collect(),
+            stable_components: stable.iter().map(|value| (*value).to_string()).collect(),
+            detail: format!(
+                "captured object snapshots are not reproducible across repeated armfortas::testing runs\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\n{}",
+                repeat_count,
+                unique_variants,
+                join_or_none(&varying),
+                join_or_none(&stable),
+                left.command,
+                right.command,
+                describe_object_difference(&left.snapshot, &right.snapshot, &left.label, &right.label)
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
 fn run_reference_compilers(case: &CaseSpec, opt_level: OptLevel) -> Vec<ReferenceResult> {
     case.reference_compilers
         .iter()
@@ -2489,6 +2801,17 @@ fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> S
         stage.as_str(),
         quote_arg(&source.display().to_string())
     )
+}
+
+fn capture_text_from_testing(source: &Path, opt_level: OptLevel, stage: Stage) -> Result<String, String> {
+    let command = render_capture_command(source, opt_level, stage);
+    let request = CaptureRequest {
+        input: source.to_path_buf(),
+        requested: BTreeSet::from([stage]),
+        opt_level,
+    };
+    let result = capture_from_path(&request).map_err(|failure| format!("{} failed:\n{}", command, failure))?;
+    capture_text_stage(&result, stage).map(str::to_string)
 }
 
 fn capture_text_stage<'a>(result: &'a CaptureResult, stage: Stage) -> Result<&'a str, String> {
@@ -3531,7 +3854,7 @@ case "driver_paths"
 source "../../fixtures/backend/runtime_calls.f90"
 armfortas => asm, obj
 repeat => 5
-consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible, capture_asm_vs_cli_asm, capture-obj-vs-cli-obj
+consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible, capture_asm_vs_cli_asm, capture-obj-vs-cli-obj, capture_asm_reproducible, capture-obj-reproducible
 expect obj contains "_main"
 end
 "#,
@@ -3548,6 +3871,8 @@ end
                 ConsistencyCheck::CliObjReproducible,
                 ConsistencyCheck::CaptureAsmVsCliAsm,
                 ConsistencyCheck::CaptureObjVsCliObj,
+                ConsistencyCheck::CaptureAsmReproducible,
+                ConsistencyCheck::CaptureObjReproducible,
             ]
         );
         assert_eq!(case.repeat_count, 5);
