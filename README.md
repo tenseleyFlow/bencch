@@ -27,6 +27,9 @@ That means this repo already carries:
   nondeterminism suites collapse into compact `repeat_count`/`unique_variants`
   and varying/stable-component summaries instead of only a wall of individual
   cell output
+- capture-vs-CLI triangulation coverage for both `asm` and `obj`, sampled over
+  repeated CLI rebuilds so the bench can tell whether the library capture path
+  itself stays aligned with driver output
 
 ## Layout
 
@@ -51,11 +54,12 @@ live sprint plans and audit notes should stay.
 
 Next planned slice from this extraction point:
 
-- deeper object/tool triangulation beyond the first `-S` vs `-c` check
 - nondeterminism-focused follow-up work so the bench can collapse several
   current `xfail` consistency families into one rooted compiler issue
 - broader repeat-aware sampling once the current `repeat => 3` coverage has
   proven out as a practical default
+- deeper consistency coverage around library-capture reproducibility and other
+  adapter-local boundaries, now that CLI-vs-capture triangulation is in place
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
 - report-surface follow-up beyond the current console/bundle rollups, once we
