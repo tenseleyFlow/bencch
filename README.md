@@ -14,6 +14,9 @@ That means this repo already carries:
 - expanded green differential coverage for runtime, I/O, and interop cases
 - explicit `-S` vs `-c` consistency coverage, with authored `xfail` cases for
   the cross-path object divergence that armfortas still shows today
+- explicit reproducibility coverage for repeated `-S` and `-c` runs, which now
+  shows the deeper issue is compile-to-compile nondeterminism in emitted text
+  and object bytes rather than just one driver-path mismatch
 
 ## Layout
 
@@ -39,6 +42,8 @@ live sprint plans and audit notes should stay.
 Next planned slice from this extraction point:
 
 - deeper object/tool triangulation beyond the first `-S` vs `-c` check
+- nondeterminism-focused follow-up work so the bench can collapse several
+  current `xfail` consistency families into one rooted compiler issue
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
 - sharper standalone boundaries between the generic bench and armfortas-local
