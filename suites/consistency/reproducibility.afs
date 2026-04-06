@@ -4,6 +4,7 @@ case "runtime_calls_cli_asm_reproducible"
 source "../../fixtures/backend/runtime_calls.f90"
 opts => all
 armfortas => asm
+repeat => 3
 consistency => cli_asm_reproducible
 xfail "repeated armfortas -S runs are not deterministic today"
 expect asm contains "bl _afs_write_string"
@@ -13,6 +14,7 @@ case "runtime_calls_cli_obj_reproducible"
 source "../../fixtures/backend/runtime_calls.f90"
 opts => all
 armfortas => obj
+repeat => 3
 consistency => cli_obj_reproducible
 xfail "repeated armfortas -c runs are not deterministic today"
 expect obj contains "(__TEXT,__text) external _backend_runtime_calls"
@@ -22,6 +24,7 @@ case "entry_main_cli_asm_reproducible"
 source "../../fixtures/backend/entry_main.f90"
 opts => all
 armfortas => asm
+repeat => 3
 consistency => cli_asm_reproducible
 xfail "repeated armfortas -S runs are not deterministic today"
 expect asm contains "_main:"
@@ -32,6 +35,7 @@ case "entry_main_cli_obj_reproducible"
 source "../../fixtures/backend/entry_main.f90"
 opts => all
 armfortas => obj
+repeat => 3
 consistency => cli_obj_reproducible
 xfail "repeated armfortas -c runs are not deterministic today"
 expect obj contains "(__TEXT,__text) external _main"
