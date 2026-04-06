@@ -74,6 +74,8 @@ enum ConsistencyCheck {
     CliObjVsSystemAs,
     CliAsmReproducible,
     CliObjReproducible,
+    CaptureAsmVsCliAsm,
+    CaptureObjVsCliObj,
 }
 
 impl ConsistencyCheck {
@@ -82,6 +84,8 @@ impl ConsistencyCheck {
             "cli_obj_vs_system_as" | "cli-obj-vs-system-as" => Some(Self::CliObjVsSystemAs),
             "cli_asm_reproducible" | "cli-asm-reproducible" => Some(Self::CliAsmReproducible),
             "cli_obj_reproducible" | "cli-obj-reproducible" => Some(Self::CliObjReproducible),
+            "capture_asm_vs_cli_asm" | "capture-asm-vs-cli-asm" => Some(Self::CaptureAsmVsCliAsm),
+            "capture_obj_vs_cli_obj" | "capture-obj-vs-cli-obj" => Some(Self::CaptureObjVsCliObj),
             _ => None,
         }
     }
@@ -91,6 +95,8 @@ impl ConsistencyCheck {
             Self::CliObjVsSystemAs => "cli_obj_vs_system_as",
             Self::CliAsmReproducible => "cli_asm_reproducible",
             Self::CliObjReproducible => "cli_obj_reproducible",
+            Self::CaptureAsmVsCliAsm => "capture_asm_vs_cli_asm",
+            Self::CaptureObjVsCliObj => "capture_obj_vs_cli_obj",
         }
     }
 }
@@ -1166,7 +1172,7 @@ fn execute_case_cell(
                     execution = compare_differential(result, &artifacts.references);
                 }
                 if execution.is_ok() && !case.consistency_checks.is_empty() {
-                    artifacts.consistency_issues = run_consistency_checks(case, opt_level);
+                    artifacts.consistency_issues = run_consistency_checks(case, opt_level, result);
                     if !artifacts.consistency_issues.is_empty() {
                         execution = Err(format_consistency_issues(&artifacts.consistency_issues));
                     }
@@ -1601,7 +1607,11 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
     detail
 }
 
-fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Vec<ConsistencyIssue> {
+fn run_consistency_checks(
+    case: &CaseSpec,
+    opt_level: OptLevel,
+    capture_result: &CaptureResult,
+) -> Vec<ConsistencyIssue> {
     let mut failures = Vec::new();
     for check in &case.consistency_checks {
         let issue = match check {
@@ -1612,6 +1622,18 @@ fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Vec<Consisten
             ConsistencyCheck::CliObjReproducible => {
                 run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count)
             }
+            ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
+                &case.source,
+                opt_level,
+                case.repeat_count,
+                capture_result,
+            ),
+            ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
+                &case.source,
+                opt_level,
+                case.repeat_count,
+                capture_result,
+            ),
         };
         if let Some(issue) = issue {
             failures.push(issue);
@@ -2004,6 +2026,333 @@ fn run_cli_obj_reproducible(
     None
 }
 
+fn run_capture_asm_vs_cli_asm(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    capture_result: &CaptureResult,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureAsmVsCliAsm,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let capture_command = render_capture_command(source, opt_level, Stage::Asm);
+    let capture_text = match capture_text_stage(capture_result, Stage::Asm) {
+        Ok(text) => text,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureAsmVsCliAsm,
+                summary: "capture result did not include assembly text".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    if let Err(err) = fs::write(temp_root.join("from_capture.s"), capture_text) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureAsmVsCliAsm,
+            summary: "could not write captured assembly artifact".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!("cannot write captured assembly artifact: {}", err),
+            temp_root,
+        });
+    }
+    let capture_normalized = normalize_text_artifact(capture_text);
+
+    let mut cli_runs = Vec::new();
+    let mut mismatch_indices = Vec::new();
+    for index in 0..repeat_count {
+        let asm_path = temp_root.join(format!("cli_run_{:02}.s", index));
+        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path) {
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureAsmVsCliAsm,
+                    summary: "armfortas -S failed during capture-vs-cli consistency check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let text = match read_text_artifact(&asm_path) {
+            Ok(text) => text,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureAsmVsCliAsm,
+                    summary: "could not read cli assembly artifact".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let normalized = normalize_text_artifact(&text);
+        if normalized != capture_normalized {
+            mismatch_indices.push(index);
+        }
+        cli_runs.push(TextRun {
+            label: format!("cli run {} (-S)", index + 1),
+            command,
+            normalized,
+        });
+    }
+
+    if !mismatch_indices.is_empty() {
+        let matching_runs = repeat_count.saturating_sub(mismatch_indices.len());
+        let unique_cli_variants =
+            count_unique_strings(cli_runs.iter().map(|run| run.normalized.as_str()));
+        let first_mismatch = &cli_runs[mismatch_indices[0]];
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureAsmVsCliAsm,
+            summary: format!(
+                "repeat_count={} matching_runs={} mismatching_runs={} unique_cli_variants={}",
+                repeat_count,
+                matching_runs,
+                mismatch_indices.len(),
+                unique_cli_variants
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_cli_variants),
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "captured assembly does not match repeated armfortas -S runs\nrepeat count: {}\nmatching runs: {}\nmismatching runs: {}\nunique cli variants: {}\n{}\n{}\n{}",
+                repeat_count,
+                matching_runs,
+                mismatch_indices.len(),
+                unique_cli_variants,
+                capture_command,
+                first_mismatch.command,
+                describe_text_difference(
+                    &capture_normalized,
+                    &first_mismatch.normalized,
+                    "capture asm",
+                    &first_mismatch.label
+                )
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
+fn run_capture_obj_vs_cli_obj(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    capture_result: &CaptureResult,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureObjVsCliObj,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let capture_command = render_capture_command(source, opt_level, Stage::Obj);
+    let capture_text = match capture_text_stage(capture_result, Stage::Obj) {
+        Ok(text) => text,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureObjVsCliObj,
+                summary: "capture result did not include object snapshot text".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    if let Err(err) = fs::write(temp_root.join("from_capture.obj.txt"), capture_text) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureObjVsCliObj,
+            summary: "could not write captured object snapshot artifact".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!("cannot write captured object snapshot artifact: {}", err),
+            temp_root,
+        });
+    }
+    let capture_snapshot = match parse_object_snapshot_text(capture_text) {
+        Ok(snapshot) => snapshot,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureObjVsCliObj,
+                summary: "captured object snapshot had an unexpected format".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+
+    let mut cli_runs = Vec::new();
+    let mut mismatch_indices = Vec::new();
+    for index in 0..repeat_count {
+        let obj_path = temp_root.join(format!("cli_run_{:02}.o", index));
+        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path) {
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureObjVsCliObj,
+                    summary: "armfortas -c failed during capture-vs-cli consistency check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let snapshot = match object_snapshot(&obj_path) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureObjVsCliObj,
+                    summary: "could not snapshot cli object artifact".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail: format!("{}\n{}", command, detail),
+                    temp_root,
+                })
+            }
+        };
+        if let Err(err) = fs::write(
+            temp_root.join(format!("cli_run_{:02}.obj.txt", index)),
+            render_object_snapshot(&snapshot),
+        ) {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureObjVsCliObj,
+                summary: "could not write cli object snapshot artifact".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!("cannot write cli object snapshot artifact: {}", err),
+                temp_root,
+            });
+        }
+        if snapshot != capture_snapshot {
+            mismatch_indices.push(index);
+        }
+        cli_runs.push(ObjectRun {
+            label: format!("cli run {} (-c)", index + 1),
+            command,
+            snapshot,
+        });
+    }
+
+    if !mismatch_indices.is_empty() {
+        let matching_runs = repeat_count.saturating_sub(mismatch_indices.len());
+        let rendered = cli_runs
+            .iter()
+            .map(|run| render_object_snapshot(&run.snapshot))
+            .collect::<Vec<_>>();
+        let unique_cli_variants = count_unique_strings(rendered.iter().map(String::as_str));
+        let mismatch_snapshots = mismatch_indices
+            .iter()
+            .map(|index| &cli_runs[*index].snapshot)
+            .collect::<Vec<_>>();
+        let mut summary_snapshots = vec![&capture_snapshot];
+        summary_snapshots.extend(mismatch_snapshots.iter().copied());
+        let varying = varying_object_components(&summary_snapshots)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let stable = stable_object_components(&summary_snapshots)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let first_mismatch = &cli_runs[mismatch_indices[0]];
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureObjVsCliObj,
+            summary: format!(
+                "repeat_count={} matching_runs={} mismatching_runs={} unique_cli_variants={} varying_components={} stable_components={}",
+                repeat_count,
+                matching_runs,
+                mismatch_indices.len(),
+                unique_cli_variants,
+                join_or_none_from_strings(&varying),
+                join_or_none_from_strings(&stable)
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_cli_variants),
+            varying_components: varying,
+            stable_components: stable,
+            detail: format!(
+                "captured object snapshot does not match repeated armfortas -c runs\nrepeat count: {}\nmatching runs: {}\nmismatching runs: {}\nunique cli variants: {}\n{}\n{}\n{}",
+                repeat_count,
+                matching_runs,
+                mismatch_indices.len(),
+                unique_cli_variants,
+                capture_command,
+                first_mismatch.command,
+                describe_object_difference(
+                    &capture_snapshot,
+                    &first_mismatch.snapshot,
+                    "capture obj",
+                    &first_mismatch.label
+                )
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
 fn run_reference_compilers(case: &CaseSpec, opt_level: OptLevel) -> Vec<ReferenceResult> {
     case.reference_compilers
         .iter()
@@ -2131,6 +2480,29 @@ fn render_armfortas_command(
     args.push("-o".to_string());
     args.push(output.display().to_string());
     render_command("armfortas", &args)
+}
+
+fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> String {
+    format!(
+        "armfortas::testing capture {} --stage {} {}",
+        opt_level.as_flag(),
+        stage.as_str(),
+        quote_arg(&source.display().to_string())
+    )
+}
+
+fn capture_text_stage<'a>(result: &'a CaptureResult, stage: Stage) -> Result<&'a str, String> {
+    match result.get(stage) {
+        Some(CapturedStage::Text(text)) => Ok(text),
+        Some(CapturedStage::Run(_)) => Err(format!(
+            "capture result contained non-text data for stage '{}'",
+            stage.as_str()
+        )),
+        None => Err(format!(
+            "capture result was missing requested stage '{}'",
+            stage.as_str()
+        )),
+    }
 }
 
 fn normalize_run_signature(run: &RunCapture) -> RunSignature {
@@ -2340,6 +2712,28 @@ fn render_object_snapshot(snapshot: &ObjectSnapshot) -> String {
         "== text ==\n{}\n\n== load_commands ==\n{}\n\n== relocations ==\n{}\n\n== symbols ==\n{}",
         snapshot.text, snapshot.load_commands, snapshot.relocations, snapshot.symbols
     )
+}
+
+fn parse_object_snapshot_text(text: &str) -> Result<ObjectSnapshot, String> {
+    let text = text.strip_prefix("== text ==\n").ok_or_else(|| {
+        "object snapshot was missing the '== text ==' header".to_string()
+    })?;
+    let (text, rest) = text
+        .split_once("\n\n== load_commands ==\n")
+        .ok_or_else(|| "object snapshot was missing the '== load_commands ==' section".to_string())?;
+    let (load_commands, rest) = rest
+        .split_once("\n\n== relocations ==\n")
+        .ok_or_else(|| "object snapshot was missing the '== relocations ==' section".to_string())?;
+    let (relocations, symbols) = rest
+        .split_once("\n\n== symbols ==\n")
+        .ok_or_else(|| "object snapshot was missing the '== symbols ==' section".to_string())?;
+
+    Ok(ObjectSnapshot {
+        text: text.to_string(),
+        load_commands: load_commands.to_string(),
+        relocations: relocations.to_string(),
+        symbols: symbols.to_string(),
+    })
 }
 
 fn describe_text_difference(
@@ -3137,7 +3531,7 @@ case "driver_paths"
 source "../../fixtures/backend/runtime_calls.f90"
 armfortas => asm, obj
 repeat => 5
-consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible
+consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible, capture_asm_vs_cli_asm, capture-obj-vs-cli-obj
 expect obj contains "_main"
 end
 "#,
@@ -3151,7 +3545,9 @@ end
             vec![
                 ConsistencyCheck::CliObjVsSystemAs,
                 ConsistencyCheck::CliAsmReproducible,
-                ConsistencyCheck::CliObjReproducible
+                ConsistencyCheck::CliObjReproducible,
+                ConsistencyCheck::CaptureAsmVsCliAsm,
+                ConsistencyCheck::CaptureObjVsCliObj,
             ]
         );
         assert_eq!(case.repeat_count, 5);
@@ -3554,6 +3950,20 @@ end
             stable_object_components(&snapshots),
             vec!["load_commands", "relocations", "symbols"]
         );
+    }
+
+    #[test]
+    fn parse_object_snapshot_text_round_trips_rendered_snapshot() {
+        let snapshot = ObjectSnapshot {
+            text: "text bytes".into(),
+            load_commands: "load commands".into(),
+            relocations: "relocations".into(),
+            symbols: "symbols".into(),
+        };
+
+        let rendered = render_object_snapshot(&snapshot);
+        let parsed = parse_object_snapshot_text(&rendered).unwrap();
+        assert_eq!(parsed, snapshot);
     }
 
     #[test]
