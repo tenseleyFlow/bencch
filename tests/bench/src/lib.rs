@@ -1818,6 +1818,18 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use armfortas::ir::inst::{BlockParam, Function, Inst, InstKind, Module, Terminator, ValueId};
+    use armfortas::ir::types::{FloatWidth, IntWidth, IrType};
+    use armfortas::ir::verify::verify_module;
+    use armfortas::lexer::{Position, Span};
+
+    fn dummy_span() -> Span {
+        Span {
+            file_id: 0,
+            start: Position { line: 1, col: 1 },
+            end: Position { line: 1, col: 1 },
+        }
+    }
 
     #[test]
     fn parses_suite_and_case() {
@@ -2001,5 +2013,96 @@ end
 
         let _ = fs::remove_dir_all(bundle);
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn verifier_regression_detects_integer_op_on_float_values() {
+        let mut module = Module::new("verify".into());
+        let mut func = Function::new("broken".into(), vec![], IrType::Void);
+        func.blocks[0].insts.push(Inst {
+            id: ValueId(0),
+            kind: InstKind::ConstFloat(1.0, FloatWidth::F32),
+            ty: IrType::Float(FloatWidth::F32),
+            span: dummy_span(),
+        });
+        func.blocks[0].insts.push(Inst {
+            id: ValueId(1),
+            kind: InstKind::ConstFloat(2.0, FloatWidth::F32),
+            ty: IrType::Float(FloatWidth::F32),
+            span: dummy_span(),
+        });
+        func.blocks[0].insts.push(Inst {
+            id: ValueId(2),
+            kind: InstKind::IAdd(ValueId(0), ValueId(1)),
+            ty: IrType::Int(IntWidth::I32),
+            span: dummy_span(),
+        });
+        func.blocks[0].terminator = Some(Terminator::Return(None));
+        module.add_function(func);
+
+        let errors = verify_module(&module);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.msg.contains("non-integer operand")),
+            "expected verifier error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn verifier_regression_detects_branch_argument_mismatch() {
+        let mut module = Module::new("verify".into());
+        let mut func = Function::new("broken_branch".into(), vec![], IrType::Void);
+        let target = func.create_block("target");
+        func.block_mut(target).params.push(BlockParam {
+            id: ValueId(0),
+            ty: IrType::Int(IntWidth::I32),
+        });
+        func.blocks[0].terminator = Some(Terminator::Branch(target, vec![]));
+        func.block_mut(target).terminator = Some(Terminator::Return(None));
+        module.add_function(func);
+
+        let errors = verify_module(&module);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.msg.contains("expected 1 args, got 0")),
+            "expected verifier error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn verifier_regression_detects_store_to_non_pointer() {
+        let mut module = Module::new("verify".into());
+        let mut func = Function::new("broken_store".into(), vec![], IrType::Void);
+        func.blocks[0].insts.push(Inst {
+            id: ValueId(0),
+            kind: InstKind::ConstInt(42, IntWidth::I32),
+            ty: IrType::Int(IntWidth::I32),
+            span: dummy_span(),
+        });
+        func.blocks[0].insts.push(Inst {
+            id: ValueId(1),
+            kind: InstKind::ConstInt(0, IntWidth::I32),
+            ty: IrType::Int(IntWidth::I32),
+            span: dummy_span(),
+        });
+        func.blocks[0].insts.push(Inst {
+            id: ValueId(2),
+            kind: InstKind::Store(ValueId(0), ValueId(1)),
+            ty: IrType::Void,
+            span: dummy_span(),
+        });
+        func.blocks[0].terminator = Some(Terminator::Return(None));
+        module.add_function(func);
+
+        let errors = verify_module(&module);
+        assert!(
+            errors.iter().any(|error| error.msg.contains("non-pointer")),
+            "expected verifier error, got: {:?}",
+            errors
+        );
     }
 }
