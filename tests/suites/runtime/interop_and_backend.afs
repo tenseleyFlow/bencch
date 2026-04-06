@@ -1,0 +1,13 @@
+suite "runtime/interop-and-backend"
+
+case "bind_c_value"
+source "../../../test_programs/bind_c_value.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "register_pressure"
+source "../../../test_programs/register_pressure.f90"
+armfortas => run
+expect run.stdout check-comments
+end

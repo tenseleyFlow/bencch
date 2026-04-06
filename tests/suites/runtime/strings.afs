@@ -1,0 +1,37 @@
+suite "runtime/strings"
+
+case "allocatable"
+source "../../../test_programs/allocatable.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "string_deferred"
+source "../../../test_programs/string_deferred.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "string_empty"
+source "../../../test_programs/string_empty.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "string_fixed"
+source "../../../test_programs/string_fixed.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "string_fixed_multi"
+source "../../../test_programs/string_fixed_multi.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "string_reassign_loop"
+source "../../../test_programs/string_reassign_loop.f90"
+armfortas => run
+expect run.stdout check-comments
+end

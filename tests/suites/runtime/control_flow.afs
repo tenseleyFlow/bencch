@@ -1,0 +1,94 @@
+suite "runtime/control-flow"
+
+case "hello"
+source "../../../test_programs/hello.f90"
+armfortas => ir, asm, obj, run
+expect ir contains "module main"
+expect asm contains ".globl _main"
+expect obj contains "_main"
+expect run.stdout check-comments
+end
+
+case "if_else"
+source "../../../test_programs/if_else.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "do_while"
+source "../../../test_programs/do_while.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "edge_loops"
+source "../../../test_programs/edge_loops.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "exit_cycle"
+source "../../../test_programs/exit_cycle.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "factorial"
+source "../../../test_programs/factorial.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "fibonacci"
+source "../../../test_programs/fibonacci.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "fizzbuzz"
+source "../../../test_programs/fizzbuzz.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "loop_sum"
+source "../../../test_programs/loop_sum.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "negative_step"
+source "../../../test_programs/negative_step.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "nested_loops"
+source "../../../test_programs/nested_loops.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "select_case"
+source "../../../test_programs/select_case.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "where_construct"
+source "../../../test_programs/where_construct.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "subroutine_call"
+source "../../../test_programs/subroutine_call.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "function_call"
+source "../../../test_programs/function_call.f90"
+armfortas => run
+expect run.stdout check-comments
+end

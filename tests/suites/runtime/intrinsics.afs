@@ -1,0 +1,31 @@
+suite "runtime/intrinsics"
+
+case "intrinsic_abs_max_min"
+source "../../../test_programs/intrinsic_abs_max_min.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "intrinsic_bits"
+source "../../../test_programs/intrinsic_bits.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "intrinsic_mod"
+source "../../../test_programs/intrinsic_mod.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "intrinsic_sqrt"
+source "../../../test_programs/intrinsic_sqrt.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "intrinsic_trig"
+source "../../../test_programs/intrinsic_trig.f90"
+armfortas => run
+expect run.stdout check-comments
+end

@@ -1,0 +1,19 @@
+suite "differential/smoke"
+
+case "hello_refs"
+source "../../../test_programs/hello.f90"
+opts => O0, O1
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "arithmetic_refs"
+source "../../../test_programs/arithmetic.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end

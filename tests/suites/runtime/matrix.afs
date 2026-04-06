@@ -1,0 +1,18 @@
+suite "runtime/matrix"
+
+case "hello_opt_matrix"
+source "../../../test_programs/hello.f90"
+opts => O0, O1, O2
+armfortas => ir, optir, run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "arithmetic_ofast_future"
+source "../../../test_programs/arithmetic.f90"
+opts => O0, Ofast
+armfortas => run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+future when Ofast because "Ofast is reserved for the wider optimization matrix once the optimizer pipeline is wired through this branch."
+end

@@ -1,0 +1,25 @@
+suite "runtime/arrays"
+
+case "array_assign"
+source "../../../test_programs/array_assign.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "array_intrinsics"
+source "../../../test_programs/array_intrinsics.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "array_real_intrinsics"
+source "../../../test_programs/array_real_intrinsics.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "forall_negative_step"
+source "../../../test_programs/forall_negative_step.f90"
+armfortas => run
+expect run.stdout check-comments
+end

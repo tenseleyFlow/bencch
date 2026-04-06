@@ -1,0 +1,49 @@
+suite "runtime/derived-types"
+
+case "derived_type_basic"
+source "../../../test_programs/derived_type_basic.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "derived_type_constructor"
+source "../../../test_programs/derived_type_constructor.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "derived_type_extends"
+source "../../../test_programs/derived_type_extends.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "derived_type_final"
+source "../../../test_programs/derived_type_final.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "derived_type_method"
+source "../../../test_programs/derived_type_method.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "derived_type_nested"
+source "../../../test_programs/derived_type_nested.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "derived_type_param"
+source "../../../test_programs/derived_type_param.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "select_type"
+source "../../../test_programs/select_type.f90"
+armfortas => run
+expect run.stdout check-comments
+end

@@ -1,0 +1,17 @@
+suite "frontend/stage-walk"
+
+case "stage_walk"
+source "../../fixtures/stage_walk.f90"
+armfortas => preprocess, tokens, ast, sema, ir, optir, mir, regalloc, asm, obj, run
+expect preprocess contains "Hello, Stage Walk!"
+expect tokens contains "identifier"
+expect ast contains "Program"
+expect sema contains "diagnostics: none"
+expect ir contains "module main"
+expect optir contains "module main"
+expect mir contains "MachineFunction"
+expect regalloc contains "PhysReg"
+expect asm contains ".globl _main"
+expect obj contains "_main"
+expect run.stdout contains "Hello, Stage Walk!"
+end

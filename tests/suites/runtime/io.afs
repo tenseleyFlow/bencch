@@ -1,0 +1,61 @@
+suite "runtime/io"
+
+case "file_io"
+source "../../../test_programs/file_io.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_advance_no"
+source "../../../test_programs/io_advance_no.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_file_roundtrip"
+source "../../../test_programs/io_file_roundtrip.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_flush_stress"
+source "../../../test_programs/io_flush_stress.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_format_int"
+source "../../../test_programs/io_format_int.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_formatted_write"
+source "../../../test_programs/io_formatted_write.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_multi_value_read"
+source "../../../test_programs/io_multi_value_read.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_rewind"
+source "../../../test_programs/io_rewind.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_write_to_unit"
+source "../../../test_programs/io_write_to_unit.f90"
+armfortas => run
+expect run.stdout check-comments
+end
+
+case "io_write_types"
+source "../../../test_programs/io_write_types.f90"
+armfortas => run
+expect run.stdout check-comments
+end
