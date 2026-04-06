@@ -186,6 +186,7 @@ struct ExecutionArtifacts {
     armfortas: Option<CaptureResult>,
     armfortas_failure: Option<CaptureFailure>,
     references: Vec<ReferenceResult>,
+    consistency_issues: Vec<ConsistencyIssue>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +198,14 @@ struct ReferenceResult {
     compile_stderr: String,
     run: Option<RunCapture>,
     run_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConsistencyIssue {
+    check: ConsistencyCheck,
+    summary: String,
+    detail: String,
+    temp_root: PathBuf,
 }
 
 impl ReferenceResult {
@@ -1065,6 +1074,7 @@ fn execute_case_cell(
         armfortas: None,
         armfortas_failure: None,
         references,
+        consistency_issues: Vec::new(),
     };
 
     match capture_from_path(&request) {
@@ -1085,7 +1095,10 @@ fn execute_case_cell(
                     execution = compare_differential(result, &artifacts.references);
                 }
                 if execution.is_ok() && !case.consistency_checks.is_empty() {
-                    execution = run_consistency_checks(case, opt_level);
+                    artifacts.consistency_issues = run_consistency_checks(case, opt_level);
+                    if !artifacts.consistency_issues.is_empty() {
+                        execution = Err(format_consistency_issues(&artifacts.consistency_issues));
+                    }
                 }
                 execution
             }
@@ -1161,7 +1174,10 @@ fn execute_case_cell(
         },
     };
 
-    if matches!(outcome.kind, OutcomeKind::Fail | OutcomeKind::Xpass) {
+    let should_bundle = matches!(outcome.kind, OutcomeKind::Fail | OutcomeKind::Xpass)
+        || (matches!(outcome.kind, OutcomeKind::Xfail) && !artifacts.consistency_issues.is_empty());
+
+    if should_bundle {
         match write_failure_bundle(suite, case, &outcome, &artifacts) {
             Ok(bundle) => outcome.bundle = Some(bundle),
             Err(err) => {
@@ -1176,6 +1192,8 @@ fn execute_case_cell(
             }
         }
     }
+
+    cleanup_consistency_issues(&artifacts.consistency_issues);
 
     Ok(outcome)
 }
@@ -1500,10 +1518,10 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
     detail
 }
 
-fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Result<(), String> {
+fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Vec<ConsistencyIssue> {
     let mut failures = Vec::new();
     for check in &case.consistency_checks {
-        let result = match check {
+        let issue = match check {
             ConsistencyCheck::CliObjVsSystemAs => run_cli_obj_vs_system_as(&case.source, opt_level),
             ConsistencyCheck::CliAsmReproducible => {
                 run_cli_asm_reproducible(&case.source, opt_level, case.repeat_count)
@@ -1512,38 +1530,63 @@ fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Result<(), St
                 run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count)
             }
         };
-        if let Err(detail) = result {
-            failures.push(format!(
-                "consistency check '{}' failed\n{}",
-                check.as_str(),
-                detail
-            ));
+        if let Some(issue) = issue {
+            failures.push(issue);
         }
     }
+    failures
+}
 
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("\n\n"))
+fn format_consistency_issues(issues: &[ConsistencyIssue]) -> String {
+    issues
+        .iter()
+        .map(|issue| {
+            format!(
+                "consistency check '{}' failed\n{}",
+                issue.check.as_str(),
+                issue.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn cleanup_consistency_issues(issues: &[ConsistencyIssue]) {
+    for issue in issues {
+        let _ = fs::remove_dir_all(&issue.temp_root);
     }
 }
 
-fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Result<(), String> {
+fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
-    fs::create_dir_all(&temp_root).map_err(|e| {
-        format!(
-            "cannot create consistency temp dir '{}': {}",
-            temp_root.display(),
-            e
-        )
-    })?;
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliObjVsSystemAs,
+            summary: "could not create consistency temp dir".into(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
 
     let asm_path = temp_root.join("from_cli.s");
     let asm_obj_path = temp_root.join("from_cli_asm.o");
     let obj_path = temp_root.join("from_cli_obj.o");
 
-    let asm_command = compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path)
-        .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+    let asm_command = match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path) {
+        Ok(command) => command,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjVsSystemAs,
+                summary: "armfortas -S failed during consistency check".into(),
+                detail,
+                temp_root,
+            })
+        }
+    };
 
     let as_args = vec![
         "-o".to_string(),
@@ -1551,86 +1594,135 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Result<(), St
         asm_path.display().to_string(),
     ];
     let as_command = render_command("as", &as_args);
-    let as_output = Command::new("as")
+    let as_output = match Command::new("as")
         .args([
             "-o",
             asm_obj_path.to_str().unwrap(),
             asm_path.to_str().unwrap(),
         ])
         .output()
-        .map_err(|e| {
-            format!(
-                "{}\nartifacts kept at: {}\ncannot run assembler: {}",
-                as_command,
-                temp_root.display(),
-                e
-            )
-        })?;
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjVsSystemAs,
+                summary: "system assembler invocation failed".into(),
+                detail: format!("{}\ncannot run assembler: {}", as_command, err),
+                temp_root,
+            })
+        }
+    };
     if !as_output.status.success() {
         let stderr = String::from_utf8_lossy(&as_output.stderr);
-        return Err(format!(
-            "{}\nartifacts kept at: {}\nassembler failed:\n{}",
-            as_command,
-            temp_root.display(),
-            stderr
-        ));
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliObjVsSystemAs,
+            summary: "system assembler rejected armfortas -S output".into(),
+            detail: format!("{}\nassembler failed:\n{}", as_command, stderr),
+            temp_root,
+        });
     }
 
-    let obj_command = compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path)
-        .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+    let obj_command = match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path) {
+        Ok(command) => command,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjVsSystemAs,
+                summary: "armfortas -c failed during consistency check".into(),
+                detail,
+                temp_root,
+            })
+        }
+    };
 
-    let asm_snapshot = object_snapshot(&asm_obj_path).map_err(|detail| {
-        format!(
-            "{}\nartifacts kept at: {}\n{}",
-            as_command,
-            temp_root.display(),
-            detail
-        )
-    })?;
-    let obj_snapshot = object_snapshot(&obj_path).map_err(|detail| {
-        format!(
-            "{}\nartifacts kept at: {}\n{}",
-            obj_command,
-            temp_root.display(),
-            detail
-        )
-    })?;
+    let asm_snapshot = match object_snapshot(&asm_obj_path) {
+        Ok(snapshot) => snapshot,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjVsSystemAs,
+                summary: "could not snapshot object assembled from -S output".into(),
+                detail: format!("{}\n{}", as_command, detail),
+                temp_root,
+            })
+        }
+    };
+    let obj_snapshot = match object_snapshot(&obj_path) {
+        Ok(snapshot) => snapshot,
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjVsSystemAs,
+                summary: "could not snapshot object from armfortas -c".into(),
+                detail: format!("{}\n{}", obj_command, detail),
+                temp_root,
+            })
+        }
+    };
 
     if asm_snapshot != obj_snapshot {
-        return Err(format!(
-            "object snapshot mismatch between armfortas -S | as and armfortas -c\n{}\n{}\n{}\nartifacts kept at: {}\n{}",
-            asm_command,
-            as_command,
-            obj_command,
-            temp_root.display(),
-            describe_object_difference(&asm_snapshot, &obj_snapshot, "-S | as", "-c")
-        ));
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliObjVsSystemAs,
+            summary: format!(
+                "{}",
+                join_or_none(&varying_object_components(&[&asm_snapshot, &obj_snapshot]))
+            ),
+            detail: format!(
+                "object snapshot mismatch between armfortas -S | as and armfortas -c\n{}\n{}\n{}\n{}",
+                asm_command,
+                as_command,
+                obj_command,
+                describe_object_difference(&asm_snapshot, &obj_snapshot, "-S | as", "-c")
+            ),
+            temp_root,
+        });
     }
 
     let _ = fs::remove_dir_all(&temp_root);
-    Ok(())
+    None
 }
 
 fn run_cli_asm_reproducible(
     source: &Path,
     opt_level: OptLevel,
     repeat_count: usize,
-) -> Result<(), String> {
+) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
-    fs::create_dir_all(&temp_root).map_err(|e| {
-        format!(
-            "cannot create consistency temp dir '{}': {}",
-            temp_root.display(),
-            e
-        )
-    })?;
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliAsmReproducible,
+            summary: "could not create consistency temp dir".into(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
 
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let asm_path = temp_root.join(format!("run_{:02}.s", index));
-        let command = compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path)
-            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
-        let text = read_text_artifact(&asm_path)?;
+        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path) {
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliAsmReproducible,
+                    summary: "armfortas -S failed during reproducibility check".into(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let text = match read_text_artifact(&asm_path) {
+            Ok(text) => text,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliAsmReproducible,
+                    summary: "could not read emitted assembly during reproducibility check".into(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
         runs.push(TextRun {
             label: format!("run {} (-S)", index + 1),
             command,
@@ -1642,48 +1734,69 @@ fn run_cli_asm_reproducible(
     if unique_variants > 1 {
         let (left, right) =
             first_distinct_text_pair(&runs).expect("unique variants > 1 implies a distinct pair");
-        return Err(format!(
-            "assembly output is not reproducible across repeated armfortas -S runs\nrepeat count: {}\nunique variants: {}\n{}\n{}\nartifacts kept at: {}\n{}",
-            repeat_count,
-            unique_variants,
-            left.command,
-            right.command,
-            temp_root.display(),
-            describe_text_difference(&left.normalized, &right.normalized, &left.label, &right.label)
-        ));
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliAsmReproducible,
+            summary: format!("repeat_count={} unique_variants={}", repeat_count, unique_variants),
+            detail: format!(
+                "assembly output is not reproducible across repeated armfortas -S runs\nrepeat count: {}\nunique variants: {}\n{}\n{}\n{}",
+                repeat_count,
+                unique_variants,
+                left.command,
+                right.command,
+                describe_text_difference(&left.normalized, &right.normalized, &left.label, &right.label)
+            ),
+            temp_root,
+        });
     }
 
     let _ = fs::remove_dir_all(&temp_root);
-    Ok(())
+    None
 }
 
 fn run_cli_obj_reproducible(
     source: &Path,
     opt_level: OptLevel,
     repeat_count: usize,
-) -> Result<(), String> {
+) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
-    fs::create_dir_all(&temp_root).map_err(|e| {
-        format!(
-            "cannot create consistency temp dir '{}': {}",
-            temp_root.display(),
-            e
-        )
-    })?;
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliObjReproducible,
+            summary: "could not create consistency temp dir".into(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
 
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let obj_path = temp_root.join(format!("run_{:02}.o", index));
-        let command = compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path)
-            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
-        let snapshot = object_snapshot(&obj_path).map_err(|detail| {
-            format!(
-                "{}\nartifacts kept at: {}\n{}",
-                command,
-                temp_root.display(),
-                detail
-            )
-        })?;
+        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path) {
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliObjReproducible,
+                    summary: "armfortas -c failed during reproducibility check".into(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let snapshot = match object_snapshot(&obj_path) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliObjReproducible,
+                    summary: "could not snapshot object during reproducibility check".into(),
+                    detail: format!("{}\n{}", command, detail),
+                    temp_root,
+                })
+            }
+        };
         runs.push(ObjectRun {
             label: format!("run {} (-c)", index + 1),
             command,
@@ -1700,21 +1813,30 @@ fn run_cli_obj_reproducible(
         let snapshots = runs.iter().map(|run| &run.snapshot).collect::<Vec<_>>();
         let (left, right) =
             first_distinct_object_pair(&runs).expect("unique variants > 1 implies a distinct pair");
-        return Err(format!(
-            "object output is not reproducible across repeated armfortas -c runs\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\nartifacts kept at: {}\n{}",
-            repeat_count,
-            unique_variants,
-            join_or_none(&varying_object_components(&snapshots)),
-            join_or_none(&stable_object_components(&snapshots)),
-            left.command,
-            right.command,
-            temp_root.display(),
-            describe_object_difference(&left.snapshot, &right.snapshot, &left.label, &right.label)
-        ));
+        let varying = join_or_none(&varying_object_components(&snapshots));
+        let stable = join_or_none(&stable_object_components(&snapshots));
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliObjReproducible,
+            summary: format!(
+                "repeat_count={} unique_variants={} varying_components={} stable_components={}",
+                repeat_count, unique_variants, varying, stable
+            ),
+            detail: format!(
+                "object output is not reproducible across repeated armfortas -c runs\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\n{}",
+                repeat_count,
+                unique_variants,
+                varying,
+                stable,
+                left.command,
+                right.command,
+                describe_object_difference(&left.snapshot, &right.snapshot, &left.label, &right.label)
+            ),
+            temp_root,
+        });
     }
 
     let _ = fs::remove_dir_all(&temp_root);
-    Ok(())
+    None
 }
 
 fn run_reference_compilers(case: &CaseSpec, opt_level: OptLevel) -> Vec<ReferenceResult> {
@@ -2282,6 +2404,10 @@ fn write_failure_bundle(
         }
     }
 
+    if !artifacts.consistency_issues.is_empty() {
+        write_consistency_bundle(&bundle_root, &artifacts.consistency_issues)?;
+    }
+
     Ok(bundle_root)
 }
 
@@ -2345,6 +2471,81 @@ fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<()
         fs::write(ref_root.join("run.error.txt"), err)
             .map_err(|e| format!("cannot write reference run error bundle: {}", e))?;
     }
+    Ok(())
+}
+
+fn write_consistency_bundle(root: &Path, issues: &[ConsistencyIssue]) -> Result<(), String> {
+    let consistency_root = root.join("consistency");
+    fs::create_dir_all(&consistency_root)
+        .map_err(|e| format!("cannot create consistency bundle dir: {}", e))?;
+
+    let summary = issues
+        .iter()
+        .map(|issue| {
+            format!(
+                "check: {}\nsummary: {}\nartifacts: {}\n",
+                issue.check.as_str(),
+                issue.summary,
+                sanitize_component(issue.check.as_str())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(consistency_root.join("summary.txt"), summary)
+        .map_err(|e| format!("cannot write consistency summary bundle: {}", e))?;
+
+    for issue in issues {
+        let issue_root = consistency_root.join(sanitize_component(issue.check.as_str()));
+        fs::create_dir_all(&issue_root)
+            .map_err(|e| format!("cannot create consistency issue bundle dir: {}", e))?;
+        fs::write(issue_root.join("summary.txt"), &issue.summary)
+            .map_err(|e| format!("cannot write consistency issue summary bundle: {}", e))?;
+        fs::write(issue_root.join("detail.txt"), &issue.detail)
+            .map_err(|e| format!("cannot write consistency issue detail bundle: {}", e))?;
+        let runs_root = issue_root.join("artifacts");
+        copy_directory_recursive(&issue.temp_root, &runs_root)?;
+    }
+
+    Ok(())
+}
+
+fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|e| {
+        format!(
+            "cannot create copied artifact dir '{}': {}",
+            destination.display(),
+            e
+        )
+    })?;
+
+    for entry in fs::read_dir(source)
+        .map_err(|e| format!("cannot read artifact dir '{}': {}", source.display(), e))?
+    {
+        let entry = entry
+            .map_err(|e| format!("cannot read artifact entry '{}': {}", source.display(), e))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "cannot read artifact type '{}': {}",
+                source_path.display(),
+                e
+            )
+        })?;
+        if file_type.is_dir() {
+            copy_directory_recursive(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path).map_err(|e| {
+                format!(
+                    "cannot copy artifact '{}' to '{}': {}",
+                    source_path.display(),
+                    destination_path.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
     Ok(())
 }
 
@@ -2789,6 +2990,17 @@ end
                 }),
                 run_error: None,
             }],
+            consistency_issues: {
+                let temp_root = std::env::temp_dir().join("afs_tests_consistency_bundle_issue");
+                fs::create_dir_all(&temp_root).unwrap();
+                fs::write(temp_root.join("run_00.s"), "mov x19, x0\n").unwrap();
+                vec![ConsistencyIssue {
+                    check: ConsistencyCheck::CliAsmReproducible,
+                    summary: "repeat_count=3 unique_variants=3".into(),
+                    detail: "assembly output is not reproducible".into(),
+                    temp_root,
+                }]
+            },
         };
         let outcome = Outcome {
             suite: suite.name.clone(),
@@ -2811,8 +3023,26 @@ end
             .join("gfortran")
             .join("run.stdout.txt")
             .exists());
+        assert!(bundle.join("consistency").join("summary.txt").exists());
+        assert!(bundle
+            .join("consistency")
+            .join("cli_asm_reproducible")
+            .join("summary.txt")
+            .exists());
+        assert!(bundle
+            .join("consistency")
+            .join("cli_asm_reproducible")
+            .join("detail.txt")
+            .exists());
+        assert!(bundle
+            .join("consistency")
+            .join("cli_asm_reproducible")
+            .join("artifacts")
+            .join("run_00.s")
+            .exists());
 
         let _ = fs::remove_dir_all(bundle);
+        let _ = fs::remove_dir_all(std::env::temp_dir().join("afs_tests_consistency_bundle_issue"));
         let _ = fs::remove_file(source);
     }
 
