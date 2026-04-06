@@ -3,7 +3,7 @@
 `bencch` is the extracted compiler-bench subtree that started life inside
 `armfortas`.
 
-Current extraction point: Sprint 6 differential corpus expansion.
+Current extraction point: Sprint 6 differential and object/tool hardening.
 
 That means this repo already carries:
 
@@ -12,6 +12,8 @@ That means this repo already carries:
 - known-gap `xfail` coverage for stable armfortas divergences
 - failure bundles and differential classification logic
 - expanded green differential coverage for runtime, I/O, and interop cases
+- explicit `-S` vs `-c` consistency coverage, with authored `xfail` cases for
+  the cross-path object divergence that armfortas still shows today
 
 ## Layout
 
@@ -36,7 +38,9 @@ live sprint plans and audit notes should stay.
 
 Next planned slice from this extraction point:
 
-- object/tool consistency checks (`-S` vs `-c`, system tools, relocation shape)
+- deeper object/tool triangulation beyond the first `-S` vs `-c` check
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
+- sharper standalone boundaries between the generic bench and armfortas-local
+  compiler adapter code
 - continued hardening toward a standalone public bench repo
