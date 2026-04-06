@@ -1414,12 +1414,7 @@ fn run_reference_case(
     opt_level: OptLevel,
     compiler: ReferenceCompiler,
 ) -> ReferenceResult {
-    let temp_root = default_report_root().join(".tmp").join(format!(
-        "{}_{}_{}",
-        sanitize_component(compiler.as_str()),
-        opt_level.as_str().to_ascii_lowercase(),
-        REPORT_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temp_root = next_report_temp_root(compiler, opt_level);
     let binary = temp_root.join("reference.out");
     let uses_cpp = source_uses_cpp(source);
 
@@ -1502,11 +1497,41 @@ fn normalize_run_signature(run: &RunCapture) -> RunSignature {
 fn normalize_behavior_text(text: &str) -> String {
     text.replace("\r\n", "\n")
         .lines()
-        .map(str::trim)
+        .map(normalize_behavior_line)
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
         .to_string()
+}
+
+fn normalize_behavior_line(line: &str) -> String {
+    line.split_whitespace()
+        .map(normalize_behavior_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_behavior_token(token: &str) -> String {
+    if let Some(number) = parse_numeric_token(token) {
+        format!("num:{:.6e}", number)
+    } else {
+        token.to_string()
+    }
+}
+
+fn parse_numeric_token(token: &str) -> Option<f64> {
+    if token.is_empty() {
+        return None;
+    }
+
+    let normalized = token
+        .trim()
+        .trim_end_matches(',')
+        .trim_end_matches(';')
+        .replace('D', "E")
+        .replace('d', "e");
+
+    normalized.parse::<f64>().ok()
 }
 
 fn format_reference_summary(references: &[ReferenceResult]) -> String {
@@ -1572,11 +1597,7 @@ fn write_failure_bundle(
     let bundle_root = default_report_root()
         .join(sanitize_component(&suite.name))
         .join(sanitize_component(&case.name))
-        .join(format!(
-            "{}-{:04}",
-            outcome.opt_level.as_str().to_ascii_lowercase(),
-            REPORT_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
+        .join(next_report_suffix(outcome.opt_level));
     fs::create_dir_all(&bundle_root).map_err(|e| {
         format!(
             "cannot create report bundle '{}': {}",
@@ -1740,6 +1761,24 @@ fn sanitize_component(value: &str) -> String {
         out = out.replace("__", "_");
     }
     out.trim_matches('_').to_string()
+}
+
+fn next_report_temp_root(compiler: ReferenceCompiler, opt_level: OptLevel) -> PathBuf {
+    default_report_root().join(".tmp").join(format!(
+        "{}_{}_{}",
+        sanitize_component(compiler.as_str()),
+        opt_level.as_str().to_ascii_lowercase(),
+        next_report_suffix(opt_level)
+    ))
+}
+
+fn next_report_suffix(opt_level: OptLevel) -> String {
+    format!(
+        "{}-{}-{:04}",
+        opt_level.as_str().to_ascii_lowercase(),
+        std::process::id(),
+        REPORT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn print_outcome(outcome: &Outcome) {
@@ -2138,6 +2177,17 @@ end
 
         let err = compare_differential(&result, &refs).unwrap_err();
         assert!(err.contains("classification: reference disagreement"));
+    }
+
+    #[test]
+    fn differential_tolerates_numeric_formatting_differences() {
+        let result = run_only_result("     5.5000000E0\n", "", 0);
+        let refs = vec![
+            reference_run(ReferenceCompiler::Gfortran, "   5.50000000\n", "", 0),
+            reference_run(ReferenceCompiler::FlangNew, " 5.5\n", "", 0),
+        ];
+
+        assert!(compare_differential(&result, &refs).is_ok());
     }
 
     #[test]
