@@ -1,0 +1,28 @@
+suite "differential/known_gaps"
+
+case "io_internal_refs"
+source "../../../test_programs/future/io_internal.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Internal I/O currently diverges from both reference compilers."
+end
+
+case "io_backspace_refs"
+source "../../../test_programs/future/io_backspace.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "BACKSPACE currently diverges from both reference compilers."
+end
+
+case "io_direct_access_refs"
+source "../../../test_programs/future/io_direct_access.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Direct-access file I/O currently diverges from both reference compilers."
+end

@@ -11,12 +11,12 @@ case "io_backspace"
 source "../../../test_programs/future/io_backspace.f90"
 armfortas => ir, run
 expect run.stdout check-comments
-future "BACKSPACE coverage is tracked as future bench surface until the runtime lands."
+xfail "BACKSPACE is modeled as a known failing runtime gap until file-positioning support lands."
 end
 
 case "io_direct_access"
 source "../../../test_programs/future/io_direct_access.f90"
 armfortas => ir, run
 expect run.stdout check-comments
-future "Direct-access file I/O is tracked as future work."
+xfail "Direct-access file I/O is modeled as a known failing gap until direct records are implemented."
 end
