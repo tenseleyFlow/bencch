@@ -17,6 +17,9 @@ That means this repo already carries:
 - explicit reproducibility coverage for repeated `-S` and `-c` runs, which now
   shows the deeper issue is compile-to-compile nondeterminism in emitted text
   and object bytes rather than just one driver-path mismatch
+- repeat-aware consistency diagnostics, so authored cases can say how many
+  rebuilds to sample and the runner can report unique-variant counts plus which
+  object components actually varied
 
 ## Layout
 
@@ -44,6 +47,8 @@ Next planned slice from this extraction point:
 - deeper object/tool triangulation beyond the first `-S` vs `-c` check
 - nondeterminism-focused follow-up work so the bench can collapse several
   current `xfail` consistency families into one rooted compiler issue
+- broader repeat-aware sampling once the current `repeat => 3` coverage has
+  proven out as a practical default
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
 - sharper standalone boundaries between the generic bench and armfortas-local
