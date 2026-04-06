@@ -71,12 +71,16 @@ enum EffectiveStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsistencyCheck {
     CliObjVsSystemAs,
+    CliAsmReproducible,
+    CliObjReproducible,
 }
 
 impl ConsistencyCheck {
     fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "cli_obj_vs_system_as" | "cli-obj-vs-system-as" => Some(Self::CliObjVsSystemAs),
+            "cli_asm_reproducible" | "cli-asm-reproducible" => Some(Self::CliAsmReproducible),
+            "cli_obj_reproducible" | "cli-obj-reproducible" => Some(Self::CliObjReproducible),
             _ => None,
         }
     }
@@ -84,6 +88,8 @@ impl ConsistencyCheck {
     fn as_str(&self) -> &'static str {
         match self {
             Self::CliObjVsSystemAs => "cli_obj_vs_system_as",
+            Self::CliAsmReproducible => "cli_asm_reproducible",
+            Self::CliObjReproducible => "cli_obj_reproducible",
         }
     }
 }
@@ -1472,6 +1478,12 @@ fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Result<(), St
     for check in &case.consistency_checks {
         let result = match check {
             ConsistencyCheck::CliObjVsSystemAs => run_cli_obj_vs_system_as(&case.source, opt_level),
+            ConsistencyCheck::CliAsmReproducible => {
+                run_cli_asm_reproducible(&case.source, opt_level)
+            }
+            ConsistencyCheck::CliObjReproducible => {
+                run_cli_obj_reproducible(&case.source, opt_level)
+            }
         };
         if let Err(detail) = result {
             failures.push(format!(
@@ -1564,7 +1576,97 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Result<(), St
             as_command,
             obj_command,
             temp_root.display(),
-            describe_text_difference(&asm_snapshot, &obj_snapshot)
+            describe_object_difference(&asm_snapshot, &obj_snapshot, "-S | as", "-c")
+        ));
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(())
+}
+
+fn run_cli_asm_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), String> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    fs::create_dir_all(&temp_root).map_err(|e| {
+        format!(
+            "cannot create consistency temp dir '{}': {}",
+            temp_root.display(),
+            e
+        )
+    })?;
+
+    let first_asm_path = temp_root.join("first.s");
+    let second_asm_path = temp_root.join("second.s");
+
+    let first_command =
+        compile_with_driver(source, opt_level, DriverEmitMode::Asm, &first_asm_path)
+            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+    let second_command =
+        compile_with_driver(source, opt_level, DriverEmitMode::Asm, &second_asm_path)
+            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+
+    let first_text = read_text_artifact(&first_asm_path)?;
+    let second_text = read_text_artifact(&second_asm_path)?;
+    let first_norm = normalize_text_artifact(&first_text);
+    let second_norm = normalize_text_artifact(&second_text);
+
+    if first_norm != second_norm {
+        return Err(format!(
+            "assembly output is not reproducible across repeated armfortas -S runs\n{}\n{}\nartifacts kept at: {}\n{}",
+            first_command,
+            second_command,
+            temp_root.display(),
+            describe_text_difference(&first_norm, &second_norm, "first -S", "second -S")
+        ));
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(())
+}
+
+fn run_cli_obj_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), String> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    fs::create_dir_all(&temp_root).map_err(|e| {
+        format!(
+            "cannot create consistency temp dir '{}': {}",
+            temp_root.display(),
+            e
+        )
+    })?;
+
+    let first_obj_path = temp_root.join("first.o");
+    let second_obj_path = temp_root.join("second.o");
+
+    let first_command =
+        compile_with_driver(source, opt_level, DriverEmitMode::Obj, &first_obj_path)
+            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+    let second_command =
+        compile_with_driver(source, opt_level, DriverEmitMode::Obj, &second_obj_path)
+            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+
+    let first_snapshot = object_snapshot(&first_obj_path).map_err(|detail| {
+        format!(
+            "{}\nartifacts kept at: {}\n{}",
+            first_command,
+            temp_root.display(),
+            detail
+        )
+    })?;
+    let second_snapshot = object_snapshot(&second_obj_path).map_err(|detail| {
+        format!(
+            "{}\nartifacts kept at: {}\n{}",
+            second_command,
+            temp_root.display(),
+            detail
+        )
+    })?;
+
+    if first_snapshot != second_snapshot {
+        return Err(format!(
+            "object output is not reproducible across repeated armfortas -c runs\n{}\n{}\nartifacts kept at: {}\n{}",
+            first_command,
+            second_command,
+            temp_root.display(),
+            describe_object_difference(&first_snapshot, &second_snapshot, "first -c", "second -c")
         ));
     }
 
@@ -1803,16 +1905,28 @@ fn format_run_capture(run: &RunCapture) -> String {
     )
 }
 
-fn object_snapshot(path: &Path) -> Result<String, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObjectSnapshot {
+    text: String,
+    load_commands: String,
+    relocations: String,
+    symbols: String,
+}
+
+fn object_snapshot(path: &Path) -> Result<ObjectSnapshot, String> {
     let text = normalize_tool_output(&tool_output("otool", &["-t", path.to_str().unwrap()])?);
-    let load = normalize_tool_output(&tool_output("otool", &["-l", path.to_str().unwrap()])?);
-    let relocs = normalize_tool_output(&tool_output("otool", &["-rv", path.to_str().unwrap()])?);
+    let load_commands =
+        normalize_tool_output(&tool_output("otool", &["-l", path.to_str().unwrap()])?);
+    let relocations =
+        normalize_tool_output(&tool_output("otool", &["-rv", path.to_str().unwrap()])?);
     let symbols = normalize_tool_output(&tool_output("nm", &["-m", path.to_str().unwrap()])?);
 
-    Ok(format!(
-        "== text ==\n{}\n\n== load_commands ==\n{}\n\n== relocations ==\n{}\n\n== symbols ==\n{}",
-        text, load, relocs, symbols
-    ))
+    Ok(ObjectSnapshot {
+        text,
+        load_commands,
+        relocations,
+        symbols,
+    })
 }
 
 fn tool_output(tool: &str, args: &[&str]) -> Result<String, String> {
@@ -1839,7 +1953,24 @@ fn normalize_tool_output(text: &str) -> String {
         .join("\n")
 }
 
-fn describe_text_difference(expected: &str, actual: &str) -> String {
+fn read_text_artifact(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {}", path.display(), e))
+}
+
+fn normalize_text_artifact(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn describe_text_difference(
+    expected: &str,
+    actual: &str,
+    left_label: &str,
+    right_label: &str,
+) -> String {
     let expected_lines: Vec<&str> = expected.lines().collect();
     let actual_lines: Vec<&str> = actual.lines().collect();
     let shared = expected_lines.len().min(actual_lines.len());
@@ -1847,18 +1978,65 @@ fn describe_text_difference(expected: &str, actual: &str) -> String {
     for index in 0..shared {
         if expected_lines[index] != actual_lines[index] {
             return format!(
-                "first differing line: {}\n-S | as: {}\n-c: {}",
+                "first differing line: {}\n{}: {}\n{}: {}",
                 index + 1,
+                left_label,
                 expected_lines[index],
+                right_label,
                 actual_lines[index]
             );
         }
     }
 
     format!(
-        "snapshot length differs\n-S | as lines: {}\n-c lines: {}",
+        "snapshot length differs\n{} lines: {}\n{} lines: {}",
+        left_label,
         expected_lines.len(),
+        right_label,
         actual_lines.len()
+    )
+}
+
+fn describe_object_difference(
+    expected: &ObjectSnapshot,
+    actual: &ObjectSnapshot,
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    let mut differing = Vec::new();
+    if expected.text != actual.text {
+        differing.push(("text", &expected.text, &actual.text));
+    }
+    if expected.load_commands != actual.load_commands {
+        differing.push((
+            "load_commands",
+            &expected.load_commands,
+            &actual.load_commands,
+        ));
+    }
+    if expected.relocations != actual.relocations {
+        differing.push(("relocations", &expected.relocations, &actual.relocations));
+    }
+    if expected.symbols != actual.symbols {
+        differing.push(("symbols", &expected.symbols, &actual.symbols));
+    }
+
+    if differing.is_empty() {
+        return "object snapshots matched".to_string();
+    }
+
+    let component_list = differing
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (first_name, first_expected, first_actual) = differing[0];
+
+    format!(
+        "differing object components: {}\n{}\n{}",
+        component_list,
+        format!("first differing component: {}", first_name),
+        describe_text_difference(first_expected, first_actual, left_label, right_label)
     )
 }
 
@@ -2267,7 +2445,7 @@ end
 case "driver_paths"
 source "../../fixtures/backend/runtime_calls.f90"
 armfortas => asm, obj
-consistency => cli_obj_vs_system_as, cli-obj-vs-system-as
+consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible
 expect obj contains "_main"
 end
 "#,
@@ -2278,7 +2456,11 @@ end
         let case = &suite.cases[0];
         assert_eq!(
             case.consistency_checks,
-            vec![ConsistencyCheck::CliObjVsSystemAs]
+            vec![
+                ConsistencyCheck::CliObjVsSystemAs,
+                ConsistencyCheck::CliAsmReproducible,
+                ConsistencyCheck::CliObjReproducible
+            ]
         );
         let _ = fs::remove_file(&root);
     }
@@ -2512,10 +2694,32 @@ end
 
     #[test]
     fn consistency_diff_reports_first_mismatch() {
-        let detail = describe_text_difference("alpha\nbeta\n", "alpha\ngamma\n");
+        let detail = describe_text_difference("alpha\nbeta\n", "alpha\ngamma\n", "left", "right");
         assert!(detail.contains("first differing line: 2"));
-        assert!(detail.contains("-S | as: beta"));
-        assert!(detail.contains("-c: gamma"));
+        assert!(detail.contains("left: beta"));
+        assert!(detail.contains("right: gamma"));
+    }
+
+    #[test]
+    fn object_diff_reports_changed_components() {
+        let expected = ObjectSnapshot {
+            text: "alpha\nbeta\n".into(),
+            load_commands: "same".into(),
+            relocations: "same".into(),
+            symbols: "same".into(),
+        };
+        let actual = ObjectSnapshot {
+            text: "alpha\ngamma\n".into(),
+            load_commands: "same".into(),
+            relocations: "same".into(),
+            symbols: "same".into(),
+        };
+
+        let detail = describe_object_difference(&expected, &actual, "first -c", "second -c");
+        assert!(detail.contains("differing object components: text"));
+        assert!(detail.contains("first differing component: text"));
+        assert!(detail.contains("first -c: beta"));
+        assert!(detail.contains("second -c: gamma"));
     }
 
     #[test]
