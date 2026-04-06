@@ -1,0 +1,19 @@
+suite "backend/mir"
+
+case "runtime_calls_lower_to_machine_ir"
+source "../../fixtures/backend/runtime_calls.f90"
+armfortas => mir
+expect mir contains "function backend_runtime_calls:"
+expect mir contains "stppre x29, x30, sp"
+expect mir contains "bl extern afs_write_string"
+expect mir contains "constpool[0]"
+expect mir contains "bytes \"backend runtime\""
+end
+
+case "entry_main_stays_named_main"
+source "../../fixtures/backend/entry_main.f90"
+armfortas => mir
+expect mir contains "function main:"
+expect mir contains "ret"
+expect mir contains "const_pool: none"
+end

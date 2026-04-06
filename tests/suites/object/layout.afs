@@ -1,0 +1,20 @@
+suite "object/layout"
+
+case "runtime_calls_object_snapshot"
+source "../../fixtures/backend/runtime_calls.f90"
+armfortas => obj
+expect obj contains "== relocations =="
+expect obj contains "BR26    False     _afs_write_string"
+expect obj contains "PAGE21  False     __backend_runtime_calls_cp0"
+expect obj contains "(__DATA,__const) non-external __backend_runtime_calls_cp0"
+expect obj contains "(__TEXT,__text) external _backend_runtime_calls"
+expect obj contains "(__TEXT,__text) external _main"
+end
+
+case "entry_main_object_has_single_entry_symbol"
+source "../../fixtures/backend/entry_main.f90"
+armfortas => obj
+expect obj contains "(__TEXT,__text) external _main"
+expect obj not-contains "_afs_program_init"
+expect obj not-contains "_afs_program_finalize"
+end

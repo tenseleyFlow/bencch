@@ -1,0 +1,11 @@
+suite "backend/regalloc"
+
+case "callee_saves_show_up_after_allocation"
+source "../../fixtures/backend/runtime_calls.f90"
+armfortas => regalloc
+expect regalloc contains "function backend_runtime_calls:"
+expect regalloc contains "strimm x19, x29, #-16"
+expect regalloc contains "ldrimm x19, x29, #-16"
+expect regalloc contains "bl extern afs_write_string"
+expect regalloc not-contains "x18"
+end

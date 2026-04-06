@@ -1,0 +1,22 @@
+suite "backend/asm"
+
+case "runtime_wrapper_and_calls"
+source "../../fixtures/backend/runtime_calls.f90"
+armfortas => asm
+expect asm contains ".globl _backend_runtime_calls"
+expect asm contains "bl _afs_write_string"
+expect asm contains ".section __DATA,__const"
+expect asm contains ".globl _main"
+expect asm contains "bl _afs_program_init"
+expect asm contains "bl _backend_runtime_calls"
+expect asm not-contains "x18"
+end
+
+case "entry_main_avoids_duplicate_wrapper"
+source "../../fixtures/backend/entry_main.f90"
+armfortas => asm
+expect asm contains ".globl _main"
+expect asm contains "_main:"
+expect asm not-contains "bl _afs_program_init"
+expect asm not-contains "bl _afs_program_finalize"
+end

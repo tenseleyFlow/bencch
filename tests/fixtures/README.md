@@ -12,3 +12,7 @@ subdirectories for `preprocess`, `lexer`, `parser`, and `sema`.
 
 IR and optimizer suites currently lean on the shared `test_programs/` corpus
 plus a few focused bench fixtures while the middle-end coverage grows.
+
+Sprint 5 adds `tests/fixtures/backend/` for backend-and-object-facing programs
+that exercise machine IR, register allocation, assembly emission, wrapper
+generation, and Mach-O snapshot assertions.
