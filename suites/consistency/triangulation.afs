@@ -1,0 +1,43 @@
+suite "consistency/triangulation"
+
+case "runtime_calls_capture_asm_matches_cli"
+source "../../fixtures/backend/runtime_calls.f90"
+opts => all
+armfortas => asm
+repeat => 3
+consistency => capture_asm_vs_cli_asm
+xfail "captured assembly and repeated armfortas -S runs do not stay aligned today"
+expect asm contains "bl _afs_write_string"
+end
+
+case "runtime_calls_capture_obj_matches_cli"
+source "../../fixtures/backend/runtime_calls.f90"
+opts => all
+armfortas => obj
+repeat => 3
+consistency => capture_obj_vs_cli_obj
+xfail "captured object snapshots and repeated armfortas -c runs do not stay aligned today"
+expect obj contains "(__TEXT,__text) external _backend_runtime_calls"
+end
+
+case "entry_main_capture_asm_matches_cli"
+source "../../fixtures/backend/entry_main.f90"
+opts => all
+armfortas => asm
+repeat => 3
+consistency => capture_asm_vs_cli_asm
+xfail "captured assembly and repeated armfortas -S runs do not stay aligned today"
+expect asm contains "_main:"
+expect asm not-contains "bl _afs_program_init"
+end
+
+case "entry_main_capture_obj_matches_cli"
+source "../../fixtures/backend/entry_main.f90"
+opts => all
+armfortas => obj
+repeat => 3
+consistency => capture_obj_vs_cli_obj
+xfail "captured object snapshots and repeated armfortas -c runs do not stay aligned today"
+expect obj contains "(__TEXT,__text) external _main"
+expect obj not-contains "_afs_program_init"
+end
