@@ -71,6 +71,7 @@ enum EffectiveStatus {
 enum Expectation {
     CheckComments(Target),
     Contains { target: Target, needle: String },
+    NotContains { target: Target, needle: String },
     Equals { target: Target, value: String },
     IntEquals { target: Target, value: i32 },
     FailContains { stage: FailureStage, needle: String },
@@ -611,6 +612,13 @@ fn parse_expectation(rest: &str, path: &Path, line_no: usize) -> Result<Expectat
         )?));
     }
 
+    if let Some((target, value)) = rest.split_once(" not-contains ") {
+        return Ok(Expectation::NotContains {
+            target: parse_target(target.trim(), path, line_no)?,
+            needle: parse_quoted(value.trim(), path, line_no)?,
+        });
+    }
+
     if let Some((target, value)) = rest.split_once(" contains ") {
         return Ok(Expectation::Contains {
             target: parse_target(target.trim(), path, line_no)?,
@@ -1090,6 +1098,7 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
     match expectation {
         Expectation::CheckComments(target)
         | Expectation::Contains { target, .. }
+        | Expectation::NotContains { target, .. }
         | Expectation::Equals { target, .. }
         | Expectation::IntEquals { target, .. } => match target {
             Target::Stage(stage) => {
@@ -1125,6 +1134,17 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 if !text.contains(needle) {
                     return Err(format!(
                         "expected {} to contain {:?}\nactual:\n{}",
+                        target_name(*target),
+                        needle,
+                        text
+                    ));
+                }
+            }
+            Expectation::NotContains { target, needle } => {
+                let text = target_text(result, target)?;
+                if text.contains(needle) {
+                    return Err(format!(
+                        "expected {} to not contain {:?}\nactual:\n{}",
                         target_name(*target),
                         needle,
                         text
@@ -1203,6 +1223,7 @@ fn evaluate_failure_expectations(case: &CaseSpec, failure: &CaptureFailure) -> R
             }
             Expectation::CheckComments(_)
             | Expectation::Contains { .. }
+            | Expectation::NotContains { .. }
             | Expectation::Equals { .. }
             | Expectation::IntEquals { .. } => {}
         }
@@ -1843,6 +1864,7 @@ source "../../../test_programs/hello.f90"
 armfortas => run, ir
 expect run.stdout check-comments
 expect ir contains "module main"
+expect asm not-contains "x18"
 end
 "#,
         )
@@ -1853,6 +1875,13 @@ end
         assert_eq!(suite.cases.len(), 1);
         assert!(suite.cases[0].requested.contains(&Stage::Run));
         assert!(suite.cases[0].requested.contains(&Stage::Ir));
+        assert!(matches!(
+            suite.cases[0].expectations[2],
+            Expectation::NotContains {
+                target: Target::Stage(Stage::Asm),
+                ..
+            }
+        ));
         assert_eq!(suite.cases[0].opt_levels, vec![OptLevel::O0]);
         let _ = fs::remove_file(&root);
     }
