@@ -74,10 +74,13 @@ enum ConsistencyCheck {
     CliObjVsSystemAs,
     CliAsmReproducible,
     CliObjReproducible,
+    CliRunReproducible,
     CaptureAsmVsCliAsm,
     CaptureObjVsCliObj,
+    CaptureRunVsCliRun,
     CaptureAsmReproducible,
     CaptureObjReproducible,
+    CaptureRunReproducible,
 }
 
 impl ConsistencyCheck {
@@ -86,13 +89,18 @@ impl ConsistencyCheck {
             "cli_obj_vs_system_as" | "cli-obj-vs-system-as" => Some(Self::CliObjVsSystemAs),
             "cli_asm_reproducible" | "cli-asm-reproducible" => Some(Self::CliAsmReproducible),
             "cli_obj_reproducible" | "cli-obj-reproducible" => Some(Self::CliObjReproducible),
+            "cli_run_reproducible" | "cli-run-reproducible" => Some(Self::CliRunReproducible),
             "capture_asm_vs_cli_asm" | "capture-asm-vs-cli-asm" => Some(Self::CaptureAsmVsCliAsm),
             "capture_obj_vs_cli_obj" | "capture-obj-vs-cli-obj" => Some(Self::CaptureObjVsCliObj),
+            "capture_run_vs_cli_run" | "capture-run-vs-cli-run" => Some(Self::CaptureRunVsCliRun),
             "capture_asm_reproducible" | "capture-asm-reproducible" => {
                 Some(Self::CaptureAsmReproducible)
             }
             "capture_obj_reproducible" | "capture-obj-reproducible" => {
                 Some(Self::CaptureObjReproducible)
+            }
+            "capture_run_reproducible" | "capture-run-reproducible" => {
+                Some(Self::CaptureRunReproducible)
             }
             _ => None,
         }
@@ -103,10 +111,25 @@ impl ConsistencyCheck {
             Self::CliObjVsSystemAs => "cli_obj_vs_system_as",
             Self::CliAsmReproducible => "cli_asm_reproducible",
             Self::CliObjReproducible => "cli_obj_reproducible",
+            Self::CliRunReproducible => "cli_run_reproducible",
             Self::CaptureAsmVsCliAsm => "capture_asm_vs_cli_asm",
             Self::CaptureObjVsCliObj => "capture_obj_vs_cli_obj",
+            Self::CaptureRunVsCliRun => "capture_run_vs_cli_run",
             Self::CaptureAsmReproducible => "capture_asm_reproducible",
             Self::CaptureObjReproducible => "capture_obj_reproducible",
+            Self::CaptureRunReproducible => "capture_run_reproducible",
+        }
+    }
+
+    fn required_stage(&self) -> Option<Stage> {
+        match self {
+            Self::CliObjVsSystemAs
+            | Self::CliAsmReproducible
+            | Self::CliObjReproducible
+            | Self::CliRunReproducible => None,
+            Self::CaptureAsmVsCliAsm | Self::CaptureAsmReproducible => Some(Stage::Asm),
+            Self::CaptureObjVsCliObj | Self::CaptureObjReproducible => Some(Stage::Obj),
+            Self::CaptureRunVsCliRun | Self::CaptureRunReproducible => Some(Stage::Run),
         }
     }
 }
@@ -1120,9 +1143,8 @@ fn execute_case_cell(
     if !case.reference_compilers.is_empty() {
         requested.insert(Stage::Run);
     }
-    if !case.consistency_checks.is_empty() {
-        requested.insert(Stage::Asm);
-        requested.insert(Stage::Obj);
+    for check in &case.consistency_checks {
+        ensure_consistency_stage(*check, &mut requested);
     }
 
     if config.verbose {
@@ -1325,6 +1347,12 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
             }
         },
         Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+    }
+}
+
+fn ensure_consistency_stage(check: ConsistencyCheck, requested: &mut BTreeSet<Stage>) {
+    if let Some(stage) = check.required_stage() {
+        requested.insert(stage);
     }
 }
 
@@ -1632,6 +1660,9 @@ fn run_consistency_checks(
             ConsistencyCheck::CliObjReproducible => {
                 run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count)
             }
+            ConsistencyCheck::CliRunReproducible => {
+                run_cli_run_reproducible(&case.source, opt_level, case.repeat_count)
+            }
             ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
                 &case.source,
                 opt_level,
@@ -1644,6 +1675,12 @@ fn run_consistency_checks(
                 case.repeat_count,
                 capture_result,
             ),
+            ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
+                &case.source,
+                opt_level,
+                case.repeat_count,
+                capture_result,
+            ),
             ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
                 &case.source,
                 opt_level,
@@ -1651,6 +1688,12 @@ fn run_consistency_checks(
                 capture_result,
             ),
             ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
+                &case.source,
+                opt_level,
+                case.repeat_count,
+                capture_result,
+            ),
+            ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
                 &case.source,
                 opt_level,
                 case.repeat_count,
@@ -2048,6 +2091,131 @@ fn run_cli_obj_reproducible(
     None
 }
 
+fn run_cli_run_reproducible(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliRunReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let mut runs = Vec::new();
+    for index in 0..repeat_count {
+        let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
+        let build_command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Binary, &binary_path) {
+                Ok(command) => command,
+                Err(detail) => {
+                    return Some(ConsistencyIssue {
+                        check: ConsistencyCheck::CliRunReproducible,
+                        summary:
+                            "armfortas binary build failed during runtime reproducibility check"
+                                .into(),
+                        repeat_count: None,
+                        unique_variant_count: None,
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail,
+                        temp_root,
+                    })
+                }
+            };
+        let run_command = render_binary_run_command(&binary_path);
+        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+            Ok(run) => run,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliRunReproducible,
+                    summary: "armfortas binary could not run during runtime reproducibility check"
+                        .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let command = format!("build: {}\nrun: {}", build_command, run_command);
+        if let Err(err) = write_behavior_run_artifacts(
+            &temp_root,
+            &format!("cli_run_{:02}", index),
+            &command,
+            &run,
+        ) {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliRunReproducible,
+                summary: "could not write cli runtime artifact".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!("cannot write cli runtime artifact: {}", err),
+                temp_root,
+            });
+        }
+        runs.push(BehaviorRun {
+            label: format!("cli run {}", index + 1),
+            command,
+            signature: normalize_run_signature(&run),
+            run,
+        });
+    }
+
+    let unique_variants = count_unique_run_signatures(runs.iter().map(|run| &run.signature));
+    if unique_variants > 1 {
+        let signatures = runs.iter().map(|run| &run.signature).collect::<Vec<_>>();
+        let varying = varying_run_components(&signatures);
+        let stable = stable_run_components(&signatures);
+        let (left, right) = first_distinct_behavior_pair(&runs)
+            .expect("unique variants > 1 implies a distinct pair");
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliRunReproducible,
+            summary: format!(
+                "repeat_count={} unique_variants={} varying_components={} stable_components={}",
+                repeat_count,
+                unique_variants,
+                join_or_none(&varying),
+                join_or_none(&stable)
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variants),
+            varying_components: varying.iter().map(|value| (*value).to_string()).collect(),
+            stable_components: stable.iter().map(|value| (*value).to_string()).collect(),
+            detail: format!(
+                "armfortas runtime behavior is not reproducible across repeated full CLI builds\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\n{}",
+                repeat_count,
+                unique_variants,
+                join_or_none(&varying),
+                join_or_none(&stable),
+                left.command,
+                right.command,
+                describe_run_difference(&left.run, &right.run, &left.label, &right.label)
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
 fn run_capture_asm_vs_cli_asm(
     source: &Path,
     opt_level: OptLevel,
@@ -2375,6 +2543,187 @@ fn run_capture_obj_vs_cli_obj(
     None
 }
 
+fn run_capture_run_vs_cli_run(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    capture_result: &CaptureResult,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureRunVsCliRun,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let capture_command = render_capture_command(source, opt_level, Stage::Run);
+    let capture_run = match capture_run_stage(capture_result) {
+        Ok(run) => run.clone(),
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureRunVsCliRun,
+                summary: "capture result did not include runtime behavior".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    if let Err(err) =
+        write_behavior_run_artifacts(&temp_root, "from_capture", &capture_command, &capture_run)
+    {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureRunVsCliRun,
+            summary: "could not write captured runtime artifact".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!("cannot write captured runtime artifact: {}", err),
+            temp_root,
+        });
+    }
+    let capture_signature = normalize_run_signature(&capture_run);
+
+    let mut cli_runs = Vec::new();
+    let mut mismatch_indices = Vec::new();
+    for index in 0..repeat_count {
+        let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
+        let build_command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Binary, &binary_path) {
+                Ok(command) => command,
+                Err(detail) => {
+                    return Some(ConsistencyIssue {
+                        check: ConsistencyCheck::CaptureRunVsCliRun,
+                        summary:
+                            "armfortas binary build failed during capture-vs-cli runtime check"
+                                .into(),
+                        repeat_count: None,
+                        unique_variant_count: None,
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail,
+                        temp_root,
+                    })
+                }
+            };
+        let run_command = render_binary_run_command(&binary_path);
+        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+            Ok(run) => run,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureRunVsCliRun,
+                    summary: "armfortas binary could not run during capture-vs-cli runtime check"
+                        .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let command = format!("build: {}\nrun: {}", build_command, run_command);
+        if let Err(err) = write_behavior_run_artifacts(
+            &temp_root,
+            &format!("cli_run_{:02}", index),
+            &command,
+            &run,
+        ) {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureRunVsCliRun,
+                summary: "could not write cli runtime artifact".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!("cannot write cli runtime artifact: {}", err),
+                temp_root,
+            });
+        }
+        if normalize_run_signature(&run) != capture_signature {
+            mismatch_indices.push(index);
+        }
+        cli_runs.push(BehaviorRun {
+            label: format!("cli run {}", index + 1),
+            command,
+            signature: normalize_run_signature(&run),
+            run,
+        });
+    }
+
+    if !mismatch_indices.is_empty() {
+        let matching_runs = repeat_count.saturating_sub(mismatch_indices.len());
+        let unique_cli_variants =
+            count_unique_run_signatures(cli_runs.iter().map(|run| &run.signature));
+        let mismatch_signatures = mismatch_indices
+            .iter()
+            .map(|index| &cli_runs[*index].signature)
+            .collect::<Vec<_>>();
+        let mut summary_signatures = vec![&capture_signature];
+        summary_signatures.extend(mismatch_signatures.iter().copied());
+        let varying = varying_run_components(&summary_signatures)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let stable = stable_run_components(&summary_signatures)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let first_mismatch = &cli_runs[mismatch_indices[0]];
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureRunVsCliRun,
+            summary: format!(
+                "repeat_count={} matching_runs={} mismatching_runs={} unique_cli_variants={} varying_components={} stable_components={}",
+                repeat_count,
+                matching_runs,
+                mismatch_indices.len(),
+                unique_cli_variants,
+                join_or_none_from_strings(&varying),
+                join_or_none_from_strings(&stable)
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_cli_variants),
+            varying_components: varying,
+            stable_components: stable,
+            detail: format!(
+                "captured runtime behavior does not match repeated full CLI builds\nrepeat count: {}\nmatching runs: {}\nmismatching runs: {}\nunique cli variants: {}\n{}\n{}\n{}",
+                repeat_count,
+                matching_runs,
+                mismatch_indices.len(),
+                unique_cli_variants,
+                capture_command,
+                first_mismatch.command,
+                describe_run_difference(
+                    &capture_run,
+                    &first_mismatch.run,
+                    "capture run",
+                    &first_mismatch.label
+                )
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
 fn run_capture_asm_reproducible(
     source: &Path,
     opt_level: OptLevel,
@@ -2588,8 +2937,10 @@ fn run_capture_obj_reproducible(
                 })
             }
         };
-        if let Err(err) = fs::write(temp_root.join(format!("capture_run_{:02}.obj.txt", index)), &text)
-        {
+        if let Err(err) = fs::write(
+            temp_root.join(format!("capture_run_{:02}.obj.txt", index)),
+            &text,
+        ) {
             return Some(ConsistencyIssue {
                 check: ConsistencyCheck::CaptureObjReproducible,
                 summary: "could not write captured object snapshot artifact".into(),
@@ -2656,6 +3007,148 @@ fn run_capture_obj_reproducible(
                 left.command,
                 right.command,
                 describe_object_difference(&left.snapshot, &right.snapshot, &left.label, &right.label)
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
+fn run_capture_run_reproducible(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    capture_result: &CaptureResult,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureRunReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let command = render_capture_command(source, opt_level, Stage::Run);
+    let initial_run = match capture_run_stage(capture_result) {
+        Ok(run) => run.clone(),
+        Err(detail) => {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureRunReproducible,
+                summary: "initial capture result did not include runtime behavior".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail,
+                temp_root,
+            })
+        }
+    };
+    if let Err(err) =
+        write_behavior_run_artifacts(&temp_root, "capture_run_00", &command, &initial_run)
+    {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureRunReproducible,
+            summary: "could not write captured runtime artifact".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!("cannot write captured runtime artifact: {}", err),
+            temp_root,
+        });
+    }
+    let mut runs = vec![BehaviorRun {
+        label: "capture run 1".into(),
+        command: command.clone(),
+        signature: normalize_run_signature(&initial_run),
+        run: initial_run,
+    }];
+
+    for index in 1..repeat_count {
+        let run = match capture_run_from_testing(source, opt_level) {
+            Ok(run) => run,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureRunReproducible,
+                    summary:
+                        "armfortas::testing capture failed during runtime reproducibility check"
+                            .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        if let Err(err) = write_behavior_run_artifacts(
+            &temp_root,
+            &format!("capture_run_{:02}", index),
+            &command,
+            &run,
+        ) {
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CaptureRunReproducible,
+                summary: "could not write captured runtime artifact".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!("cannot write captured runtime artifact: {}", err),
+                temp_root,
+            });
+        }
+        runs.push(BehaviorRun {
+            label: format!("capture run {}", index + 1),
+            command: command.clone(),
+            signature: normalize_run_signature(&run),
+            run,
+        });
+    }
+
+    let unique_variants = count_unique_run_signatures(runs.iter().map(|run| &run.signature));
+    if unique_variants > 1 {
+        let signatures = runs.iter().map(|run| &run.signature).collect::<Vec<_>>();
+        let varying = varying_run_components(&signatures);
+        let stable = stable_run_components(&signatures);
+        let (left, right) = first_distinct_behavior_pair(&runs)
+            .expect("unique variants > 1 implies a distinct pair");
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CaptureRunReproducible,
+            summary: format!(
+                "repeat_count={} unique_variants={} varying_components={} stable_components={}",
+                repeat_count,
+                unique_variants,
+                join_or_none(&varying),
+                join_or_none(&stable)
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variants),
+            varying_components: varying.iter().map(|value| (*value).to_string()).collect(),
+            stable_components: stable.iter().map(|value| (*value).to_string()).collect(),
+            detail: format!(
+                "captured runtime behavior is not reproducible across repeated armfortas::testing runs\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\n{}",
+                repeat_count,
+                unique_variants,
+                join_or_none(&varying),
+                join_or_none(&stable),
+                left.command,
+                right.command,
+                describe_run_difference(&left.run, &right.run, &left.label, &right.label)
             ),
             temp_root,
         });
@@ -2754,6 +3247,7 @@ fn source_uses_cpp(source: &Path) -> bool {
 enum DriverEmitMode {
     Asm,
     Obj,
+    Binary,
 }
 
 fn compile_with_driver(
@@ -2787,11 +3281,16 @@ fn render_armfortas_command(
     match mode {
         DriverEmitMode::Asm => args.push("-S".to_string()),
         DriverEmitMode::Obj => args.push("-c".to_string()),
+        DriverEmitMode::Binary => {}
     }
     args.push(source.display().to_string());
     args.push("-o".to_string());
     args.push(output.display().to_string());
     render_command("armfortas", &args)
+}
+
+fn render_binary_run_command(binary: &Path) -> String {
+    render_command(&binary.display().to_string(), &[])
 }
 
 fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> String {
@@ -2803,15 +3302,32 @@ fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> S
     )
 }
 
-fn capture_text_from_testing(source: &Path, opt_level: OptLevel, stage: Stage) -> Result<String, String> {
+fn capture_text_from_testing(
+    source: &Path,
+    opt_level: OptLevel,
+    stage: Stage,
+) -> Result<String, String> {
     let command = render_capture_command(source, opt_level, stage);
     let request = CaptureRequest {
         input: source.to_path_buf(),
         requested: BTreeSet::from([stage]),
         opt_level,
     };
-    let result = capture_from_path(&request).map_err(|failure| format!("{} failed:\n{}", command, failure))?;
+    let result = capture_from_path(&request)
+        .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
     capture_text_stage(&result, stage).map(str::to_string)
+}
+
+fn capture_run_from_testing(source: &Path, opt_level: OptLevel) -> Result<RunCapture, String> {
+    let command = render_capture_command(source, opt_level, Stage::Run);
+    let request = CaptureRequest {
+        input: source.to_path_buf(),
+        requested: BTreeSet::from([Stage::Run]),
+        opt_level,
+    };
+    let result = capture_from_path(&request)
+        .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
+    capture_run_stage(&result).cloned()
 }
 
 fn capture_text_stage<'a>(result: &'a CaptureResult, stage: Stage) -> Result<&'a str, String> {
@@ -2826,6 +3342,39 @@ fn capture_text_stage<'a>(result: &'a CaptureResult, stage: Stage) -> Result<&'a
             stage.as_str()
         )),
     }
+}
+
+fn capture_run_stage(result: &CaptureResult) -> Result<&RunCapture, String> {
+    match result.get(Stage::Run) {
+        Some(CapturedStage::Run(run)) => Ok(run),
+        Some(CapturedStage::Text(_)) => {
+            Err("capture result contained text data for the run stage".into())
+        }
+        None => Err("capture result was missing requested stage 'run'".into()),
+    }
+}
+
+fn run_binary_capture(
+    binary: &Path,
+    current_dir: &Path,
+    command: &str,
+) -> Result<RunCapture, String> {
+    let output = Command::new(binary)
+        .current_dir(current_dir)
+        .output()
+        .map_err(|err| {
+            format!(
+                "{} failed:\ncannot run '{}': {}",
+                command,
+                binary.display(),
+                err
+            )
+        })?;
+    Ok(RunCapture {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 fn normalize_run_signature(run: &RunCapture) -> RunSignature {
@@ -2930,6 +3479,23 @@ fn format_run_capture(run: &RunCapture) -> String {
     )
 }
 
+fn format_run_signature(signature: &RunSignature) -> String {
+    let stdout = if signature.stdout.is_empty() {
+        "<empty>".to_string()
+    } else {
+        signature.stdout.clone()
+    };
+    let stderr = if signature.stderr.is_empty() {
+        "<empty>".to_string()
+    } else {
+        signature.stderr.clone()
+    };
+    format!(
+        "exit: {}\nstdout:\n{}\nstderr:\n{}",
+        signature.exit_code, stdout, stderr
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObjectSnapshot {
     text: String,
@@ -2943,6 +3509,14 @@ struct TextRun {
     label: String,
     command: String,
     normalized: String,
+}
+
+#[derive(Debug, Clone)]
+struct BehaviorRun {
+    label: String,
+    command: String,
+    signature: RunSignature,
+    run: RunCapture,
 }
 
 #[derive(Debug, Clone)]
@@ -3019,6 +3593,21 @@ fn first_distinct_text_pair(runs: &[TextRun]) -> Option<(&TextRun, &TextRun)> {
     None
 }
 
+fn count_unique_run_signatures<'a>(values: impl IntoIterator<Item = &'a RunSignature>) -> usize {
+    values.into_iter().collect::<BTreeSet<_>>().len()
+}
+
+fn first_distinct_behavior_pair(runs: &[BehaviorRun]) -> Option<(&BehaviorRun, &BehaviorRun)> {
+    for left_index in 0..runs.len() {
+        for right_index in (left_index + 1)..runs.len() {
+            if runs[left_index].signature != runs[right_index].signature {
+                return Some((&runs[left_index], &runs[right_index]));
+            }
+        }
+    }
+    None
+}
+
 fn first_distinct_object_pair(runs: &[ObjectRun]) -> Option<(&ObjectRun, &ObjectRun)> {
     for left_index in 0..runs.len() {
         for right_index in (left_index + 1)..runs.len() {
@@ -3038,12 +3627,14 @@ fn render_object_snapshot(snapshot: &ObjectSnapshot) -> String {
 }
 
 fn parse_object_snapshot_text(text: &str) -> Result<ObjectSnapshot, String> {
-    let text = text.strip_prefix("== text ==\n").ok_or_else(|| {
-        "object snapshot was missing the '== text ==' header".to_string()
-    })?;
+    let text = text
+        .strip_prefix("== text ==\n")
+        .ok_or_else(|| "object snapshot was missing the '== text ==' header".to_string())?;
     let (text, rest) = text
         .split_once("\n\n== load_commands ==\n")
-        .ok_or_else(|| "object snapshot was missing the '== load_commands ==' section".to_string())?;
+        .ok_or_else(|| {
+            "object snapshot was missing the '== load_commands ==' section".to_string()
+        })?;
     let (load_commands, rest) = rest
         .split_once("\n\n== relocations ==\n")
         .ok_or_else(|| "object snapshot was missing the '== relocations ==' section".to_string())?;
@@ -3134,12 +3725,67 @@ fn describe_object_difference(
     )
 }
 
+fn describe_run_difference(
+    expected: &RunCapture,
+    actual: &RunCapture,
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    let expected = normalize_run_signature(expected);
+    let actual = normalize_run_signature(actual);
+    let mut differing = Vec::new();
+    if expected.exit_code != actual.exit_code {
+        differing.push("exit_code");
+    }
+    if expected.stdout != actual.stdout {
+        differing.push("stdout");
+    }
+    if expected.stderr != actual.stderr {
+        differing.push("stderr");
+    }
+
+    if differing.is_empty() {
+        return "runtime behavior matched".to_string();
+    }
+
+    let component_list = differing.join(", ");
+    match differing[0] {
+        "exit_code" => format!(
+            "differing runtime components: {}\nfirst differing component: exit_code\n{}: {}\n{}: {}",
+            component_list,
+            left_label,
+            expected.exit_code,
+            right_label,
+            actual.exit_code
+        ),
+        "stdout" => format!(
+            "differing runtime components: {}\nfirst differing component: stdout\n{}",
+            component_list,
+            describe_text_difference(&expected.stdout, &actual.stdout, left_label, right_label)
+        ),
+        "stderr" => format!(
+            "differing runtime components: {}\nfirst differing component: stderr\n{}",
+            component_list,
+            describe_text_difference(&expected.stderr, &actual.stderr, left_label, right_label)
+        ),
+        _ => unreachable!("only known runtime components are compared"),
+    }
+}
+
 fn varying_object_components(snapshots: &[&ObjectSnapshot]) -> Vec<&'static str> {
     object_components_by_variation(snapshots, true)
 }
 
 fn stable_object_components(snapshots: &[&ObjectSnapshot]) -> Vec<&'static str> {
     object_components_by_variation(snapshots, false)
+}
+
+fn varying_run_components(signatures: &[&RunSignature]) -> Vec<&'static str> {
+    run_components_by_variation(signatures, true)
+}
+
+fn stable_run_components(signatures: &[&RunSignature]) -> Vec<&'static str> {
+    run_components_by_variation(signatures, false)
 }
 
 fn object_components_by_variation(
@@ -3190,6 +3836,47 @@ fn object_components_by_variation(
         .collect()
 }
 
+fn run_components_by_variation(
+    signatures: &[&RunSignature],
+    want_varying: bool,
+) -> Vec<&'static str> {
+    let components = [
+        (
+            "exit_code",
+            signatures
+                .iter()
+                .map(|signature| signature.exit_code.to_string())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "stdout",
+            signatures
+                .iter()
+                .map(|signature| signature.stdout.clone())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "stderr",
+            signatures
+                .iter()
+                .map(|signature| signature.stderr.clone())
+                .collect::<Vec<_>>(),
+        ),
+    ];
+
+    components
+        .into_iter()
+        .filter_map(|(name, values)| {
+            let varies = count_unique_strings(values.iter().map(String::as_str)) > 1;
+            if varies == want_varying {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn join_or_none(values: &[&str]) -> String {
     if values.is_empty() {
         "none".to_string()
@@ -3229,7 +3916,10 @@ fn join_string_set(values: &BTreeSet<String>) -> String {
 fn render_consistency_rollup(rollup: &ConsistencyRollup) -> String {
     let mut parts = vec![format!("{} cells", rollup.cells)];
     if !rollup.repeat_counts.is_empty() {
-        parts.push(format!("repeat_count={}", join_usize_set(&rollup.repeat_counts)));
+        parts.push(format!(
+            "repeat_count={}",
+            join_usize_set(&rollup.repeat_counts)
+        ));
     }
     if !rollup.unique_variant_counts.is_empty() {
         parts.push(format!(
@@ -3250,6 +3940,27 @@ fn render_consistency_rollup(rollup: &ConsistencyRollup) -> String {
         ));
     }
     parts.join("; ")
+}
+
+fn write_behavior_run_artifacts(
+    root: &Path,
+    prefix: &str,
+    command: &str,
+    run: &RunCapture,
+) -> Result<(), std::io::Error> {
+    let signature = normalize_run_signature(run);
+    fs::write(root.join(format!("{}.command.txt", prefix)), command)?;
+    fs::write(root.join(format!("{}.stdout.txt", prefix)), &run.stdout)?;
+    fs::write(root.join(format!("{}.stderr.txt", prefix)), &run.stderr)?;
+    fs::write(
+        root.join(format!("{}.exit_code.txt", prefix)),
+        format!("{}\n", run.exit_code),
+    )?;
+    fs::write(
+        root.join(format!("{}.normalized.txt", prefix)),
+        format_run_signature(&signature),
+    )?;
+    Ok(())
 }
 
 fn render_summary(summary: &Summary) -> String {
@@ -3854,7 +4565,7 @@ case "driver_paths"
 source "../../fixtures/backend/runtime_calls.f90"
 armfortas => asm, obj
 repeat => 5
-consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible, capture_asm_vs_cli_asm, capture-obj-vs-cli-obj, capture_asm_reproducible, capture-obj-reproducible
+consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible, cli_run_reproducible, capture_asm_vs_cli_asm, capture-obj-vs-cli-obj, capture_run_vs_cli_run, capture_asm_reproducible, capture-obj-reproducible, capture_run_reproducible
 expect obj contains "_main"
 end
 "#,
@@ -3869,10 +4580,13 @@ end
                 ConsistencyCheck::CliObjVsSystemAs,
                 ConsistencyCheck::CliAsmReproducible,
                 ConsistencyCheck::CliObjReproducible,
+                ConsistencyCheck::CliRunReproducible,
                 ConsistencyCheck::CaptureAsmVsCliAsm,
                 ConsistencyCheck::CaptureObjVsCliObj,
+                ConsistencyCheck::CaptureRunVsCliRun,
                 ConsistencyCheck::CaptureAsmReproducible,
                 ConsistencyCheck::CaptureObjReproducible,
+                ConsistencyCheck::CaptureRunReproducible,
             ]
         );
         assert_eq!(case.repeat_count, 5);
@@ -4115,7 +4829,9 @@ end
         assert!(consistency_summary.contains("repeat_counts: 3"));
         assert!(consistency_summary.contains("unique_variants: 2, 3"));
         assert!(consistency_summary.contains("varying_components: text"));
-        assert!(consistency_summary.contains("stable_components: load_commands, relocations, symbols"));
+        assert!(
+            consistency_summary.contains("stable_components: load_commands, relocations, symbols")
+        );
         assert!(bundle
             .join("consistency")
             .join("cli_asm_reproducible")
@@ -4140,12 +4856,10 @@ end
             .exists());
 
         let _ = fs::remove_dir_all(bundle);
-        let _ = fs::remove_dir_all(
-            std::env::temp_dir().join("afs_tests_consistency_bundle_issue_asm"),
-        );
-        let _ = fs::remove_dir_all(
-            std::env::temp_dir().join("afs_tests_consistency_bundle_issue_obj"),
-        );
+        let _ =
+            fs::remove_dir_all(std::env::temp_dir().join("afs_tests_consistency_bundle_issue_asm"));
+        let _ =
+            fs::remove_dir_all(std::env::temp_dir().join("afs_tests_consistency_bundle_issue_obj"));
         let _ = fs::remove_file(source);
     }
 
@@ -4181,9 +4895,9 @@ end
         assert!(rendered.contains("Consistency"));
         assert!(rendered.contains("affected_checks: 2"));
         assert!(rendered.contains("cells_with_issues: 2"));
-        assert!(rendered.contains(
-            "cli_asm_reproducible: 1 cells; repeat_count=3; unique_variants=3"
-        ));
+        assert!(
+            rendered.contains("cli_asm_reproducible: 1 cells; repeat_count=3; unique_variants=3")
+        );
         assert!(rendered.contains(
             "cli_obj_reproducible: 1 cells; repeat_count=3; unique_variants=2; varying=text; stable=load_commands, relocations, symbols"
         ));
@@ -4274,6 +4988,47 @@ end
         assert_eq!(
             stable_object_components(&snapshots),
             vec!["load_commands", "relocations", "symbols"]
+        );
+    }
+
+    #[test]
+    fn run_diff_reports_changed_components() {
+        let left = RunCapture {
+            exit_code: 0,
+            stdout: "alpha\nbeta\n".into(),
+            stderr: String::new(),
+        };
+        let right = RunCapture {
+            exit_code: 0,
+            stdout: "alpha\ngamma\n".into(),
+            stderr: String::new(),
+        };
+
+        let detail = describe_run_difference(&left, &right, "capture run", "cli run 2");
+        assert!(detail.contains("differing runtime components: stdout"));
+        assert!(detail.contains("first differing component: stdout"));
+        assert!(detail.contains("capture run: beta"));
+        assert!(detail.contains("cli run 2: gamma"));
+    }
+
+    #[test]
+    fn run_component_variation_classifies_stdout_only_instability() {
+        let first = RunSignature {
+            exit_code: 0,
+            stdout: "alpha".into(),
+            stderr: String::new(),
+        };
+        let second = RunSignature {
+            exit_code: 0,
+            stdout: "beta".into(),
+            stderr: String::new(),
+        };
+        let signatures = vec![&first, &second];
+
+        assert_eq!(varying_run_components(&signatures), vec!["stdout"]);
+        assert_eq!(
+            stable_run_components(&signatures),
+            vec!["exit_code", "stderr"]
         );
     }
 
