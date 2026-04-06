@@ -27,6 +27,7 @@ struct CaseSpec {
     source: PathBuf,
     requested: BTreeSet<Stage>,
     opt_levels: Vec<OptLevel>,
+    repeat_count: usize,
     reference_compilers: Vec<ReferenceCompiler>,
     consistency_checks: Vec<ConsistencyCheck>,
     expectations: Vec<Expectation>,
@@ -445,6 +446,8 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
             builder.source = Some(source);
         } else if let Some(rest) = line.strip_prefix("armfortas =>") {
             builder.requested = parse_stage_list(rest, path, line_no)?;
+        } else if let Some(rest) = line.strip_prefix("repeat =>") {
+            builder.repeat_count = parse_repeat_count(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("opts =>") {
             builder.opt_levels = parse_opt_levels(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("differential =>") {
@@ -499,6 +502,7 @@ struct CaseBuilder {
     source: Option<PathBuf>,
     requested: BTreeSet<Stage>,
     opt_levels: Vec<OptLevel>,
+    repeat_count: usize,
     reference_compilers: Vec<ReferenceCompiler>,
     consistency_checks: Vec<ConsistencyCheck>,
     expectations: Vec<Expectation>,
@@ -512,6 +516,7 @@ impl CaseBuilder {
             source: None,
             requested: BTreeSet::new(),
             opt_levels: Vec::new(),
+            repeat_count: 2,
             reference_compilers: Vec::new(),
             consistency_checks: Vec::new(),
             expectations: Vec::new(),
@@ -544,6 +549,7 @@ impl CaseBuilder {
             source,
             requested,
             opt_levels,
+            repeat_count: self.repeat_count,
             reference_compilers: self.reference_compilers,
             consistency_checks: self.consistency_checks,
             expectations: self.expectations,
@@ -633,6 +639,24 @@ fn parse_reference_compilers(
         ));
     }
     Ok(compilers.into_iter().collect())
+}
+
+fn parse_repeat_count(rest: &str, path: &Path, line_no: usize) -> Result<usize, String> {
+    let count = rest.trim().parse::<usize>().map_err(|_| {
+        format!(
+            "{}:{}: repeat count must be an integer >= 2",
+            path.display(),
+            line_no
+        )
+    })?;
+    if count < 2 {
+        return Err(format!(
+            "{}:{}: repeat count must be >= 2",
+            path.display(),
+            line_no
+        ));
+    }
+    Ok(count)
 }
 
 fn parse_consistency_checks(
@@ -1024,6 +1048,9 @@ fn execute_case_cell(
         println!("  opt: {}", opt_level.as_str());
         println!("  stages: {}", stage_list);
         println!("  refs: {}", refs);
+        if !case.consistency_checks.is_empty() {
+            println!("  repeat: {}", case.repeat_count);
+        }
     }
 
     let request = CaptureRequest {
@@ -1479,10 +1506,10 @@ fn run_consistency_checks(case: &CaseSpec, opt_level: OptLevel) -> Result<(), St
         let result = match check {
             ConsistencyCheck::CliObjVsSystemAs => run_cli_obj_vs_system_as(&case.source, opt_level),
             ConsistencyCheck::CliAsmReproducible => {
-                run_cli_asm_reproducible(&case.source, opt_level)
+                run_cli_asm_reproducible(&case.source, opt_level, case.repeat_count)
             }
             ConsistencyCheck::CliObjReproducible => {
-                run_cli_obj_reproducible(&case.source, opt_level)
+                run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count)
             }
         };
         if let Err(detail) = result {
@@ -1584,7 +1611,11 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Result<(), St
     Ok(())
 }
 
-fn run_cli_asm_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), String> {
+fn run_cli_asm_reproducible(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+) -> Result<(), String> {
     let temp_root = next_consistency_temp_root(opt_level);
     fs::create_dir_all(&temp_root).map_err(|e| {
         format!(
@@ -1594,28 +1625,31 @@ fn run_cli_asm_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), St
         )
     })?;
 
-    let first_asm_path = temp_root.join("first.s");
-    let second_asm_path = temp_root.join("second.s");
-
-    let first_command =
-        compile_with_driver(source, opt_level, DriverEmitMode::Asm, &first_asm_path)
+    let mut runs = Vec::new();
+    for index in 0..repeat_count {
+        let asm_path = temp_root.join(format!("run_{:02}.s", index));
+        let command = compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path)
             .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
-    let second_command =
-        compile_with_driver(source, opt_level, DriverEmitMode::Asm, &second_asm_path)
-            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+        let text = read_text_artifact(&asm_path)?;
+        runs.push(TextRun {
+            label: format!("run {} (-S)", index + 1),
+            command,
+            normalized: normalize_text_artifact(&text),
+        });
+    }
 
-    let first_text = read_text_artifact(&first_asm_path)?;
-    let second_text = read_text_artifact(&second_asm_path)?;
-    let first_norm = normalize_text_artifact(&first_text);
-    let second_norm = normalize_text_artifact(&second_text);
-
-    if first_norm != second_norm {
+    let unique_variants = count_unique_strings(runs.iter().map(|run| run.normalized.as_str()));
+    if unique_variants > 1 {
+        let (left, right) =
+            first_distinct_text_pair(&runs).expect("unique variants > 1 implies a distinct pair");
         return Err(format!(
-            "assembly output is not reproducible across repeated armfortas -S runs\n{}\n{}\nartifacts kept at: {}\n{}",
-            first_command,
-            second_command,
+            "assembly output is not reproducible across repeated armfortas -S runs\nrepeat count: {}\nunique variants: {}\n{}\n{}\nartifacts kept at: {}\n{}",
+            repeat_count,
+            unique_variants,
+            left.command,
+            right.command,
             temp_root.display(),
-            describe_text_difference(&first_norm, &second_norm, "first -S", "second -S")
+            describe_text_difference(&left.normalized, &right.normalized, &left.label, &right.label)
         ));
     }
 
@@ -1623,7 +1657,11 @@ fn run_cli_asm_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), St
     Ok(())
 }
 
-fn run_cli_obj_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), String> {
+fn run_cli_obj_reproducible(
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+) -> Result<(), String> {
     let temp_root = next_consistency_temp_root(opt_level);
     fs::create_dir_all(&temp_root).map_err(|e| {
         format!(
@@ -1633,40 +1671,45 @@ fn run_cli_obj_reproducible(source: &Path, opt_level: OptLevel) -> Result<(), St
         )
     })?;
 
-    let first_obj_path = temp_root.join("first.o");
-    let second_obj_path = temp_root.join("second.o");
-
-    let first_command =
-        compile_with_driver(source, opt_level, DriverEmitMode::Obj, &first_obj_path)
+    let mut runs = Vec::new();
+    for index in 0..repeat_count {
+        let obj_path = temp_root.join(format!("run_{:02}.o", index));
+        let command = compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path)
             .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
-    let second_command =
-        compile_with_driver(source, opt_level, DriverEmitMode::Obj, &second_obj_path)
-            .map_err(|detail| format!("{}\nartifacts kept at: {}", detail, temp_root.display()))?;
+        let snapshot = object_snapshot(&obj_path).map_err(|detail| {
+            format!(
+                "{}\nartifacts kept at: {}\n{}",
+                command,
+                temp_root.display(),
+                detail
+            )
+        })?;
+        runs.push(ObjectRun {
+            label: format!("run {} (-c)", index + 1),
+            command,
+            snapshot,
+        });
+    }
 
-    let first_snapshot = object_snapshot(&first_obj_path).map_err(|detail| {
-        format!(
-            "{}\nartifacts kept at: {}\n{}",
-            first_command,
-            temp_root.display(),
-            detail
-        )
-    })?;
-    let second_snapshot = object_snapshot(&second_obj_path).map_err(|detail| {
-        format!(
-            "{}\nartifacts kept at: {}\n{}",
-            second_command,
-            temp_root.display(),
-            detail
-        )
-    })?;
-
-    if first_snapshot != second_snapshot {
+    let rendered = runs
+        .iter()
+        .map(|run| render_object_snapshot(&run.snapshot))
+        .collect::<Vec<_>>();
+    let unique_variants = count_unique_strings(rendered.iter().map(String::as_str));
+    if unique_variants > 1 {
+        let snapshots = runs.iter().map(|run| &run.snapshot).collect::<Vec<_>>();
+        let (left, right) =
+            first_distinct_object_pair(&runs).expect("unique variants > 1 implies a distinct pair");
         return Err(format!(
-            "object output is not reproducible across repeated armfortas -c runs\n{}\n{}\nartifacts kept at: {}\n{}",
-            first_command,
-            second_command,
+            "object output is not reproducible across repeated armfortas -c runs\nrepeat count: {}\nunique variants: {}\nvarying components across repeats: {}\nstable components across repeats: {}\n{}\n{}\nartifacts kept at: {}\n{}",
+            repeat_count,
+            unique_variants,
+            join_or_none(&varying_object_components(&snapshots)),
+            join_or_none(&stable_object_components(&snapshots)),
+            left.command,
+            right.command,
             temp_root.display(),
-            describe_object_difference(&first_snapshot, &second_snapshot, "first -c", "second -c")
+            describe_object_difference(&left.snapshot, &right.snapshot, &left.label, &right.label)
         ));
     }
 
@@ -1913,6 +1956,20 @@ struct ObjectSnapshot {
     symbols: String,
 }
 
+#[derive(Debug, Clone)]
+struct TextRun {
+    label: String,
+    command: String,
+    normalized: String,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectRun {
+    label: String,
+    command: String,
+    snapshot: ObjectSnapshot,
+}
+
 fn object_snapshot(path: &Path) -> Result<ObjectSnapshot, String> {
     let text = normalize_tool_output(&tool_output("otool", &["-t", path.to_str().unwrap()])?);
     let load_commands =
@@ -1963,6 +2020,39 @@ fn normalize_text_artifact(text: &str) -> String {
         .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn count_unique_strings<'a>(values: impl IntoIterator<Item = &'a str>) -> usize {
+    values.into_iter().collect::<BTreeSet<_>>().len()
+}
+
+fn first_distinct_text_pair(runs: &[TextRun]) -> Option<(&TextRun, &TextRun)> {
+    for left_index in 0..runs.len() {
+        for right_index in (left_index + 1)..runs.len() {
+            if runs[left_index].normalized != runs[right_index].normalized {
+                return Some((&runs[left_index], &runs[right_index]));
+            }
+        }
+    }
+    None
+}
+
+fn first_distinct_object_pair(runs: &[ObjectRun]) -> Option<(&ObjectRun, &ObjectRun)> {
+    for left_index in 0..runs.len() {
+        for right_index in (left_index + 1)..runs.len() {
+            if runs[left_index].snapshot != runs[right_index].snapshot {
+                return Some((&runs[left_index], &runs[right_index]));
+            }
+        }
+    }
+    None
+}
+
+fn render_object_snapshot(snapshot: &ObjectSnapshot) -> String {
+    format!(
+        "== text ==\n{}\n\n== load_commands ==\n{}\n\n== relocations ==\n{}\n\n== symbols ==\n{}",
+        snapshot.text, snapshot.load_commands, snapshot.relocations, snapshot.symbols
+    )
 }
 
 fn describe_text_difference(
@@ -2040,6 +2130,70 @@ fn describe_object_difference(
     )
 }
 
+fn varying_object_components(snapshots: &[&ObjectSnapshot]) -> Vec<&'static str> {
+    object_components_by_variation(snapshots, true)
+}
+
+fn stable_object_components(snapshots: &[&ObjectSnapshot]) -> Vec<&'static str> {
+    object_components_by_variation(snapshots, false)
+}
+
+fn object_components_by_variation(
+    snapshots: &[&ObjectSnapshot],
+    want_varying: bool,
+) -> Vec<&'static str> {
+    let components = [
+        (
+            "text",
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.text.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "load_commands",
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.load_commands.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "relocations",
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.relocations.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "symbols",
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.symbols.as_str())
+                .collect::<Vec<_>>(),
+        ),
+    ];
+
+    components
+        .into_iter()
+        .filter_map(|(name, values)| {
+            let varies = count_unique_strings(values) > 1;
+            if varies == want_varying {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn join_or_none(values: &[&str]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
 fn write_failure_bundle(
     suite: &SuiteSpec,
     case: &CaseSpec,
@@ -2083,13 +2237,14 @@ fn write_failure_bundle(
             .join(", ")
     };
     let metadata = format!(
-        "suite: {}\ncase: {}\noutcome: {:?}\nopt: {}\nsource: {}\nrequested_stages: {}\nreference_compilers: {}\nconsistency_checks: {}\n",
+        "suite: {}\ncase: {}\noutcome: {:?}\nopt: {}\nsource: {}\nrequested_stages: {}\nrepeat_count: {}\nreference_compilers: {}\nconsistency_checks: {}\n",
         suite.name,
         case.name,
         outcome.kind,
         outcome.opt_level.as_str(),
         case.source.display(),
         stage_list,
+        case.repeat_count,
         refs,
         consistency
     );
@@ -2445,6 +2600,7 @@ end
 case "driver_paths"
 source "../../fixtures/backend/runtime_calls.f90"
 armfortas => asm, obj
+repeat => 5
 consistency => cli_obj_vs_system_as, cli-obj-vs-system-as, cli_asm_reproducible, cli-obj-reproducible
 expect obj contains "_main"
 end
@@ -2462,6 +2618,7 @@ end
                 ConsistencyCheck::CliObjReproducible
             ]
         );
+        assert_eq!(case.repeat_count, 5);
         let _ = fs::remove_file(&root);
     }
 
@@ -2547,6 +2704,7 @@ end
             source: PathBuf::from("demo.f90"),
             requested: BTreeSet::from([Stage::Asm]),
             opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
             reference_compilers: Vec::new(),
             consistency_checks: Vec::new(),
             expectations: vec![Expectation::NotContains {
@@ -2592,6 +2750,7 @@ end
             source: source.clone(),
             requested: BTreeSet::from([Stage::Ir, Stage::Run]),
             opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
             reference_compilers: vec![ReferenceCompiler::Gfortran],
             consistency_checks: vec![ConsistencyCheck::CliObjVsSystemAs],
             expectations: Vec::new(),
@@ -2720,6 +2879,29 @@ end
         assert!(detail.contains("first differing component: text"));
         assert!(detail.contains("first -c: beta"));
         assert!(detail.contains("second -c: gamma"));
+    }
+
+    #[test]
+    fn object_component_variation_classifies_text_only_instability() {
+        let first = ObjectSnapshot {
+            text: "alpha".into(),
+            load_commands: "load".into(),
+            relocations: "reloc".into(),
+            symbols: "symbols".into(),
+        };
+        let second = ObjectSnapshot {
+            text: "beta".into(),
+            load_commands: "load".into(),
+            relocations: "reloc".into(),
+            symbols: "symbols".into(),
+        };
+        let snapshots = vec![&first, &second];
+
+        assert_eq!(varying_object_components(&snapshots), vec!["text"]);
+        assert_eq!(
+            stable_object_components(&snapshots),
+            vec!["load_commands", "relocations", "symbols"]
+        );
     }
 
     #[test]
