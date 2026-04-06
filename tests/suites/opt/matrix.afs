@@ -1,0 +1,32 @@
+suite "opt/matrix"
+
+case "arithmetic_across_matrix"
+source "../../../test_programs/arithmetic.f90"
+opts => O0, O1, O2, O3, Ofast
+armfortas => ir, optir, run
+expect ir contains "iadd"
+expect optir contains "iadd"
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "select_type_visibility"
+source "../../../test_programs/select_type.f90"
+opts => O0, O1, O2, O3
+armfortas => ir, optir, run
+expect ir contains "type_is_match_"
+expect optir contains "type_is_match_"
+expect run.stdout check-comments
+expect run.exit_code equals 0
+future when O1, O2, O3 because "Keep optimizer-sensitive SELECT TYPE cells visible until the real optimization pipeline lands on this branch."
+end
+
+case "where_construct_across_matrix"
+source "../../../test_programs/where_construct.f90"
+opts => O0, O1, O2
+armfortas => ir, optir, run
+expect ir contains "where_check_"
+expect optir contains "where_check_"
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end

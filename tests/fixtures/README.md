@@ -9,3 +9,6 @@ later sprints will move legacy inputs across when the suite layout settles.
 
 The frontend corpus now lives under `tests/fixtures/frontend/` with dedicated
 subdirectories for `preprocess`, `lexer`, `parser`, and `sema`.
+
+IR and optimizer suites currently lean on the shared `test_programs/` corpus
+plus a few focused bench fixtures while the middle-end coverage grows.

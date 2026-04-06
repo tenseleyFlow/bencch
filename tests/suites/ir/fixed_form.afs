@@ -1,0 +1,9 @@
+suite "ir/fixed-form"
+
+case "fixed_form_reaches_ir"
+source "../../fixtures/frontend/parser/fixed_program.f"
+armfortas => ir, optir
+expect ir contains "func @main() -> void"
+expect ir contains "ret void"
+expect optir contains "ret void"
+end

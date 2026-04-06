@@ -1,0 +1,37 @@
+suite "ir/lowering"
+
+case "arithmetic_lowering"
+source "../../../test_programs/arithmetic.f90"
+armfortas => ir, optir
+expect ir contains "func @arithmetic() -> void"
+expect ir contains "iadd"
+expect ir contains "call @afs_write_int"
+expect optir contains "iadd"
+end
+
+case "function_call_by_reference"
+source "../../../test_programs/function_call.f90"
+armfortas => ir, optir
+expect ir contains "func @square(%0: ptr<i32>) -> i32"
+expect ir contains "call @square(%0)"
+expect ir contains "imul"
+expect optir contains "call @square(%0)"
+end
+
+case "select_type_lowering"
+source "../../../test_programs/select_type.f90"
+armfortas => ir, optir
+expect ir contains "type_is_match_"
+expect ir contains "select_type_end_"
+expect ir contains "call @afs_write_real"
+expect optir contains "type_is_match_"
+end
+
+case "where_construct_lowering"
+source "../../../test_programs/where_construct.f90"
+armfortas => ir, optir
+expect ir contains "where_check_"
+expect ir contains "call @afs_allocate_1d"
+expect ir contains "call @afs_deallocate_array"
+expect optir contains "where_check_"
+end
