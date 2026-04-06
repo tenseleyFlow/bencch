@@ -20,6 +20,9 @@ That means this repo already carries:
 - repeat-aware consistency diagnostics, so authored cases can say how many
   rebuilds to sample and the runner can report unique-variant counts plus which
   object components actually varied
+- consistency-driven `XFAIL`s now emit real report bundles with copied repeated
+  run artifacts and per-check summaries under `reports/consistency...`, instead
+  of leaving the interesting evidence stranded in temporary directories
 
 ## Layout
 
@@ -49,6 +52,8 @@ Next planned slice from this extraction point:
   current `xfail` consistency families into one rooted compiler issue
 - broader repeat-aware sampling once the current `repeat => 3` coverage has
   proven out as a practical default
+- compact report surfaces for larger consistency families, now that per-check
+  bundle summaries and copied artifacts are in place
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
 - sharper standalone boundaries between the generic bench and armfortas-local
