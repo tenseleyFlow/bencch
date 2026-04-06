@@ -1,0 +1,33 @@
+suite "differential/runtime"
+
+case "mixed_types_refs"
+source "../../../test_programs/mixed_types.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "where_construct_refs"
+source "../../../test_programs/where_construct.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_basic_refs"
+source "../../../test_programs/derived_type_basic.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "string_fixed_refs"
+source "../../../test_programs/string_fixed.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end

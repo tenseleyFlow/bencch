@@ -1,0 +1,17 @@
+suite "differential/io-and-interop"
+
+case "file_io_refs"
+source "../../../test_programs/file_io.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "bind_c_value_refs"
+source "../../../test_programs/bind_c_value.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
