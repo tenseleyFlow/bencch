@@ -1,0 +1,16 @@
+suite "frontend/preprocess"
+
+case "macro_include"
+source "../../fixtures/frontend/preprocess/feature_mix.f90"
+armfortas => preprocess
+expect preprocess contains "print *, 'extra branch'"
+expect preprocess contains "print *, 'bench says hi'"
+expect preprocess contains "print *, 'include worked'"
+end
+
+case "fixed_form_comment_awareness"
+source "../../fixtures/frontend/preprocess/fixed_comments.f"
+armfortas => preprocess
+expect preprocess contains "C     VALUE should stay in the comment"
+expect preprocess contains "I = 42"
+end

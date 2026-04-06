@@ -1,0 +1,29 @@
+suite "frontend/sema"
+
+case "intent_ok"
+source "../../fixtures/frontend/sema/intent_ok.f90"
+armfortas => sema
+expect sema contains "diagnostics: none"
+expect sema contains "\"x\""
+end
+
+case "assign_to_parameter"
+source "../../fixtures/frontend/sema/assign_to_parameter.f90"
+armfortas => sema
+expect sema contains "named constant"
+expect-fail sema contains "named constant"
+end
+
+case "allocate_non_allocatable"
+source "../../fixtures/frontend/sema/allocate_non_allocatable.f90"
+armfortas => sema
+expect sema contains "allocatable or pointer"
+expect-fail sema contains "allocatable or pointer"
+end
+
+case "pure_io"
+source "../../fixtures/frontend/sema/pure_io.f90"
+armfortas => sema
+expect sema contains "I/O"
+expect-fail sema contains "I/O"
+end

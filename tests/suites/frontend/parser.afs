@@ -1,0 +1,36 @@
+suite "frontend/parser"
+
+case "select_type_construct"
+source "../../fixtures/frontend/parser/select_type_construct.f90"
+armfortas => ast
+expect ast contains "SelectType"
+expect ast contains "ClassDefault"
+end
+
+case "where_construct"
+source "../../../test_programs/where_construct.f90"
+armfortas => ast
+expect ast contains "WhereConstruct"
+expect ast contains "Deallocate"
+end
+
+case "interface_block"
+source "../../fixtures/frontend/parser/interface_block.f90"
+armfortas => ast
+expect ast contains "InterfaceBlock"
+expect ast contains "Subprogram"
+end
+
+case "fixed_form_program"
+source "../../fixtures/frontend/parser/fixed_program.f"
+armfortas => ast
+expect ast contains "Program"
+expect ast contains "Assignment"
+end
+
+case "missing_end_select"
+source "../../fixtures/frontend/parser/missing_end_select.f90"
+armfortas => tokens
+expect tokens contains "\"select\""
+expect-fail parser contains "expected 'end select'"
+end

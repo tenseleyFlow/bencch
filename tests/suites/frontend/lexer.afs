@@ -1,0 +1,23 @@
+suite "frontend/lexer"
+
+case "free_form_tokens"
+source "../../fixtures/frontend/lexer/free_tokens.f90"
+armfortas => tokens
+expect tokens contains "identifier"
+expect tokens contains "\"total\""
+expect tokens contains "string literal"
+end
+
+case "fixed_form_tokens"
+source "../../fixtures/frontend/lexer/fixed_columns.f"
+armfortas => tokens
+expect tokens contains "integer literal"
+expect tokens contains "\"I\""
+expect tokens contains "\"J\""
+end
+
+case "fixed_form_bad_string"
+source "../../fixtures/frontend/lexer/bad_string.f"
+armfortas => tokens
+expect-fail lexer contains "unterminated string literal in fixed-form body"
+end

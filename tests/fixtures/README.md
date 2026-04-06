@@ -6,3 +6,6 @@ The first `afs-tests` slice still references the legacy `test_programs/`
 corpus directly so we can migrate coverage into suites quickly without losing
 the existing compiler smoke tests. New shared fixtures should land here, and
 later sprints will move legacy inputs across when the suite layout settles.
+
+The frontend corpus now lives under `tests/fixtures/frontend/` with dedicated
+subdirectories for `preprocess`, `lexer`, `parser`, and `sema`.
