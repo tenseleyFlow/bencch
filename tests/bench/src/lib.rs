@@ -1965,6 +1965,78 @@ end
         assert!(match_checks(&checks, "omega\nalpha\n", "demo").is_err());
     }
 
+    fn run_only_result(stdout: &str, stderr: &str, exit_code: i32) -> CaptureResult {
+        CaptureResult {
+            input: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            stages: std::collections::BTreeMap::from([(
+                Stage::Run,
+                CapturedStage::Run(RunCapture {
+                    exit_code,
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
+                }),
+            )]),
+        }
+    }
+
+    fn reference_run(
+        compiler: ReferenceCompiler,
+        stdout: &str,
+        stderr: &str,
+        exit_code: i32,
+    ) -> ReferenceResult {
+        ReferenceResult {
+            compiler,
+            compile_command: format!("{} demo.f90 -o demo", compiler.as_str()),
+            compile_exit_code: 0,
+            compile_stdout: String::new(),
+            compile_stderr: String::new(),
+            run: Some(RunCapture {
+                exit_code,
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+            }),
+            run_error: None,
+        }
+    }
+
+    #[test]
+    fn not_contains_expectation_checks_text_absence() {
+        let case = CaseSpec {
+            name: "no_reserved_register".into(),
+            source: PathBuf::from("demo.f90"),
+            requested: BTreeSet::from([Stage::Asm]),
+            opt_levels: vec![OptLevel::O0],
+            reference_compilers: Vec::new(),
+            expectations: vec![Expectation::NotContains {
+                target: Target::Stage(Stage::Asm),
+                needle: "x18".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let result = CaptureResult {
+            input: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            stages: std::collections::BTreeMap::from([(
+                Stage::Asm,
+                CapturedStage::Text("mov x19, x0\nret\n".into()),
+            )]),
+        };
+        assert!(evaluate_positive_expectations(&case, &result).is_ok());
+
+        let bad = CaptureResult {
+            input: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            stages: std::collections::BTreeMap::from([(
+                Stage::Asm,
+                CapturedStage::Text("mov x18, x0\nret\n".into()),
+            )]),
+        };
+        let err = evaluate_positive_expectations(&case, &bad).unwrap_err();
+        assert!(err.contains("expected asm to not contain"));
+    }
+
     #[test]
     fn writes_failure_bundle_with_artifacts() {
         let source = std::env::temp_dir().join("afs_tests_bundle_source.f90");
@@ -2042,6 +2114,30 @@ end
 
         let _ = fs::remove_dir_all(bundle);
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn differential_reports_armfortas_only_divergence() {
+        let result = run_only_result("0\n", "", 0);
+        let refs = vec![
+            reference_run(ReferenceCompiler::Gfortran, "42\n", "", 0),
+            reference_run(ReferenceCompiler::FlangNew, "42\n", "", 0),
+        ];
+
+        let err = compare_differential(&result, &refs).unwrap_err();
+        assert!(err.contains("classification: armfortas-only divergence"));
+    }
+
+    #[test]
+    fn differential_reports_reference_disagreement() {
+        let result = run_only_result("42\n", "", 0);
+        let refs = vec![
+            reference_run(ReferenceCompiler::Gfortran, "42\n", "", 0),
+            reference_run(ReferenceCompiler::FlangNew, "99\n", "", 0),
+        ];
+
+        let err = compare_differential(&result, &refs).unwrap_err();
+        assert!(err.contains("classification: reference disagreement"));
     }
 
     #[test]
