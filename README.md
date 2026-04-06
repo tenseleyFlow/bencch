@@ -33,6 +33,10 @@ That means this repo already carries:
 - capture-path reproducibility coverage for both `asm` and `obj`, so the bench
   can prove whether `armfortas::testing` is stable on its own or is only
   drifting relative to the CLI
+- runtime consistency coverage for repeated full CLI builds, repeated
+  `armfortas::testing` `run` capture, and capture-vs-CLI behavior comparisons,
+  which currently stays green on the bench-owned backend fixtures and narrows
+  the observed nondeterminism below the sampled runtime surface
 
 ## Layout
 
@@ -64,8 +68,9 @@ Next planned slice from this extraction point:
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
 - deeper consistency coverage around other adapter-local boundaries, now that
-  capture-path reproducibility and CLI-vs-capture triangulation are both in
-  place
+  CLI runtime reproducibility, capture runtime reproducibility, and
+  capture-vs-CLI runtime behavior are all in place alongside the existing
+  `asm`/`obj` families
 - report-surface follow-up beyond the current console/bundle rollups, once we
   want machine-readable or cross-run consistency summaries
 - sharper standalone boundaries between the generic bench and armfortas-local
