@@ -23,6 +23,10 @@ That means this repo already carries:
 - consistency-driven `XFAIL`s now emit real report bundles with copied repeated
   run artifacts and per-check summaries under `reports/consistency...`, instead
   of leaving the interesting evidence stranded in temporary directories
+- end-of-run summaries now roll up consistency families by check, so larger
+  nondeterminism suites collapse into compact `repeat_count`/`unique_variants`
+  and varying/stable-component summaries instead of only a wall of individual
+  cell output
 
 ## Layout
 
@@ -52,10 +56,10 @@ Next planned slice from this extraction point:
   current `xfail` consistency families into one rooted compiler issue
 - broader repeat-aware sampling once the current `repeat => 3` coverage has
   proven out as a practical default
-- compact report surfaces for larger consistency families, now that per-check
-  bundle summaries and copied artifacts are in place
 - continued Sprint 6 differential expansion where behavior is stable enough to
   compare across compilers
+- report-surface follow-up beyond the current console/bundle rollups, once we
+  want machine-readable or cross-run consistency summaries
 - sharper standalone boundaries between the generic bench and armfortas-local
   compiler adapter code
 - continued hardening toward a standalone public bench repo
