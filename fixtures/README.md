@@ -28,4 +28,5 @@ Sprint 7 begins carving authored module graphs into `fixtures/modules/` so the
 bench can model ordered multi-file inputs instead of only isolated sources.
 That corpus now covers module-use chains, renaming, module procedures, and an
 early submodule probe, plus visibility, fan-in, re-export, and diamond-style
-dependency graph families, along with rename-across-hop export-surface probes.
+dependency graph families, along with rename-across-hop export-surface probes
+and mixed-ONLY/collision graph shapes.
