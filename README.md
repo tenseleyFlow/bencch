@@ -42,6 +42,12 @@ Run one suite family:
 cargo run -p afs-tests -- run --suite consistency/runtime
 ```
 
+Inspect the current embedded/standalone posture:
+
+```bash
+cargo run -p afs-tests -- doctor
+```
+
 Run against an explicit compiler binary:
 
 ```bash
@@ -133,6 +139,7 @@ Common things the runner understands:
 - per-opt status like `xfail when O1, O2 because "reason"`
 - consistency checks like `cli_obj_vs_system_as` and `capture_run_reproducible`
 - report outputs like `--json-report path/to/report.json` and `--markdown-report path/to/report.md`
+- environment and adapter inspection with `doctor`
 
 ## Notes
 
