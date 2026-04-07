@@ -1,0 +1,73 @@
+suite "differential/runtime-control-flow"
+
+case "if_else_matches_references"
+source "../../../test_programs/if_else.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "do_while_matches_references"
+source "../../../test_programs/do_while.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "nested_loops_matches_references"
+source "../../../test_programs/nested_loops.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "exit_cycle_matches_references"
+source "../../../test_programs/exit_cycle.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "select_case_matches_references"
+source "../../../test_programs/select_case.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "function_call_matches_references"
+source "../../../test_programs/function_call.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "subroutine_call_matches_references"
+source "../../../test_programs/subroutine_call.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "real_function_matches_references"
+source "../../../test_programs/real_function.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
