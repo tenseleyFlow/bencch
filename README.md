@@ -96,6 +96,26 @@ expect run.exit_code equals 0
 end
 ```
 
+Graph cases use `entry` plus ordered `file` lines:
+
+```text
+suite "modules/runtime-graphs"
+
+case "module_chain_runtime"
+entry "../../fixtures/modules/module_chain/main.f90"
+file "../../fixtures/modules/module_chain/math_seed.f90"
+file "../../fixtures/modules/module_chain/math_values.f90"
+file "../../fixtures/modules/module_chain/main.f90"
+opts => O0, O1, O2
+armfortas => run
+expect run.stdout check-comments
+end
+```
+
+Today the armfortas adapter materializes graph cases into one generated source
+in declared file order before capture/compile. The authored files still stay in
+the failure bundle.
+
 Common things the runner understands:
 
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
