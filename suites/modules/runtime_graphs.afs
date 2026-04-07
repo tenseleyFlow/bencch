@@ -57,6 +57,9 @@ file "../../fixtures/modules/visibility/visible_values.f90"
 file "../../fixtures/modules/visibility/main_shown.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -70,6 +73,9 @@ file "../../fixtures/modules/fanin/combined_value.f90"
 file "../../fixtures/modules/fanin/main.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -83,6 +89,9 @@ file "../../fixtures/modules/reexport_chain/consumer_values.f90"
 file "../../fixtures/modules/reexport_chain/main.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -97,6 +106,9 @@ file "../../fixtures/modules/diamond_merge/merged_total.f90"
 file "../../fixtures/modules/diamond_merge/main.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -109,6 +121,9 @@ file "../../fixtures/modules/rename_hops/bridge_aliases.f90"
 file "../../fixtures/modules/rename_hops/main_alias.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -121,6 +136,9 @@ file "../../fixtures/modules/mixed_only/bridge_values.f90"
 file "../../fixtures/modules/mixed_only/main_alias.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -133,6 +151,9 @@ file "../../fixtures/modules/collision_shadow/right_values.f90"
 file "../../fixtures/modules/collision_shadow/main_aliases.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -147,6 +168,9 @@ file "../../fixtures/modules/layered_leaves/total_metrics.f90"
 file "../../fixtures/modules/layered_leaves/main_total.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
@@ -161,6 +185,9 @@ file "../../fixtures/modules/layered_leaves/delta_metrics.f90"
 file "../../fixtures/modules/layered_leaves/main_gap.f90"
 opts => O0, O1, O2
 armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
