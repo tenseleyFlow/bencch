@@ -7,9 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compiler::{
-    capture_from_path, compile_output, linked_adapter_description, linked_adapter_root,
-    CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, EmitMode, FailureStage,
-    OptLevel, RunCapture, Stage,
+    ArmfortasAdapters, ArmfortasCliAdapter, CaptureFailure, CaptureRequest, CaptureResult,
+    CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -209,12 +208,6 @@ impl ReferenceCompiler {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ArmfortasCliAdapter {
-    Linked,
-    External(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolchainConfig {
     armfortas: ArmfortasCliAdapter,
     gfortran: String,
@@ -239,18 +232,8 @@ impl ToolchainConfig {
         }
     }
 
-    fn armfortas_command_name(&self) -> &str {
-        match &self.armfortas {
-            ArmfortasCliAdapter::Linked => "armfortas (linked)",
-            ArmfortasCliAdapter::External(binary) => binary,
-        }
-    }
-
-    fn armfortas_external_bin(&self) -> Option<&str> {
-        match &self.armfortas {
-            ArmfortasCliAdapter::Linked => None,
-            ArmfortasCliAdapter::External(binary) => Some(binary),
-        }
+    fn armfortas_adapters(&self) -> ArmfortasAdapters {
+        ArmfortasAdapters::new(self.armfortas.clone())
     }
 
     fn reference_binary(&self, compiler: ReferenceCompiler) -> &str {
@@ -689,42 +672,57 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
     let workspace_root = workspace_root();
     let suite_root = default_suite_root();
     let report_root = default_report_root();
-    let linked_root = linked_adapter_root();
-    let linked_manifest = linked_root.join("Cargo.toml");
+    let armfortas = config.tools.armfortas_adapters();
+    let capture_root = armfortas.capture_root();
+    let capture_manifest = capture_root.join("Cargo.toml");
 
     let mut lines = vec![
         "Doctor".to_string(),
         format!("  workspace_root: {}", display_path(&workspace_root)),
         format!("  suite_root: {}", display_path(&suite_root)),
         format!("  report_root: {}", display_path(&report_root)),
-        format!("  linked_adapter: {}", linked_adapter_description()),
-        format!("  linked_adapter_root: {}", display_path(&linked_root)),
+        format!("  armfortas_cli_adapter: {}", armfortas.cli_description()),
         format!(
-            "  linked_adapter_manifest: {}",
-            if linked_manifest.exists() {
-                display_path(&linked_manifest)
+            "  armfortas_capture_adapter: {}",
+            armfortas.capture_description()
+        ),
+        format!("  armfortas_capture_root: {}", display_path(&capture_root)),
+        format!(
+            "  armfortas_capture_manifest: {}",
+            if capture_manifest.exists() {
+                display_path(&capture_manifest)
             } else {
                 "missing".to_string()
             }
         ),
     ];
 
-    match &config.tools.armfortas {
+    lines.push(format!(
+        "  armfortas_cli_mode: {}",
+        armfortas.cli_mode_name()
+    ));
+    match armfortas.cli() {
         ArmfortasCliAdapter::Linked => {
-            lines.push("  armfortas_cli_mode: linked".to_string());
             lines.push(format!(
                 "  armfortas_cli_status: {}",
-                format!("linked via Cargo to {}", display_path(&linked_root))
+                format!("linked via Cargo to {}", display_path(&capture_root))
             ));
         }
         ArmfortasCliAdapter::External(binary) => {
-            lines.push("  armfortas_cli_mode: external".to_string());
             lines.push(format!(
                 "  armfortas_cli_status: {}",
                 tool_probe_status(binary, false)
             ));
         }
     }
+    lines.push(format!(
+        "  armfortas_capture_mode: {}",
+        armfortas.capture_mode_name()
+    ));
+    lines.push(format!(
+        "  armfortas_capture_status: linked via Cargo to {}",
+        display_path(&capture_root)
+    ));
     lines.push(format!(
         "  gfortran: {}",
         tool_probe_status(&config.tools.gfortran, false)
@@ -741,7 +739,10 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         "  otool: {}",
         tool_probe_status(&config.tools.otool, false)
     ));
-    lines.push(format!("  nm: {}", tool_probe_status(&config.tools.nm, false)));
+    lines.push(format!(
+        "  nm: {}",
+        tool_probe_status(&config.tools.nm, false)
+    ));
     lines.push(
         "  note: linked capture still depends on the surrounding armfortas checkout".to_string(),
     );
@@ -770,7 +771,9 @@ fn tool_probe_status(configured: &str, already_resolved_path: bool) -> String {
 fn resolve_tool_path(configured: &str) -> Option<PathBuf> {
     let configured_path = Path::new(configured);
     if configured.contains('/') || configured.starts_with('.') {
-        return configured_path.exists().then(|| configured_path.to_path_buf());
+        return configured_path
+            .exists()
+            .then(|| configured_path.to_path_buf());
     }
 
     let path_var = std::env::var_os("PATH")?;
@@ -1557,7 +1560,11 @@ fn execute_case_cell(
         consistency_issues: Vec::new(),
     };
 
-    match capture_from_path(&request) {
+    match config
+        .tools
+        .armfortas_adapters()
+        .capture_from_path(&request)
+    {
         Ok(result) => artifacts.armfortas = Some(result),
         Err(failure) => artifacts.armfortas_failure = Some(failure),
     }
@@ -2736,7 +2743,7 @@ fn run_capture_asm_vs_cli_asm(
         });
     }
 
-    let capture_command = render_capture_command(source, opt_level, Stage::Asm);
+    let capture_command = render_capture_command(source, opt_level, Stage::Asm, tools);
     let capture_text = match capture_text_stage(capture_result, Stage::Asm) {
         Ok(text) => text,
         Err(detail) => {
@@ -2879,7 +2886,7 @@ fn run_capture_obj_vs_cli_obj(
         });
     }
 
-    let capture_command = render_capture_command(source, opt_level, Stage::Obj);
+    let capture_command = render_capture_command(source, opt_level, Stage::Obj, tools);
     let capture_text = match capture_text_stage(capture_result, Stage::Obj) {
         Ok(text) => text,
         Err(detail) => {
@@ -3069,7 +3076,7 @@ fn run_capture_run_vs_cli_run(
         });
     }
 
-    let capture_command = render_capture_command(source, opt_level, Stage::Run);
+    let capture_command = render_capture_command(source, opt_level, Stage::Run, tools);
     let capture_run = match capture_run_stage(capture_result) {
         Ok(run) => run.clone(),
         Err(detail) => {
@@ -3235,7 +3242,7 @@ fn run_capture_asm_reproducible(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
-    _tools: &ToolchainConfig,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -3256,7 +3263,7 @@ fn run_capture_asm_reproducible(
     }
 
     let mut runs = Vec::new();
-    let command = render_capture_command(source, opt_level, Stage::Asm);
+    let command = render_capture_command(source, opt_level, Stage::Asm, tools);
     let initial_text = match capture_text_stage(capture_result, Stage::Asm) {
         Ok(text) => text,
         Err(detail) => {
@@ -3291,7 +3298,7 @@ fn run_capture_asm_reproducible(
     });
 
     for index in 1..repeat_count {
-        let text = match capture_text_from_testing(source, opt_level, Stage::Asm) {
+        let text = match capture_text_from_testing(source, opt_level, Stage::Asm, tools) {
             Ok(text) => text,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3358,7 +3365,7 @@ fn run_capture_obj_reproducible(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
-    _tools: &ToolchainConfig,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -3378,7 +3385,7 @@ fn run_capture_obj_reproducible(
         });
     }
 
-    let command = render_capture_command(source, opt_level, Stage::Obj);
+    let command = render_capture_command(source, opt_level, Stage::Obj, tools);
     let initial_text = match capture_text_stage(capture_result, Stage::Obj) {
         Ok(text) => text,
         Err(detail) => {
@@ -3429,7 +3436,7 @@ fn run_capture_obj_reproducible(
     }];
 
     for index in 1..repeat_count {
-        let text = match capture_text_from_testing(source, opt_level, Stage::Obj) {
+        let text = match capture_text_from_testing(source, opt_level, Stage::Obj, tools) {
             Ok(text) => text,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3529,7 +3536,7 @@ fn run_capture_run_reproducible(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
-    _tools: &ToolchainConfig,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -3549,7 +3556,7 @@ fn run_capture_run_reproducible(
         });
     }
 
-    let command = render_capture_command(source, opt_level, Stage::Run);
+    let command = render_capture_command(source, opt_level, Stage::Run, tools);
     let initial_run = match capture_run_stage(capture_result) {
         Ok(run) => run.clone(),
         Err(detail) => {
@@ -3587,7 +3594,7 @@ fn run_capture_run_reproducible(
     }];
 
     for index in 1..repeat_count {
-        let run = match capture_run_from_testing(source, opt_level) {
+        let run = match capture_run_from_testing(source, opt_level, tools) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3774,34 +3781,15 @@ fn compile_with_driver(
     tools: &ToolchainConfig,
 ) -> Result<String, String> {
     let command = render_armfortas_command(source, opt_level, mode, output, tools);
-    if let Some(binary) = tools.armfortas_external_bin() {
-        let mut args = vec![opt_level.as_flag().to_string()];
-        match mode {
-            DriverEmitMode::Asm => args.push("-S".to_string()),
-            DriverEmitMode::Obj => args.push("-c".to_string()),
-            DriverEmitMode::Binary => {}
-        }
-        args.push(source.display().to_string());
-        args.push("-o".to_string());
-        args.push(output.display().to_string());
-
-        let compile = Command::new(binary)
-            .args(&args)
-            .output()
-            .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
-        if !compile.status.success() {
-            let stderr = String::from_utf8_lossy(&compile.stderr);
-            return Err(format!("{} failed:\n{}", command, stderr.trim_end()));
-        }
-    } else {
-        let emit_mode = match mode {
-            DriverEmitMode::Asm => EmitMode::Asm,
-            DriverEmitMode::Obj => EmitMode::Obj,
-            DriverEmitMode::Binary => EmitMode::Binary,
-        };
-        compile_output(source, opt_level, emit_mode, output)
-            .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
-    }
+    let emit_mode = match mode {
+        DriverEmitMode::Asm => EmitMode::Asm,
+        DriverEmitMode::Obj => EmitMode::Obj,
+        DriverEmitMode::Binary => EmitMode::Binary,
+    };
+    tools
+        .armfortas_adapters()
+        .compile_output(source, opt_level, emit_mode, output)
+        .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
     Ok(command)
 }
 
@@ -3812,6 +3800,7 @@ fn render_armfortas_command(
     output: &Path,
     tools: &ToolchainConfig,
 ) -> String {
+    let armfortas = tools.armfortas_adapters();
     let mut args = vec![opt_level.as_flag().to_string()];
     match mode {
         DriverEmitMode::Asm => args.push("-S".to_string()),
@@ -3821,19 +3810,26 @@ fn render_armfortas_command(
     args.push(source.display().to_string());
     args.push("-o".to_string());
     args.push(output.display().to_string());
-    render_command(tools.armfortas_command_name(), &args)
+    render_command(armfortas.cli_command_name(), &args)
 }
 
 fn render_binary_run_command(binary: &Path) -> String {
     render_command(&binary.display().to_string(), &[])
 }
 
-fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> String {
+fn render_capture_command(
+    source: &Path,
+    opt_level: OptLevel,
+    stage: Stage,
+    tools: &ToolchainConfig,
+) -> String {
+    let armfortas = tools.armfortas_adapters();
     format!(
-        "armfortas::testing capture {} --stage {} {}",
+        "{} {} --stage {} {}",
+        armfortas.capture_command_name(),
         opt_level.as_flag(),
         stage.as_str(),
-        quote_arg(&source.display().to_string())
+        quote_arg(&source.display().to_string()),
     )
 }
 
@@ -3841,26 +3837,35 @@ fn capture_text_from_testing(
     source: &Path,
     opt_level: OptLevel,
     stage: Stage,
+    tools: &ToolchainConfig,
 ) -> Result<String, String> {
-    let command = render_capture_command(source, opt_level, stage);
+    let command = render_capture_command(source, opt_level, stage, tools);
     let request = CaptureRequest {
         input: source.to_path_buf(),
         requested: BTreeSet::from([stage]),
         opt_level,
     };
-    let result = capture_from_path(&request)
+    let result = tools
+        .armfortas_adapters()
+        .capture_from_path(&request)
         .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
     capture_text_stage(&result, stage).map(str::to_string)
 }
 
-fn capture_run_from_testing(source: &Path, opt_level: OptLevel) -> Result<RunCapture, String> {
-    let command = render_capture_command(source, opt_level, Stage::Run);
+fn capture_run_from_testing(
+    source: &Path,
+    opt_level: OptLevel,
+    tools: &ToolchainConfig,
+) -> Result<RunCapture, String> {
+    let command = render_capture_command(source, opt_level, Stage::Run, tools);
     let request = CaptureRequest {
         input: source.to_path_buf(),
         requested: BTreeSet::from([Stage::Run]),
         opt_level,
     };
-    let result = capture_from_path(&request)
+    let result = tools
+        .armfortas_adapters()
+        .capture_from_path(&request)
         .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
     capture_run_stage(&result).cloned()
 }
@@ -6081,9 +6086,7 @@ end
 
         let config = DoctorConfig {
             tools: ToolchainConfig {
-                armfortas: ArmfortasCliAdapter::External(
-                    armfortas_bin.display().to_string(),
-                ),
+                armfortas: ArmfortasCliAdapter::External(armfortas_bin.display().to_string()),
                 gfortran: gfortran_bin.display().to_string(),
                 flang_new: "/tmp/does-not-exist-flang".into(),
                 system_as: "/tmp/does-not-exist-as".into(),
@@ -6094,9 +6097,25 @@ end
 
         let rendered = render_doctor_report(&config);
         assert!(rendered.contains("Doctor"));
+        assert!(rendered.contains(
+            "armfortas_cli_adapter: external armfortas binary adapter"
+        ));
         assert!(rendered.contains("armfortas_cli_mode: external"));
-        assert!(rendered.contains(&format!("configured={} resolved={}", armfortas_bin.display(), armfortas_bin.display())));
-        assert!(rendered.contains(&format!("configured={} resolved={}", gfortran_bin.display(), gfortran_bin.display())));
+        assert!(rendered.contains(
+            "armfortas_capture_adapter: linked armfortas::testing capture adapter"
+        ));
+        assert!(rendered.contains("armfortas_capture_mode: linked"));
+        assert!(rendered.contains("armfortas_capture_manifest:"));
+        assert!(rendered.contains(&format!(
+            "configured={} resolved={}",
+            armfortas_bin.display(),
+            armfortas_bin.display()
+        )));
+        assert!(rendered.contains(&format!(
+            "configured={} resolved={}",
+            gfortran_bin.display(),
+            gfortran_bin.display()
+        )));
         assert!(rendered.contains("configured=/tmp/does-not-exist-flang resolved=missing"));
 
         let _ = fs::remove_dir_all(&root);

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub use bencch_core::{
     CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage, OptLevel,
@@ -13,15 +14,110 @@ pub enum EmitMode {
     Binary,
 }
 
-pub fn linked_adapter_description() -> &'static str {
-    "linked armfortas crate adapter"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArmfortasCliAdapter {
+    Linked,
+    External(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmfortasCaptureAdapter {
+    Linked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmfortasAdapters {
+    cli: ArmfortasCliAdapter,
+    capture: ArmfortasCaptureAdapter,
+}
+
+impl ArmfortasAdapters {
+    pub fn new(cli: ArmfortasCliAdapter) -> Self {
+        Self {
+            cli,
+            capture: ArmfortasCaptureAdapter::Linked,
+        }
+    }
+
+    pub fn cli(&self) -> &ArmfortasCliAdapter {
+        &self.cli
+    }
+
+    pub fn cli_mode_name(&self) -> &'static str {
+        match self.cli {
+            ArmfortasCliAdapter::Linked => "linked",
+            ArmfortasCliAdapter::External(_) => "external",
+        }
+    }
+
+    pub fn cli_description(&self) -> &'static str {
+        match self.cli {
+            ArmfortasCliAdapter::Linked => "linked armfortas crate driver adapter",
+            ArmfortasCliAdapter::External(_) => "external armfortas binary adapter",
+        }
+    }
+
+    pub fn cli_command_name(&self) -> &str {
+        match &self.cli {
+            ArmfortasCliAdapter::Linked => "armfortas (linked)",
+            ArmfortasCliAdapter::External(binary) => binary,
+        }
+    }
+
+    pub fn capture_command_name(&self) -> &'static str {
+        match self.capture {
+            ArmfortasCaptureAdapter::Linked => "armfortas::testing capture (linked)",
+        }
+    }
+
+    pub fn capture_mode_name(&self) -> &'static str {
+        match self.capture {
+            ArmfortasCaptureAdapter::Linked => "linked",
+        }
+    }
+
+    pub fn capture_description(&self) -> &'static str {
+        match self.capture {
+            ArmfortasCaptureAdapter::Linked => "linked armfortas::testing capture adapter",
+        }
+    }
+
+    pub fn capture_root(&self) -> PathBuf {
+        match self.capture {
+            ArmfortasCaptureAdapter::Linked => linked_adapter_root(),
+        }
+    }
+
+    pub fn compile_output(
+        &self,
+        input: &Path,
+        opt_level: OptLevel,
+        mode: EmitMode,
+        output: &Path,
+    ) -> Result<(), String> {
+        match &self.cli {
+            ArmfortasCliAdapter::Linked => linked_compile_output(input, opt_level, mode, output),
+            ArmfortasCliAdapter::External(binary) => {
+                external_compile_output(binary, input, opt_level, mode, output)
+            }
+        }
+    }
+
+    pub fn capture_from_path(
+        &self,
+        request: &CaptureRequest,
+    ) -> Result<CaptureResult, CaptureFailure> {
+        match self.capture {
+            ArmfortasCaptureAdapter::Linked => linked_capture_from_path(request),
+        }
+    }
 }
 
 pub fn linked_adapter_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-pub fn compile_output(
+fn linked_compile_output(
     input: &Path,
     opt_level: OptLevel,
     mode: EmitMode,
@@ -40,7 +136,35 @@ pub fn compile_output(
     armfortas::driver::compile(&opts)
 }
 
-pub fn capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
+fn external_compile_output(
+    binary: &str,
+    input: &Path,
+    opt_level: OptLevel,
+    mode: EmitMode,
+    output: &Path,
+) -> Result<(), String> {
+    let mut args = vec![opt_level.as_flag().to_string()];
+    match mode {
+        EmitMode::Asm => args.push("-S".to_string()),
+        EmitMode::Obj => args.push("-c".to_string()),
+        EmitMode::Binary => {}
+    }
+    args.push(input.display().to_string());
+    args.push("-o".to_string());
+    args.push(output.display().to_string());
+
+    let compile = Command::new(binary)
+        .args(&args)
+        .output()
+        .map_err(|err| format!("cannot run '{}': {}", binary, err))?;
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        return Err(stderr.trim_end().to_string());
+    }
+    Ok(())
+}
+
+fn linked_capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
     let arm_request = armfortas::testing::CaptureRequest {
         input: request.input.clone(),
         requested: request
