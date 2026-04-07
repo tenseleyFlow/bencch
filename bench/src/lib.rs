@@ -1403,15 +1403,7 @@ fn execute_case_cell(
             }
         }
         (None, Some(failure)) => {
-            let partial = failure.partial_result();
-            let mut execution = evaluate_positive_expectations(case, &partial);
-            if execution.is_ok() {
-                if has_failure_expectation(case) {
-                    execution = evaluate_failure_expectations(case, failure);
-                } else {
-                    execution = Err(compose_armfortas_failure_detail(&artifacts));
-                }
-            }
+            let mut execution = evaluate_failed_armfortas(case, &artifacts, failure);
             if execution.is_ok() && !artifacts.references.is_empty() {
                 execution =
                     Err("differential comparison requires a successful armfortas run".to_string());
@@ -1748,6 +1740,25 @@ fn evaluate_failure_expectations(case: &CaseSpec, failure: &CaptureFailure) -> R
     Ok(())
 }
 
+fn evaluate_failed_armfortas(
+    case: &CaseSpec,
+    artifacts: &ExecutionArtifacts,
+    failure: &CaptureFailure,
+) -> Result<(), String> {
+    if has_failure_expectation(case) {
+        evaluate_failure_expectations(case, failure)
+    } else {
+        let partial = failure.partial_result();
+        match evaluate_positive_expectations(case, &partial) {
+            Ok(()) => Err(compose_armfortas_failure_detail(artifacts)),
+            Err(detail) if is_missing_stage_detail(&detail) => {
+                Err(compose_armfortas_failure_detail(artifacts))
+            }
+            Err(detail) => Err(detail),
+        }
+    }
+}
+
 fn has_failure_expectation(case: &CaseSpec) -> bool {
     case.expectations.iter().any(|expectation| {
         matches!(
@@ -1775,6 +1786,10 @@ fn expected_failure_description(case: &CaseSpec) -> String {
     } else {
         items.join(", ")
     }
+}
+
+fn is_missing_stage_detail(detail: &str) -> bool {
+    detail.starts_with("missing captured stage '") || detail == "missing captured run stage"
 }
 
 fn target_text<'a>(result: &'a CaptureResult, target: &Target) -> Result<&'a str, String> {
@@ -5720,5 +5735,127 @@ end
             "expected verifier error, got: {:?}",
             errors
         );
+    }
+
+    #[test]
+    fn failure_expectation_precedes_partial_stage_checks() {
+        let case = CaseSpec {
+            name: "missing_then".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Tokens, Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![
+                Expectation::Contains {
+                    target: Target::RunStdout,
+                    needle: "42".into(),
+                },
+                Expectation::FailContains {
+                    stage: FailureStage::Parser,
+                    needle: "expected 'then'".into(),
+                },
+            ],
+            status_rules: Vec::new(),
+        };
+        let artifacts = ExecutionArtifacts {
+            requested: BTreeSet::from([Stage::Tokens, Stage::Run]),
+            armfortas: None,
+            armfortas_failure: None,
+            references: Vec::new(),
+            consistency_issues: Vec::new(),
+        };
+        let failure = CaptureFailure {
+            input: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            stage: FailureStage::Parser,
+            detail: "expected 'then'".into(),
+            stages: BTreeMap::from([(
+                Stage::Tokens,
+                CapturedStage::Text("if\n".into()),
+            )]),
+        };
+
+        assert!(evaluate_failed_armfortas(&case, &artifacts, &failure).is_ok());
+    }
+
+    #[test]
+    fn unexpected_capture_failure_reports_compiler_failure_detail() {
+        let case = CaseSpec {
+            name: "module_procedure_runtime".into(),
+            source: PathBuf::from("graph.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Contains {
+                target: Target::RunStdout,
+                needle: "42".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let failure = CaptureFailure {
+            input: PathBuf::from("graph.f90"),
+            opt_level: OptLevel::O0,
+            stage: FailureStage::Run,
+            detail: "Undefined symbols for architecture arm64:\n  \"_add_one\"".into(),
+            stages: BTreeMap::new(),
+        };
+        let artifacts = ExecutionArtifacts {
+            requested: BTreeSet::from([Stage::Run]),
+            armfortas: None,
+            armfortas_failure: Some(failure.clone()),
+            references: Vec::new(),
+            consistency_issues: Vec::new(),
+        };
+
+        let err = evaluate_failed_armfortas(&case, &artifacts, &failure).unwrap_err();
+        assert!(err.contains("armfortas failed in run"));
+        assert!(err.contains("_add_one"));
+        assert!(!err.contains("missing captured run stage"));
+    }
+
+    #[test]
+    fn partial_stage_expectation_failure_is_preserved_on_capture_failure() {
+        let case = CaseSpec {
+            name: "module_procedure_backend".into(),
+            source: PathBuf::from("graph.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Asm, Stage::Obj, Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Contains {
+                target: Target::Stage(Stage::Asm),
+                needle: ".globl _add_one".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let failure = CaptureFailure {
+            input: PathBuf::from("graph.f90"),
+            opt_level: OptLevel::O0,
+            stage: FailureStage::Run,
+            detail: "Undefined symbols for architecture arm64:\n  \"_add_one\"".into(),
+            stages: BTreeMap::from([(
+                Stage::Asm,
+                CapturedStage::Text(".globl _main\n".into()),
+            )]),
+        };
+        let artifacts = ExecutionArtifacts {
+            requested: BTreeSet::from([Stage::Asm, Stage::Obj, Stage::Run]),
+            armfortas: None,
+            armfortas_failure: Some(failure.clone()),
+            references: Vec::new(),
+            consistency_issues: Vec::new(),
+        };
+
+        let err = evaluate_failed_armfortas(&case, &artifacts, &failure).unwrap_err();
+        assert!(err.contains("expected asm to contain"));
+        assert!(!err.contains("armfortas failed in run"));
     }
 }
