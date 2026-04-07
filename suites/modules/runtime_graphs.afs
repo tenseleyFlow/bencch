@@ -35,7 +35,18 @@ file "../../fixtures/modules/submodule_future/parent_mod.f90"
 file "../../fixtures/modules/submodule_future/child_impl.f90"
 file "../../fixtures/modules/submodule_future/main.f90"
 armfortas => run
-future "Submodule resolution is not ready yet."
+future "Submodule frontend parses, but runtime lowering/codegen is not ready yet."
 expect run.stdout check-comments
 expect run.exit_code equals 0
+end
+
+case "module_procedure_runtime"
+entry "../../fixtures/modules/module_procedure/main.f90"
+file "../../fixtures/modules/module_procedure/ops.f90"
+file "../../fixtures/modules/module_procedure/main.f90"
+opts => O0, O1, O2
+armfortas => run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Module procedures are called, but the lowered graph does not emit the callee body."
 end

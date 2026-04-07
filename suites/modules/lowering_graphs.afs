@@ -1,0 +1,21 @@
+suite "modules/lowering-graphs"
+
+case "module_chain_ir_values"
+entry "../../fixtures/modules/module_chain/main.f90"
+file "../../fixtures/modules/module_chain/math_seed.f90"
+file "../../fixtures/modules/module_chain/math_values.f90"
+file "../../fixtures/modules/module_chain/main.f90"
+armfortas => ir
+expect ir not-contains "global @math_seed::seed: i32 = zeroinit"
+expect ir not-contains "global @math_values::doubled: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "module_procedure_ir"
+entry "../../fixtures/modules/module_procedure/main.f90"
+file "../../fixtures/modules/module_procedure/ops.f90"
+file "../../fixtures/modules/module_procedure/main.f90"
+armfortas => ir
+expect ir contains "func @add_one"
+xfail "Module procedures are called but not lowered into IR functions."
+end
