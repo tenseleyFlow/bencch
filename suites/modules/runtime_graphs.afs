@@ -1,0 +1,41 @@
+suite "modules/runtime-graphs"
+
+case "module_chain_runtime"
+entry "../../fixtures/modules/module_chain/main.f90"
+file "../../fixtures/modules/module_chain/math_seed.f90"
+file "../../fixtures/modules/module_chain/math_values.f90"
+file "../../fixtures/modules/module_chain/main.f90"
+opts => O0, O1, O2
+armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "rename_only_runtime"
+entry "../../fixtures/modules/rename_only/main.f90"
+file "../../fixtures/modules/rename_only/math_aliases.f90"
+file "../../fixtures/modules/rename_only/main.f90"
+opts => O0, O1, O2
+armfortas => run
+repeat => 3
+differential => gfortran, flang-new
+consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "submodule_future"
+entry "../../fixtures/modules/submodule_future/main.f90"
+file "../../fixtures/modules/submodule_future/parent_mod.f90"
+file "../../fixtures/modules/submodule_future/child_impl.f90"
+file "../../fixtures/modules/submodule_future/main.f90"
+armfortas => run
+future "Submodule resolution is not ready yet."
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end

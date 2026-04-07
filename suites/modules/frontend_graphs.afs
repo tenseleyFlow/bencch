@@ -1,0 +1,34 @@
+suite "modules/frontend-graphs"
+
+case "module_chain_frontend"
+entry "../../fixtures/modules/module_chain/main.f90"
+file "../../fixtures/modules/module_chain/math_seed.f90"
+file "../../fixtures/modules/module_chain/math_values.f90"
+file "../../fixtures/modules/module_chain/main.f90"
+armfortas => ast, sema
+expect ast contains "name: \"math_seed\""
+expect ast contains "module: \"math_values\""
+expect sema contains "local_name: \"doubled\""
+expect sema contains "original_name: \"doubled\""
+end
+
+case "rename_only_frontend"
+entry "../../fixtures/modules/rename_only/main.f90"
+file "../../fixtures/modules/rename_only/math_aliases.f90"
+file "../../fixtures/modules/rename_only/main.f90"
+armfortas => ast, sema
+expect ast contains "local: \"chosen\""
+expect ast contains "remote: \"payload\""
+expect sema contains "local_name: \"chosen\""
+expect sema contains "original_name: \"payload\""
+end
+
+case "submodule_frontend"
+entry "../../fixtures/modules/submodule_future/main.f90"
+file "../../fixtures/modules/submodule_future/parent_mod.f90"
+file "../../fixtures/modules/submodule_future/child_impl.f90"
+file "../../fixtures/modules/submodule_future/main.f90"
+armfortas => ast, sema
+expect ast contains "Submodule"
+expect sema contains "Submodule"
+end
