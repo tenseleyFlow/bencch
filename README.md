@@ -86,7 +86,7 @@ Suites are plain text files under `suites/`.
 suite "consistency/runtime"
 
 case "mixed_types_cli_run_reproducible"
-source "../../../test_programs/mixed_types.f90"
+source "../../fixtures/runtime/mixed_types.f90"
 opts => all
 armfortas => run
 repeat => 3

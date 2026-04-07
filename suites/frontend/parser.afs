@@ -8,7 +8,7 @@ expect ast contains "ClassDefault"
 end
 
 case "where_construct"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 armfortas => ast
 expect ast contains "WhereConstruct"
 expect ast contains "Deallocate"

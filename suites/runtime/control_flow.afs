@@ -88,7 +88,7 @@ expect run.exit_code equals 0
 end
 
 case "where_construct"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

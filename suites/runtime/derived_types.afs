@@ -1,7 +1,7 @@
 suite "runtime/derived-types"
 
 case "derived_type_basic"
-source "../../../test_programs/derived_type_basic.f90"
+source "../../fixtures/runtime/derived_type_basic.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

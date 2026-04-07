@@ -22,7 +22,7 @@ expect run.exit_code equals 0
 end
 
 case "string_fixed"
-source "../../../test_programs/string_fixed.f90"
+source "../../fixtures/runtime/string_fixed.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

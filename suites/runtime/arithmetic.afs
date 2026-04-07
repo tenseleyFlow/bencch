@@ -8,7 +8,7 @@ expect run.exit_code equals 0
 end
 
 case "mixed_types"
-source "../../../test_programs/mixed_types.f90"
+source "../../fixtures/runtime/mixed_types.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

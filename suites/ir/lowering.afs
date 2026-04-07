@@ -28,7 +28,7 @@ expect optir contains "type_is_match_"
 end
 
 case "where_construct_lowering"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 armfortas => ir, optir
 expect ir contains "where_check_"
 expect ir contains "call @afs_allocate_1d"

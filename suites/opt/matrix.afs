@@ -22,7 +22,7 @@ future when O1, O2, O3 because "Keep optimizer-sensitive SELECT TYPE cells visib
 end
 
 case "where_construct_across_matrix"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 opts => O0, O1, O2
 armfortas => ir, optir, run
 expect ir contains "where_check_"
