@@ -19,3 +19,29 @@ armfortas => ir
 expect ir contains "func @add_one"
 xfail "Module procedures are called but not lowered into IR functions."
 end
+
+case "reexport_chain_ir_values"
+entry "../../fixtures/modules/reexport_chain/main.f90"
+file "../../fixtures/modules/reexport_chain/seed_values.f90"
+file "../../fixtures/modules/reexport_chain/relay_values.f90"
+file "../../fixtures/modules/reexport_chain/consumer_values.f90"
+file "../../fixtures/modules/reexport_chain/main.f90"
+armfortas => ir
+expect ir not-contains "global @relay_values::lifted: i32 = zeroinit"
+expect ir not-contains "global @consumer_values::final_value: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "diamond_merge_ir_values"
+entry "../../fixtures/modules/diamond_merge/main.f90"
+file "../../fixtures/modules/diamond_merge/shared_seed.f90"
+file "../../fixtures/modules/diamond_merge/left_branch.f90"
+file "../../fixtures/modules/diamond_merge/right_branch.f90"
+file "../../fixtures/modules/diamond_merge/merged_total.f90"
+file "../../fixtures/modules/diamond_merge/main.f90"
+armfortas => ir
+expect ir not-contains "global @left_branch::left: i32 = zeroinit"
+expect ir not-contains "global @right_branch::right: i32 = zeroinit"
+expect ir not-contains "global @merged_total::total: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end

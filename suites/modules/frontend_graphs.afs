@@ -64,3 +64,30 @@ expect ast contains "module: \"offset_value\""
 expect sema contains "local_name: \"total\""
 expect sema contains "original_name: \"total\""
 end
+
+case "reexport_chain_frontend"
+entry "../../fixtures/modules/reexport_chain/main.f90"
+file "../../fixtures/modules/reexport_chain/seed_values.f90"
+file "../../fixtures/modules/reexport_chain/relay_values.f90"
+file "../../fixtures/modules/reexport_chain/consumer_values.f90"
+file "../../fixtures/modules/reexport_chain/main.f90"
+armfortas => ast, sema
+expect ast contains "module: \"relay_values\""
+expect ast contains "module: \"consumer_values\""
+expect sema contains "local_name: \"final_value\""
+expect sema contains "original_name: \"final_value\""
+end
+
+case "diamond_merge_frontend"
+entry "../../fixtures/modules/diamond_merge/main.f90"
+file "../../fixtures/modules/diamond_merge/shared_seed.f90"
+file "../../fixtures/modules/diamond_merge/left_branch.f90"
+file "../../fixtures/modules/diamond_merge/right_branch.f90"
+file "../../fixtures/modules/diamond_merge/merged_total.f90"
+file "../../fixtures/modules/diamond_merge/main.f90"
+armfortas => ast, sema
+expect ast contains "module: \"left_branch\""
+expect ast contains "module: \"right_branch\""
+expect sema contains "local_name: \"total\""
+expect sema contains "original_name: \"total\""
+end
