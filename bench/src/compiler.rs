@@ -13,6 +13,14 @@ pub enum EmitMode {
     Binary,
 }
 
+pub fn linked_adapter_description() -> &'static str {
+    "linked armfortas crate adapter"
+}
+
+pub fn linked_adapter_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 pub fn compile_output(
     input: &Path,
     opt_level: OptLevel,

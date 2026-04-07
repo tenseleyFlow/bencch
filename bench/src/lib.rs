@@ -7,8 +7,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compiler::{
-    capture_from_path, compile_output, CaptureFailure, CaptureRequest, CaptureResult,
-    CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
+    capture_from_path, compile_output, linked_adapter_description, linked_adapter_root,
+    CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, EmitMode, FailureStage,
+    OptLevel, RunCapture, Stage,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -482,6 +483,10 @@ pub fn run_cli(args: &[String]) -> i32 {
                 1
             }
         },
+        Ok(CommandKind::Doctor(config)) => {
+            println!("{}", render_doctor_report(&config));
+            0
+        }
         Ok(CommandKind::Help) => {
             print_usage();
             0
@@ -497,7 +502,13 @@ pub fn run_cli(args: &[String]) -> i32 {
 enum CommandKind {
     List { suite_filter: Option<String> },
     Run(RunConfig),
+    Doctor(DoctorConfig),
     Help,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorConfig {
+    tools: ToolchainConfig,
 }
 
 fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
@@ -597,6 +608,45 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
             }
             Ok(CommandKind::Run(config))
         }
+        "doctor" => {
+            let mut config = DoctorConfig {
+                tools: ToolchainConfig::from_env(),
+            };
+            let mut queue: VecDeque<&String> = args[1..].iter().collect();
+            while let Some(arg) = queue.pop_front() {
+                match arg.as_str() {
+                    "--armfortas-bin" => {
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--armfortas-bin requires a value")?;
+                        config.tools.armfortas = ArmfortasCliAdapter::External(value.clone());
+                    }
+                    "--gfortran-bin" => {
+                        let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
+                        config.tools.gfortran = value.clone();
+                    }
+                    "--flang-bin" => {
+                        let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
+                        config.tools.flang_new = value.clone();
+                    }
+                    "--as-bin" => {
+                        let value = queue.pop_front().ok_or("--as-bin requires a value")?;
+                        config.tools.system_as = value.clone();
+                    }
+                    "--otool-bin" => {
+                        let value = queue.pop_front().ok_or("--otool-bin requires a value")?;
+                        config.tools.otool = value.clone();
+                    }
+                    "--nm-bin" => {
+                        let value = queue.pop_front().ok_or("--nm-bin requires a value")?;
+                        config.tools.nm = value.clone();
+                    }
+                    "--help" | "-h" => return Ok(CommandKind::Help),
+                    other => return Err(format!("unknown doctor option: {}", other)),
+                }
+            }
+            Ok(CommandKind::Doctor(config))
+        }
         "--help" | "-h" | "help" => Ok(CommandKind::Help),
         other => Err(format!("unknown command: {}", other)),
     }
@@ -609,6 +659,9 @@ fn print_usage() {
     eprintln!("  cargo run -p afs-tests -- list [--suite <filter>]");
     eprintln!(
         "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--json-report <path>] [--markdown-report <path>] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
+    );
+    eprintln!(
+        "  cargo run -p afs-tests -- doctor [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
     );
     eprintln!();
     eprintln!("env overrides:");
@@ -626,6 +679,115 @@ fn default_report_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("reports")
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn render_doctor_report(config: &DoctorConfig) -> String {
+    let workspace_root = workspace_root();
+    let suite_root = default_suite_root();
+    let report_root = default_report_root();
+    let linked_root = linked_adapter_root();
+    let linked_manifest = linked_root.join("Cargo.toml");
+
+    let mut lines = vec![
+        "Doctor".to_string(),
+        format!("  workspace_root: {}", display_path(&workspace_root)),
+        format!("  suite_root: {}", display_path(&suite_root)),
+        format!("  report_root: {}", display_path(&report_root)),
+        format!("  linked_adapter: {}", linked_adapter_description()),
+        format!("  linked_adapter_root: {}", display_path(&linked_root)),
+        format!(
+            "  linked_adapter_manifest: {}",
+            if linked_manifest.exists() {
+                display_path(&linked_manifest)
+            } else {
+                "missing".to_string()
+            }
+        ),
+    ];
+
+    match &config.tools.armfortas {
+        ArmfortasCliAdapter::Linked => {
+            lines.push("  armfortas_cli_mode: linked".to_string());
+            lines.push(format!(
+                "  armfortas_cli_status: {}",
+                format!("linked via Cargo to {}", display_path(&linked_root))
+            ));
+        }
+        ArmfortasCliAdapter::External(binary) => {
+            lines.push("  armfortas_cli_mode: external".to_string());
+            lines.push(format!(
+                "  armfortas_cli_status: {}",
+                tool_probe_status(binary, false)
+            ));
+        }
+    }
+    lines.push(format!(
+        "  gfortran: {}",
+        tool_probe_status(&config.tools.gfortran, false)
+    ));
+    lines.push(format!(
+        "  flang-new: {}",
+        tool_probe_status(&config.tools.flang_new, false)
+    ));
+    lines.push(format!(
+        "  as: {}",
+        tool_probe_status(&config.tools.system_as, false)
+    ));
+    lines.push(format!(
+        "  otool: {}",
+        tool_probe_status(&config.tools.otool, false)
+    ));
+    lines.push(format!("  nm: {}", tool_probe_status(&config.tools.nm, false)));
+    lines.push(
+        "  note: linked capture still depends on the surrounding armfortas checkout".to_string(),
+    );
+
+    lines.join("\n")
+}
+
+fn tool_probe_status(configured: &str, already_resolved_path: bool) -> String {
+    let resolved = if already_resolved_path {
+        let path = PathBuf::from(configured);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    } else {
+        resolve_tool_path(configured)
+    };
+
+    match resolved {
+        Some(path) => format!("configured={} resolved={}", configured, path.display()),
+        None => format!("configured={} resolved=missing", configured),
+    }
+}
+
+fn resolve_tool_path(configured: &str) -> Option<PathBuf> {
+    let configured_path = Path::new(configured);
+    if configured.contains('/') || configured.starts_with('.') {
+        return configured_path.exists().then(|| configured_path.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH")?;
+    for entry in std::env::split_paths(&path_var) {
+        let candidate = entry.join(configured);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn display_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn discover_suites(root: PathBuf) -> Result<Vec<SuiteSpec>, String> {
@@ -5373,6 +5535,44 @@ end
     }
 
     #[test]
+    fn parse_cli_collects_doctor_tool_overrides() {
+        let args = vec![
+            "doctor".to_string(),
+            "--armfortas-bin".to_string(),
+            "/tmp/armfortas".to_string(),
+            "--gfortran-bin".to_string(),
+            "/tmp/gfortran".to_string(),
+            "--flang-bin".to_string(),
+            "/tmp/flang-new".to_string(),
+            "--as-bin".to_string(),
+            "/tmp/as".to_string(),
+            "--otool-bin".to_string(),
+            "/tmp/otool".to_string(),
+            "--nm-bin".to_string(),
+            "/tmp/nm".to_string(),
+        ];
+
+        let command = parse_cli(&args).unwrap();
+        let config = match command {
+            CommandKind::Doctor(config) => config,
+            other => panic!(
+                "expected doctor command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        assert_eq!(
+            config.tools.armfortas,
+            ArmfortasCliAdapter::External("/tmp/armfortas".into())
+        );
+        assert_eq!(config.tools.gfortran, "/tmp/gfortran");
+        assert_eq!(config.tools.flang_new, "/tmp/flang-new");
+        assert_eq!(config.tools.system_as, "/tmp/as");
+        assert_eq!(config.tools.otool, "/tmp/otool");
+        assert_eq!(config.tools.nm, "/tmp/nm");
+    }
+
+    #[test]
     fn parses_failure_expectation() {
         let root = std::env::temp_dir().join("afs_tests_failure_spec.afs");
         fs::write(
@@ -5865,6 +6065,39 @@ end
         let markdown = fs::read_to_string(&markdown_path).unwrap();
         assert!(json.contains("\"passed\": 1"));
         assert!(markdown.contains("| passed | 1 |"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn render_doctor_report_includes_tool_status() {
+        let root = std::env::temp_dir().join("afs_tests_doctor_paths");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let armfortas_bin = root.join("armfortas");
+        let gfortran_bin = root.join("gfortran");
+        fs::write(&armfortas_bin, "").unwrap();
+        fs::write(&gfortran_bin, "").unwrap();
+
+        let config = DoctorConfig {
+            tools: ToolchainConfig {
+                armfortas: ArmfortasCliAdapter::External(
+                    armfortas_bin.display().to_string(),
+                ),
+                gfortran: gfortran_bin.display().to_string(),
+                flang_new: "/tmp/does-not-exist-flang".into(),
+                system_as: "/tmp/does-not-exist-as".into(),
+                otool: "/tmp/does-not-exist-otool".into(),
+                nm: "/tmp/does-not-exist-nm".into(),
+            },
+        };
+
+        let rendered = render_doctor_report(&config);
+        assert!(rendered.contains("Doctor"));
+        assert!(rendered.contains("armfortas_cli_mode: external"));
+        assert!(rendered.contains(&format!("configured={} resolved={}", armfortas_bin.display(), armfortas_bin.display())));
+        assert!(rendered.contains(&format!("configured={} resolved={}", gfortran_bin.display(), gfortran_bin.display())));
+        assert!(rendered.contains("configured=/tmp/does-not-exist-flang resolved=missing"));
 
         let _ = fs::remove_dir_all(&root);
     }
