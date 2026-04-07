@@ -1,0 +1,181 @@
+suite "consistency/runtime-structured"
+
+case "derived_type_method_cli_run_reproducible"
+source "../../../test_programs/derived_type_method.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_method_capture_run_matches_cli"
+source "../../../test_programs/derived_type_method.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_method_capture_run_reproducible"
+source "../../../test_programs/derived_type_method.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_nested_cli_run_reproducible"
+source "../../../test_programs/derived_type_nested.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_nested_capture_run_matches_cli"
+source "../../../test_programs/derived_type_nested.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_nested_capture_run_reproducible"
+source "../../../test_programs/derived_type_nested.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_final_cli_run_reproducible"
+source "../../../test_programs/derived_type_final.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_final_capture_run_matches_cli"
+source "../../../test_programs/derived_type_final.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_final_capture_run_reproducible"
+source "../../../test_programs/derived_type_final.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_formatted_write_cli_run_reproducible"
+source "../../../test_programs/io_formatted_write.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_formatted_write_capture_run_matches_cli"
+source "../../../test_programs/io_formatted_write.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_formatted_write_capture_run_reproducible"
+source "../../../test_programs/io_formatted_write.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_to_unit_cli_run_reproducible"
+source "../../../test_programs/io_write_to_unit.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_to_unit_capture_run_matches_cli"
+source "../../../test_programs/io_write_to_unit.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_to_unit_capture_run_reproducible"
+source "../../../test_programs/io_write_to_unit.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_types_cli_run_reproducible"
+source "../../../test_programs/io_write_types.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_types_capture_run_matches_cli"
+source "../../../test_programs/io_write_types.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_types_capture_run_reproducible"
+source "../../../test_programs/io_write_types.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
