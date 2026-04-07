@@ -91,3 +91,25 @@ expect ast contains "module: \"right_branch\""
 expect sema contains "local_name: \"total\""
 expect sema contains "original_name: \"total\""
 end
+
+case "rename_hops_frontend"
+entry "../../fixtures/modules/rename_hops/main_alias.f90"
+file "../../fixtures/modules/rename_hops/base_values.f90"
+file "../../fixtures/modules/rename_hops/bridge_aliases.f90"
+file "../../fixtures/modules/rename_hops/main_alias.f90"
+armfortas => ast, sema
+expect ast contains "local: \"lifted\""
+expect ast contains "local: \"chosen\""
+expect sema contains "local_name: \"chosen\""
+expect sema contains "original_name: \"lifted\""
+end
+
+case "rename_hops_original_name_rejected"
+entry "../../fixtures/modules/rename_hops/main_payload.f90"
+file "../../fixtures/modules/rename_hops/base_values.f90"
+file "../../fixtures/modules/rename_hops/bridge_aliases.f90"
+file "../../fixtures/modules/rename_hops/main_payload.f90"
+armfortas => sema
+expect-fail sema contains "payload"
+xfail "Original names still leak through renamed re-export graphs."
+end

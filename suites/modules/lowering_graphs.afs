@@ -45,3 +45,14 @@ expect ir not-contains "global @right_branch::right: i32 = zeroinit"
 expect ir not-contains "global @merged_total::total: i32 = zeroinit"
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
+
+case "rename_hops_ir_values"
+entry "../../fixtures/modules/rename_hops/main_alias.f90"
+file "../../fixtures/modules/rename_hops/base_values.f90"
+file "../../fixtures/modules/rename_hops/bridge_aliases.f90"
+file "../../fixtures/modules/rename_hops/main_alias.f90"
+armfortas => ir
+expect ir not-contains "global @base_values::payload: i32 = zeroinit"
+expect ir not-contains "global @bridge_aliases::lifted: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
