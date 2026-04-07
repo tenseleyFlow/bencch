@@ -1,7 +1,7 @@
 suite "differential/runtime-stateful"
 
 case "allocatable_refs"
-source "../../../test_programs/allocatable.f90"
+source "../../fixtures/runtime/allocatable.f90"
 armfortas => run
 differential => gfortran, flang-new
 expect run.stdout check-comments
@@ -9,7 +9,7 @@ expect run.exit_code equals 0
 end
 
 case "string_deferred_refs"
-source "../../../test_programs/string_deferred.f90"
+source "../../fixtures/runtime/string_deferred.f90"
 armfortas => run
 differential => gfortran, flang-new
 expect run.stdout check-comments
@@ -17,7 +17,7 @@ expect run.exit_code equals 0
 end
 
 case "string_reassign_loop_refs"
-source "../../../test_programs/string_reassign_loop.f90"
+source "../../fixtures/runtime/string_reassign_loop.f90"
 armfortas => run
 differential => gfortran, flang-new
 expect run.stdout check-comments
@@ -25,7 +25,7 @@ expect run.exit_code equals 0
 end
 
 case "io_multi_value_read_refs"
-source "../../../test_programs/io_multi_value_read.f90"
+source "../../fixtures/runtime/io_multi_value_read.f90"
 armfortas => run
 differential => gfortran, flang-new
 expect run.stdout check-comments
@@ -33,7 +33,7 @@ expect run.exit_code equals 0
 end
 
 case "io_rewind_refs"
-source "../../../test_programs/io_rewind.f90"
+source "../../fixtures/runtime/io_rewind.f90"
 armfortas => run
 differential => gfortran, flang-new
 expect run.stdout check-comments
@@ -41,7 +41,7 @@ expect run.exit_code equals 0
 end
 
 case "io_flush_stress_refs"
-source "../../../test_programs/io_flush_stress.f90"
+source "../../fixtures/runtime/io_flush_stress.f90"
 armfortas => run
 differential => gfortran, flang-new
 expect run.stdout check-comments
