@@ -302,6 +302,7 @@ struct Outcome {
     kind: OutcomeKind,
     detail: String,
     bundle: Option<PathBuf>,
+    primary_backend: Option<PrimaryBackendReport>,
     consistency_observations: Vec<ConsistencyObservation>,
 }
 
@@ -376,6 +377,23 @@ impl PrimaryCaptureBackendKind {
 struct SelectedPrimaryBackend {
     kind: PrimaryCaptureBackendKind,
     backend: Box<dyn CaptureBackend>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrimaryBackendReport {
+    kind: String,
+    mode: String,
+    detail: String,
+}
+
+impl PrimaryBackendReport {
+    fn from_selected(selected: &SelectedPrimaryBackend) -> Self {
+        Self {
+            kind: selected.kind.as_str().to_string(),
+            mode: selected.backend.mode_name().to_string(),
+            detail: selected.backend.description().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1551,6 +1569,7 @@ fn execute_case_cell(
                 kind: OutcomeKind::Future,
                 detail: reason.clone(),
                 bundle: None,
+                primary_backend: None,
                 consistency_observations: Vec::new(),
             });
         }
@@ -1671,6 +1690,7 @@ fn execute_case_cell(
         .iter()
         .map(ConsistencyIssue::observation)
         .collect::<Vec<_>>();
+    let primary_backend = Some(PrimaryBackendReport::from_selected(&selected_backend));
 
     let mut outcome = match (effective_status, execution) {
         (EffectiveStatus::Normal, Ok(())) => Outcome {
@@ -1680,6 +1700,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Pass,
             detail: String::new(),
             bundle: None,
+            primary_backend: primary_backend.clone(),
             consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Normal, Err(detail)) => Outcome {
@@ -1689,6 +1710,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Fail,
             detail,
             bundle: None,
+            primary_backend: primary_backend.clone(),
             consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
@@ -1698,6 +1720,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Xpass,
             detail: reason,
             bundle: None,
+            primary_backend: primary_backend.clone(),
             consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
@@ -1707,6 +1730,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Xfail,
             detail: format!("{}\n{}", reason, detail),
             bundle: None,
+            primary_backend: primary_backend.clone(),
             consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Future(reason), Ok(())) => Outcome {
@@ -1716,6 +1740,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Pass,
             detail: reason,
             bundle: None,
+            primary_backend: primary_backend.clone(),
             consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
@@ -1725,6 +1750,7 @@ fn execute_case_cell(
             kind: OutcomeKind::Fail,
             detail: format!("{}\n{}", reason, detail),
             bundle: None,
+            primary_backend,
             consistency_observations,
         },
     };
@@ -4725,6 +4751,25 @@ fn render_json_report(summary: &Summary) -> String {
             "      \"kind\": \"{}\",",
             outcome_kind_name(outcome.kind)
         ));
+        match &outcome.primary_backend {
+            Some(backend) => {
+                lines.push("      \"primary_backend\": {".to_string());
+                lines.push(format!(
+                    "        \"kind\": \"{}\",",
+                    json_escape(&backend.kind)
+                ));
+                lines.push(format!(
+                    "        \"mode\": \"{}\",",
+                    json_escape(&backend.mode)
+                ));
+                lines.push(format!(
+                    "        \"detail\": \"{}\"",
+                    json_escape(&backend.detail)
+                ));
+                lines.push("      },".to_string());
+            }
+            None => lines.push("      \"primary_backend\": null,".to_string()),
+        }
         lines.push(format!(
             "      \"detail\": \"{}\",",
             json_escape(&outcome.detail)
@@ -4855,6 +4900,13 @@ fn render_markdown_report(summary: &Summary) -> String {
             outcome.opt_level.as_str(),
             outcome_kind_name(outcome.kind)
         ));
+        if let Some(backend) = &outcome.primary_backend {
+            lines.push(format!(
+                "primary_backend: `{}` (`{}`)",
+                backend.kind, backend.mode
+            ));
+            lines.push(format!("primary_backend_detail: {}", backend.detail));
+        }
         if let Some(bundle) = &outcome.bundle {
             lines.push(format!("bundle: `{}`", bundle.display()));
         }
@@ -6070,6 +6122,11 @@ end
             kind: OutcomeKind::Fail,
             detail: "boom".into(),
             bundle: None,
+            primary_backend: Some(PrimaryBackendReport {
+                kind: "full".into(),
+                mode: "linked".into(),
+                detail: "linked armfortas::testing capture adapter".into(),
+            }),
             consistency_observations: Vec::new(),
         };
         let prepared = PreparedInput {
@@ -6216,6 +6273,11 @@ end
             kind: OutcomeKind::Fail,
             detail: "boom".into(),
             bundle: None,
+            primary_backend: Some(PrimaryBackendReport {
+                kind: "full".into(),
+                mode: "linked".into(),
+                detail: "linked armfortas::testing capture adapter".into(),
+            }),
             consistency_observations: Vec::new(),
         };
         let artifacts = ExecutionArtifacts {
@@ -6290,6 +6352,11 @@ end
             kind: OutcomeKind::Xfail,
             detail: "expected 42, got 0".into(),
             bundle: Some(PathBuf::from("/tmp/bundle")),
+            primary_backend: Some(PrimaryBackendReport {
+                kind: "observable".into(),
+                mode: "cli-observable".into(),
+                detail: "cli-observable armfortas driver capture adapter".into(),
+            }),
             consistency_observations: vec![ConsistencyObservation {
                 check: ConsistencyCheck::CliRunReproducible,
                 summary: "repeat_count=3 unique_variants=1".into(),
@@ -6304,11 +6371,14 @@ end
         assert!(json.contains("\"outcomes\": ["));
         assert!(json.contains("\"suite\": \"modules/runtime-graphs\""));
         assert!(json.contains("\"bundle\": \"/tmp/bundle\""));
+        assert!(json.contains("\"primary_backend\": {"));
+        assert!(json.contains("\"mode\": \"cli-observable\""));
 
         let markdown = render_markdown_report(&summary);
         assert!(markdown.contains("# afs-tests report"));
         assert!(markdown
             .contains("### `modules/runtime-graphs` / `module_chain_runtime` / `O0` / `xfail`"));
+        assert!(markdown.contains("primary_backend: `observable` (`cli-observable`)"));
         assert!(markdown.contains("bundle: `/tmp/bundle`"));
         assert!(markdown.contains("expected 42, got 0"));
     }
@@ -6339,6 +6409,11 @@ end
             kind: OutcomeKind::Pass,
             detail: String::new(),
             bundle: None,
+            primary_backend: Some(PrimaryBackendReport {
+                kind: "full".into(),
+                mode: "linked".into(),
+                detail: "linked armfortas::testing capture adapter".into(),
+            }),
             consistency_observations: Vec::new(),
         });
 
