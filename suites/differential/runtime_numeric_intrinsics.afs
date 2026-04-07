@@ -1,0 +1,37 @@
+suite "differential/runtime-numeric-intrinsics"
+
+case "intrinsic_sqrt_matches_references"
+source "../../../test_programs/intrinsic_sqrt.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_trig_matches_references"
+source "../../../test_programs/intrinsic_trig.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_mod_matches_references"
+source "../../../test_programs/intrinsic_mod.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_abs_max_min_matches_references"
+source "../../../test_programs/intrinsic_abs_max_min.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
