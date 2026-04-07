@@ -58,6 +58,12 @@ Run one case with full stage capture:
 cargo run -p afs-tests -- run --suite frontend --case stage_walk --all --verbose
 ```
 
+Write machine-readable reports:
+
+```bash
+cargo run -p afs-tests -- run --suite modules --all --json-report bencch/reports/modules.json --markdown-report bencch/reports/modules.md
+```
+
 Run consistency coverage:
 
 ```bash
@@ -124,6 +130,7 @@ Common things the runner understands:
 - expected failures like `xfail "reason"`
 - per-opt status like `xfail when O1, O2 because "reason"`
 - consistency checks like `cli_obj_vs_system_as` and `capture_run_reproducible`
+- report outputs like `--json-report path/to/report.json` and `--markdown-report path/to/report.md`
 
 ## Notes
 
