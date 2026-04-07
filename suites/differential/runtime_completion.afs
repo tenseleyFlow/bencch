@@ -1,0 +1,46 @@
+suite "differential/runtime-completion"
+
+case "array_intrinsics_matches_references"
+source "../../../test_programs/array_intrinsics.f90"
+opts => O0, O1
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_constructor_matches_references"
+source "../../../test_programs/derived_type_constructor.f90"
+opts => O0, O1
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "derived_type_extends_matches_references"
+source "../../../test_programs/derived_type_extends.f90"
+opts => O0, O1
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "factorial_matches_references"
+source "../../../test_programs/factorial.f90"
+opts => O0, O1
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "register_pressure_matches_references"
+source "../../../test_programs/register_pressure.f90"
+opts => O0, O1
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
