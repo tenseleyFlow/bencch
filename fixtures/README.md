@@ -23,3 +23,6 @@ The `runtime-completion`, `runtime-control-flow`, and `runtime-stateful`
 families now live there as bench-owned inputs, along with the
 `runtime-behavior` slice (`mixed_types`, `where_construct`,
 `derived_type_basic`, and `string_fixed`).
+
+Sprint 7 begins carving authored module graphs into `fixtures/modules/` so the
+bench can model ordered multi-file inputs instead of only isolated sources.
