@@ -1,0 +1,49 @@
+suite "differential/runtime-computational"
+
+case "fibonacci_refs"
+source "../../../test_programs/fibonacci.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "dot_product_refs"
+source "../../../test_programs/dot_product.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "array_assign_refs"
+source "../../../test_programs/array_assign.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "array_real_intrinsics_refs"
+source "../../../test_programs/array_real_intrinsics.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "forall_negative_step_refs"
+source "../../../test_programs/forall_negative_step.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_bits_refs"
+source "../../../test_programs/intrinsic_bits.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
