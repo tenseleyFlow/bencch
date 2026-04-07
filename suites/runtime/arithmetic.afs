@@ -4,22 +4,26 @@ case "arithmetic"
 source "../../../test_programs/arithmetic.f90"
 armfortas => run
 expect run.stdout check-comments
+expect run.exit_code equals 0
 end
 
 case "mixed_types"
 source "../../../test_programs/mixed_types.f90"
 armfortas => run
 expect run.stdout check-comments
+expect run.exit_code equals 0
 end
 
 case "real_function"
 source "../../../test_programs/real_function.f90"
 armfortas => run
 expect run.stdout check-comments
+expect run.exit_code equals 0
 end
 
 case "dot_product"
 source "../../../test_programs/dot_product.f90"
 armfortas => run
 expect run.stdout check-comments
+expect run.exit_code equals 0
 end
