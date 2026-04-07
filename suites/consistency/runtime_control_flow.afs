@@ -1,7 +1,7 @@
 suite "consistency/runtime-control-flow"
 
 case "if_else_cli_run_reproducible"
-source "../../../test_programs/if_else.f90"
+source "../../fixtures/runtime/if_else.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -11,7 +11,7 @@ expect run.exit_code equals 0
 end
 
 case "if_else_capture_run_matches_cli"
-source "../../../test_programs/if_else.f90"
+source "../../fixtures/runtime/if_else.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -21,7 +21,7 @@ expect run.exit_code equals 0
 end
 
 case "if_else_capture_run_reproducible"
-source "../../../test_programs/if_else.f90"
+source "../../fixtures/runtime/if_else.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -31,7 +31,7 @@ expect run.exit_code equals 0
 end
 
 case "do_while_cli_run_reproducible"
-source "../../../test_programs/do_while.f90"
+source "../../fixtures/runtime/do_while.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -41,7 +41,7 @@ expect run.exit_code equals 0
 end
 
 case "do_while_capture_run_matches_cli"
-source "../../../test_programs/do_while.f90"
+source "../../fixtures/runtime/do_while.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -51,7 +51,7 @@ expect run.exit_code equals 0
 end
 
 case "do_while_capture_run_reproducible"
-source "../../../test_programs/do_while.f90"
+source "../../fixtures/runtime/do_while.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -61,7 +61,7 @@ expect run.exit_code equals 0
 end
 
 case "nested_loops_cli_run_reproducible"
-source "../../../test_programs/nested_loops.f90"
+source "../../fixtures/runtime/nested_loops.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -71,7 +71,7 @@ expect run.exit_code equals 0
 end
 
 case "nested_loops_capture_run_matches_cli"
-source "../../../test_programs/nested_loops.f90"
+source "../../fixtures/runtime/nested_loops.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -81,7 +81,7 @@ expect run.exit_code equals 0
 end
 
 case "nested_loops_capture_run_reproducible"
-source "../../../test_programs/nested_loops.f90"
+source "../../fixtures/runtime/nested_loops.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -91,7 +91,7 @@ expect run.exit_code equals 0
 end
 
 case "exit_cycle_cli_run_reproducible"
-source "../../../test_programs/exit_cycle.f90"
+source "../../fixtures/runtime/exit_cycle.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -101,7 +101,7 @@ expect run.exit_code equals 0
 end
 
 case "exit_cycle_capture_run_matches_cli"
-source "../../../test_programs/exit_cycle.f90"
+source "../../fixtures/runtime/exit_cycle.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -111,7 +111,7 @@ expect run.exit_code equals 0
 end
 
 case "exit_cycle_capture_run_reproducible"
-source "../../../test_programs/exit_cycle.f90"
+source "../../fixtures/runtime/exit_cycle.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -121,7 +121,7 @@ expect run.exit_code equals 0
 end
 
 case "select_case_cli_run_reproducible"
-source "../../../test_programs/select_case.f90"
+source "../../fixtures/runtime/select_case.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -131,7 +131,7 @@ expect run.exit_code equals 0
 end
 
 case "select_case_capture_run_matches_cli"
-source "../../../test_programs/select_case.f90"
+source "../../fixtures/runtime/select_case.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -141,7 +141,7 @@ expect run.exit_code equals 0
 end
 
 case "select_case_capture_run_reproducible"
-source "../../../test_programs/select_case.f90"
+source "../../fixtures/runtime/select_case.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -151,7 +151,7 @@ expect run.exit_code equals 0
 end
 
 case "function_call_cli_run_reproducible"
-source "../../../test_programs/function_call.f90"
+source "../../fixtures/runtime/function_call.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -161,7 +161,7 @@ expect run.exit_code equals 0
 end
 
 case "function_call_capture_run_matches_cli"
-source "../../../test_programs/function_call.f90"
+source "../../fixtures/runtime/function_call.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -171,7 +171,7 @@ expect run.exit_code equals 0
 end
 
 case "function_call_capture_run_reproducible"
-source "../../../test_programs/function_call.f90"
+source "../../fixtures/runtime/function_call.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -181,7 +181,7 @@ expect run.exit_code equals 0
 end
 
 case "subroutine_call_cli_run_reproducible"
-source "../../../test_programs/subroutine_call.f90"
+source "../../fixtures/runtime/subroutine_call.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -191,7 +191,7 @@ expect run.exit_code equals 0
 end
 
 case "subroutine_call_capture_run_matches_cli"
-source "../../../test_programs/subroutine_call.f90"
+source "../../fixtures/runtime/subroutine_call.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -201,7 +201,7 @@ expect run.exit_code equals 0
 end
 
 case "subroutine_call_capture_run_reproducible"
-source "../../../test_programs/subroutine_call.f90"
+source "../../fixtures/runtime/subroutine_call.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -211,7 +211,7 @@ expect run.exit_code equals 0
 end
 
 case "real_function_cli_run_reproducible"
-source "../../../test_programs/real_function.f90"
+source "../../fixtures/runtime/real_function.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -221,7 +221,7 @@ expect run.exit_code equals 0
 end
 
 case "real_function_capture_run_matches_cli"
-source "../../../test_programs/real_function.f90"
+source "../../fixtures/runtime/real_function.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -231,7 +231,7 @@ expect run.exit_code equals 0
 end
 
 case "real_function_capture_run_reproducible"
-source "../../../test_programs/real_function.f90"
+source "../../fixtures/runtime/real_function.f90"
 opts => all
 armfortas => run
 repeat => 3
