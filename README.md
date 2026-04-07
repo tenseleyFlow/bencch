@@ -12,7 +12,9 @@ This repo holds:
 ## Current Setup
 
 Today `bencch` is wired to a surrounding `armfortas` checkout. The practical way
-to use it is from the `armfortas` workspace root.
+to use it is from the `armfortas` workspace root. CLI-side compiler and tool
+paths are overridable now; linked capture still comes from the surrounding
+workspace.
 
 ```bash
 cargo run -p afs-tests -- list
@@ -35,6 +37,18 @@ Run one suite family:
 cargo run -p afs-tests -- run --suite consistency/runtime
 ```
 
+Run against an explicit compiler binary:
+
+```bash
+cargo run -p afs-tests -- run --suite consistency/runtime-control-flow --armfortas-bin ./target/debug/armfortas
+```
+
+Run differential checks with explicit reference compiler paths:
+
+```bash
+cargo run -p afs-tests -- run --suite differential/runtime-control-flow --gfortran-bin /opt/homebrew/bin/gfortran --flang-bin /opt/homebrew/bin/flang-new
+```
+
 Run one case with full stage capture:
 
 ```bash
@@ -54,6 +68,12 @@ cargo run -p afs-tests -- run --suite differential
 ```
 
 Reports are written under `bencch/reports/`.
+
+Environment overrides work too:
+
+```bash
+BENCCH_ARMFORTAS_BIN=./target/debug/armfortas cargo run -p afs-tests -- run --suite consistency/object
+```
 
 ## Suite Format
 
