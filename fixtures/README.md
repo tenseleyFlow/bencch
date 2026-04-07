@@ -29,4 +29,5 @@ bench can model ordered multi-file inputs instead of only isolated sources.
 That corpus now covers module-use chains, renaming, module procedures, and an
 early submodule probe, plus visibility, fan-in, re-export, and diamond-style
 dependency graph families, along with rename-across-hop export-surface probes
-and mixed-ONLY/collision graph shapes.
+and mixed-ONLY/collision graph shapes. Larger layered graphs with reused
+dependencies and multiple consumer leaves live there now too.
