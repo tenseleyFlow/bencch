@@ -4,6 +4,7 @@ Compiler bench for `armfortas`.
 
 This repo holds:
 
+- `bench-core/` — bench-owned compiler-facing types
 - `bench/` — the `afs-tests` runner
 - `suites/` — authored bench suites
 - `fixtures/` — reusable fixture programs
@@ -15,7 +16,8 @@ Today `bencch` is wired to a surrounding `armfortas` checkout. The practical way
 to use it is from the `armfortas` workspace root. CLI-side compiler and tool
 paths are overridable now; linked capture still comes from the surrounding
 workspace. That linked compiler surface is currently isolated in
-`bench/src/compiler.rs`.
+`bench/src/compiler.rs`, and the bench-owned compiler-facing types now live in
+`bench-core/`.
 
 ```bash
 cargo run -p afs-tests -- list
