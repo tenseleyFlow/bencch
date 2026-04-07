@@ -1,13 +1,14 @@
+mod compiler;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use armfortas::driver::{self, OptLevel};
-use armfortas::testing::{
-    capture_from_path, CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage,
-    RunCapture, Stage,
+use crate::compiler::{
+    capture_from_path, compile_output, CaptureFailure, CaptureRequest, CaptureResult,
+    CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -3446,17 +3447,13 @@ fn compile_with_driver(
             return Err(format!("{} failed:\n{}", command, stderr.trim_end()));
         }
     } else {
-        let opts = driver::Options {
-            input: source.to_path_buf(),
-            output: Some(output.to_path_buf()),
-            emit_asm: matches!(mode, DriverEmitMode::Asm),
-            emit_obj: matches!(mode, DriverEmitMode::Obj),
-            emit_ir: false,
-            preprocess_only: false,
-            opt_level,
+        let emit_mode = match mode {
+            DriverEmitMode::Asm => EmitMode::Asm,
+            DriverEmitMode::Obj => EmitMode::Obj,
+            DriverEmitMode::Binary => EmitMode::Binary,
         };
-
-        driver::compile(&opts).map_err(|detail| format!("{} failed:\n{}", command, detail))?;
+        compile_output(source, opt_level, emit_mode, output)
+            .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
     }
     Ok(command)
 }
@@ -4658,10 +4655,10 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use armfortas::ir::inst::{BlockParam, Function, Inst, InstKind, Module, Terminator, ValueId};
-    use armfortas::ir::types::{FloatWidth, IntWidth, IrType};
-    use armfortas::ir::verify::verify_module;
-    use armfortas::lexer::{Position, Span};
+    use crate::compiler::test_support::{
+        verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType,
+        Module, Position, Span, Terminator, ValueId,
+    };
 
     fn dummy_span() -> Span {
         Span {
