@@ -1,0 +1,91 @@
+suite "consistency/runtime-format-control"
+
+case "io_format_int_cli_run_reproducible"
+source "../../../test_programs/io_format_int.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_format_int_capture_run_matches_cli"
+source "../../../test_programs/io_format_int.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_format_int_capture_run_reproducible"
+source "../../../test_programs/io_format_int.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_advance_no_cli_run_reproducible"
+source "../../../test_programs/io_advance_no.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_advance_no_capture_run_matches_cli"
+source "../../../test_programs/io_advance_no.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_advance_no_capture_run_reproducible"
+source "../../../test_programs/io_advance_no.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_file_roundtrip_cli_run_reproducible"
+source "../../../test_programs/io_file_roundtrip.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_file_roundtrip_capture_run_matches_cli"
+source "../../../test_programs/io_file_roundtrip.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_file_roundtrip_capture_run_reproducible"
+source "../../../test_programs/io_file_roundtrip.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
