@@ -19,7 +19,9 @@ Today it is still wired to a surrounding `armfortas` checkout for linked
 capture. CLI-side compiler and tool paths are overridable now; linked capture
 still comes from the surrounding workspace. That linked compiler surface is
 currently isolated in `bench/src/compiler.rs`, and the bench-owned
-compiler-facing types now live in `bench-core/`.
+compiler-facing types now live in `bench-core/`. `afs-tests doctor` reports
+the CLI adapter and capture adapter separately so the current boundary is
+obvious.
 
 ```bash
 cargo run -p afs-tests -- list
