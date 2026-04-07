@@ -21,7 +21,8 @@ still comes from the surrounding workspace. That linked compiler surface is
 currently isolated in `bench/src/compiler.rs`, and the bench-owned
 compiler-facing types now live in `bench-core/`. `afs-tests doctor` reports
 the CLI adapter and capture adapter separately so the current boundary is
-obvious.
+obvious. Run-only cases can already use an external `armfortas` binary as the
+primary execution path; richer stage capture is still linked.
 
 ```bash
 cargo run -p afs-tests -- list
