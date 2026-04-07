@@ -9,4 +9,5 @@ name = "afs-tests"
 path = "src/main.rs"
 
 [dependencies]
+bencch-core = { path = "../bench-core" }
 armfortas = { path = "../.." }
