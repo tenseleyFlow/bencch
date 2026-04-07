@@ -5026,8 +5026,23 @@ fn write_failure_bundle(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let primary_backend_kind = outcome
+        .primary_backend
+        .as_ref()
+        .map(|backend| backend.kind.as_str())
+        .unwrap_or("none");
+    let primary_backend_mode = outcome
+        .primary_backend
+        .as_ref()
+        .map(|backend| backend.mode.as_str())
+        .unwrap_or("none");
+    let primary_backend_detail = outcome
+        .primary_backend
+        .as_ref()
+        .map(|backend| backend.detail.as_str())
+        .unwrap_or("none");
     let metadata = format!(
-        "suite: {}\ncase: {}\noutcome: {:?}\nopt: {}\nsource: {}\nrequested_stages: {}\nrepeat_count: {}\nreference_compilers: {}\nconsistency_checks: {}\n",
+        "suite: {}\ncase: {}\noutcome: {:?}\nopt: {}\nsource: {}\nrequested_stages: {}\nrepeat_count: {}\nreference_compilers: {}\nconsistency_checks: {}\nprimary_backend_kind: {}\nprimary_backend_mode: {}\nprimary_backend_detail: {}\n",
         suite.name,
         case.name,
         outcome.kind,
@@ -5036,7 +5051,10 @@ fn write_failure_bundle(
         stage_list,
         case.repeat_count,
         refs,
-        consistency
+        consistency,
+        primary_backend_kind,
+        primary_backend_mode,
+        primary_backend_detail
     );
     fs::write(bundle_root.join("metadata.txt"), metadata)
         .map_err(|e| format!("cannot write bundle metadata: {}", e))?;
@@ -6148,6 +6166,12 @@ end
             .join("run.stdout.txt")
             .exists());
         assert!(bundle.join("consistency").join("summary.txt").exists());
+        let metadata = fs::read_to_string(bundle.join("metadata.txt")).unwrap();
+        assert!(metadata.contains("primary_backend_kind: full"));
+        assert!(metadata.contains("primary_backend_mode: linked"));
+        assert!(
+            metadata.contains("primary_backend_detail: linked armfortas::testing capture adapter")
+        );
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
         assert!(consistency_summary.contains("issue_count: 2"));
