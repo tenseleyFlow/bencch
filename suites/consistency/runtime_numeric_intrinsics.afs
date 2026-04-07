@@ -1,0 +1,121 @@
+suite "consistency/runtime-numeric-intrinsics"
+
+case "intrinsic_sqrt_cli_run_reproducible"
+source "../../../test_programs/intrinsic_sqrt.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_sqrt_capture_run_matches_cli"
+source "../../../test_programs/intrinsic_sqrt.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_sqrt_capture_run_reproducible"
+source "../../../test_programs/intrinsic_sqrt.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_trig_cli_run_reproducible"
+source "../../../test_programs/intrinsic_trig.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_trig_capture_run_matches_cli"
+source "../../../test_programs/intrinsic_trig.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_trig_capture_run_reproducible"
+source "../../../test_programs/intrinsic_trig.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_mod_cli_run_reproducible"
+source "../../../test_programs/intrinsic_mod.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_mod_capture_run_matches_cli"
+source "../../../test_programs/intrinsic_mod.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_mod_capture_run_reproducible"
+source "../../../test_programs/intrinsic_mod.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_abs_max_min_cli_run_reproducible"
+source "../../../test_programs/intrinsic_abs_max_min.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_abs_max_min_capture_run_matches_cli"
+source "../../../test_programs/intrinsic_abs_max_min.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "intrinsic_abs_max_min_capture_run_reproducible"
+source "../../../test_programs/intrinsic_abs_max_min.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
