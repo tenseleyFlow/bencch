@@ -1,0 +1,28 @@
+suite "differential/runtime-format-control"
+
+case "io_format_int_matches_references"
+source "../../../test_programs/io_format_int.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_advance_no_matches_references"
+source "../../../test_programs/io_advance_no.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_file_roundtrip_matches_references"
+source "../../../test_programs/io_file_roundtrip.f90"
+opts => O0
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
