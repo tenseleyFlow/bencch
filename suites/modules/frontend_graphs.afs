@@ -32,3 +32,35 @@ armfortas => ast, sema
 expect ast contains "Submodule"
 expect sema contains "Submodule"
 end
+
+case "visibility_frontend"
+entry "../../fixtures/modules/visibility/main_shown.f90"
+file "../../fixtures/modules/visibility/visible_values.f90"
+file "../../fixtures/modules/visibility/main_shown.f90"
+armfortas => ast, sema
+expect ast contains "Public"
+expect sema contains "local_name: \"shown\""
+expect sema not-contains "local_name: \"hidden\""
+end
+
+case "visibility_private_import_rejected"
+entry "../../fixtures/modules/visibility/main_hidden.f90"
+file "../../fixtures/modules/visibility/visible_values.f90"
+file "../../fixtures/modules/visibility/main_hidden.f90"
+armfortas => sema
+expect-fail sema contains "private"
+xfail "Private module names are still importable through USE ONLY in graphs."
+end
+
+case "fanin_frontend"
+entry "../../fixtures/modules/fanin/main.f90"
+file "../../fixtures/modules/fanin/base_value.f90"
+file "../../fixtures/modules/fanin/offset_value.f90"
+file "../../fixtures/modules/fanin/combined_value.f90"
+file "../../fixtures/modules/fanin/main.f90"
+armfortas => ast, sema
+expect ast contains "module: \"base_value\""
+expect ast contains "module: \"offset_value\""
+expect sema contains "local_name: \"total\""
+expect sema contains "original_name: \"total\""
+end
