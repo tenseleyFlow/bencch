@@ -306,6 +306,7 @@ struct Summary {
     xfailed: usize,
     xpassed: usize,
     future: usize,
+    outcomes: Vec<Outcome>,
     consistency: BTreeMap<ConsistencyCheck, ConsistencyRollup>,
 }
 
@@ -337,6 +338,8 @@ struct RunConfig {
     fail_fast: bool,
     include_future: bool,
     all_stages: bool,
+    json_report: Option<PathBuf>,
+    markdown_report: Option<PathBuf>,
     tools: ToolchainConfig,
 }
 
@@ -381,6 +384,7 @@ impl Summary {
             OutcomeKind::Xpass => self.xpassed += 1,
             OutcomeKind::Future => self.future += 1,
         }
+        self.outcomes.push(outcome.clone());
         self.record_consistency(&outcome.consistency_observations);
     }
 
@@ -463,6 +467,10 @@ pub fn run_cli(args: &[String]) -> i32 {
         Ok(CommandKind::Run(config)) => match run_suites(&config) {
             Ok(summary) => {
                 print_summary(&summary);
+                if let Err(err) = write_requested_reports(&config, &summary) {
+                    eprintln!("afs-tests: {}", err);
+                    return 1;
+                }
                 if summary.failed == 0 && summary.xpassed == 0 {
                     0
                 } else {
@@ -522,6 +530,8 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                 fail_fast: false,
                 include_future: false,
                 all_stages: false,
+                json_report: None,
+                markdown_report: None,
                 tools: ToolchainConfig::from_env(),
             };
             let mut queue: VecDeque<&String> = args[1..].iter().collect();
@@ -545,6 +555,16 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                     "--fail-fast" => config.fail_fast = true,
                     "--include-future" => config.include_future = true,
                     "--all" => config.all_stages = true,
+                    "--json-report" => {
+                        let value = queue.pop_front().ok_or("--json-report requires a value")?;
+                        config.json_report = Some(PathBuf::from(value));
+                    }
+                    "--markdown-report" => {
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--markdown-report requires a value")?;
+                        config.markdown_report = Some(PathBuf::from(value));
+                    }
                     "--armfortas-bin" => {
                         let value = queue
                             .pop_front()
@@ -588,7 +608,7 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  cargo run -p afs-tests -- list [--suite <filter>]");
     eprintln!(
-        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
+        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--json-report <path>] [--markdown-report <path>] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
     );
     eprintln!();
     eprintln!("env overrides:");
@@ -4360,6 +4380,268 @@ fn render_summary(summary: &Summary) -> String {
     lines.join("\n")
 }
 
+fn write_requested_reports(config: &RunConfig, summary: &Summary) -> Result<(), String> {
+    if let Some(path) = &config.json_report {
+        write_report(path, &render_json_report(summary), "json report")?;
+        println!("json report: {}", path.display());
+    }
+    if let Some(path) = &config.markdown_report {
+        write_report(path, &render_markdown_report(summary), "markdown report")?;
+        println!("markdown report: {}", path.display());
+    }
+    Ok(())
+}
+
+fn write_report(path: &Path, content: &str, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "cannot create parent directory for {} '{}': {}",
+                label,
+                path.display(),
+                e
+            )
+        })?;
+    }
+    fs::write(path, content)
+        .map_err(|e| format!("cannot write {} '{}': {}", label, path.display(), e))
+}
+
+fn render_json_report(summary: &Summary) -> String {
+    let mut lines = vec![
+        "{".to_string(),
+        format!("  \"passed\": {},", summary.passed),
+        format!("  \"failed\": {},", summary.failed),
+        format!("  \"xfailed\": {},", summary.xfailed),
+        format!("  \"xpassed\": {},", summary.xpassed),
+        format!("  \"future\": {},", summary.future),
+        "  \"outcomes\": [".to_string(),
+    ];
+
+    for (index, outcome) in summary.outcomes.iter().enumerate() {
+        lines.push("    {".to_string());
+        lines.push(format!(
+            "      \"suite\": \"{}\",",
+            json_escape(&outcome.suite)
+        ));
+        lines.push(format!(
+            "      \"case\": \"{}\",",
+            json_escape(&outcome.case)
+        ));
+        lines.push(format!(
+            "      \"opt\": \"{}\",",
+            outcome.opt_level.as_str()
+        ));
+        lines.push(format!(
+            "      \"kind\": \"{}\",",
+            outcome_kind_name(outcome.kind)
+        ));
+        lines.push(format!(
+            "      \"detail\": \"{}\",",
+            json_escape(&outcome.detail)
+        ));
+        match &outcome.bundle {
+            Some(bundle) => lines.push(format!(
+                "      \"bundle\": \"{}\",",
+                json_escape(&bundle.display().to_string())
+            )),
+            None => lines.push("      \"bundle\": null,".to_string()),
+        }
+        lines.push(format!(
+            "      \"consistency\": {}",
+            render_json_consistency_observations(&outcome.consistency_observations)
+        ));
+        lines.push(if index + 1 == summary.outcomes.len() {
+            "    }".to_string()
+        } else {
+            "    },".to_string()
+        });
+    }
+
+    lines.push("  ],".to_string());
+    lines.push("  \"consistency\": {".to_string());
+    for (index, (check, rollup)) in summary.consistency.iter().enumerate() {
+        lines.push(format!("    \"{}\": {{", check.as_str()));
+        lines.push(format!("      \"cells\": {},", rollup.cells));
+        lines.push(format!(
+            "      \"repeat_counts\": {},",
+            json_usize_set(&rollup.repeat_counts)
+        ));
+        lines.push(format!(
+            "      \"unique_variant_counts\": {},",
+            json_usize_set(&rollup.unique_variant_counts)
+        ));
+        lines.push(format!(
+            "      \"varying_components\": {},",
+            json_string_iter(rollup.varying_components.iter().map(|value| value.as_str()))
+        ));
+        lines.push(format!(
+            "      \"stable_components\": {}",
+            json_string_iter(rollup.stable_components.iter().map(|value| value.as_str()))
+        ));
+        lines.push(if index + 1 == summary.consistency.len() {
+            "    }".to_string()
+        } else {
+            "    },".to_string()
+        });
+    }
+    lines.push("  }".to_string());
+    lines.push("}".to_string());
+    lines.join("\n") + "\n"
+}
+
+fn render_json_consistency_observations(observations: &[ConsistencyObservation]) -> String {
+    let mut rendered = String::from("[");
+    for (index, observation) in observations.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push('{');
+        rendered.push_str(&format!(
+            "\"check\":\"{}\",\"summary\":\"{}\",",
+            observation.check.as_str(),
+            json_escape(&observation.summary)
+        ));
+        match observation.repeat_count {
+            Some(count) => rendered.push_str(&format!("\"repeat_count\":{},", count)),
+            None => rendered.push_str("\"repeat_count\":null,"),
+        }
+        match observation.unique_variant_count {
+            Some(count) => rendered.push_str(&format!("\"unique_variant_count\":{},", count)),
+            None => rendered.push_str("\"unique_variant_count\":null,"),
+        }
+        rendered.push_str(&format!(
+            "\"varying_components\":{},\"stable_components\":{}",
+            json_string_array(&observation.varying_components),
+            json_string_array(&observation.stable_components)
+        ));
+        rendered.push('}');
+    }
+    rendered.push(']');
+    rendered
+}
+
+fn render_markdown_report(summary: &Summary) -> String {
+    let mut lines = vec![
+        "# afs-tests report".to_string(),
+        String::new(),
+        "## Summary".to_string(),
+        String::new(),
+        "| kind | count |".to_string(),
+        "| --- | ---: |".to_string(),
+        format!("| passed | {} |", summary.passed),
+        format!("| failed | {} |", summary.failed),
+        format!("| xfailed | {} |", summary.xfailed),
+        format!("| xpassed | {} |", summary.xpassed),
+        format!("| future | {} |", summary.future),
+    ];
+
+    if !summary.consistency.is_empty() {
+        lines.push(String::new());
+        lines.push("## Consistency".to_string());
+        lines.push(String::new());
+        lines.push("| check | cells | repeats | unique variants | varying | stable |".to_string());
+        lines.push("| --- | ---: | --- | --- | --- | --- |".to_string());
+        for (check, rollup) in &summary.consistency {
+            lines.push(format!(
+                "| `{}` | {} | {} | {} | {} | {} |",
+                check.as_str(),
+                rollup.cells,
+                join_usize_set(&rollup.repeat_counts),
+                join_usize_set(&rollup.unique_variant_counts),
+                join_string_set(&rollup.varying_components),
+                join_string_set(&rollup.stable_components),
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## Outcomes".to_string());
+    for outcome in &summary.outcomes {
+        lines.push(String::new());
+        lines.push(format!(
+            "### `{}` / `{}` / `{}` / `{}`",
+            outcome.suite,
+            outcome.case,
+            outcome.opt_level.as_str(),
+            outcome_kind_name(outcome.kind)
+        ));
+        if let Some(bundle) = &outcome.bundle {
+            lines.push(format!("bundle: `{}`", bundle.display()));
+        }
+        if !outcome.detail.trim().is_empty() {
+            lines.push(String::new());
+            lines.push("```text".to_string());
+            lines.extend(
+                outcome
+                    .detail
+                    .trim_end()
+                    .lines()
+                    .map(|line| line.to_string()),
+            );
+            lines.push("```".to_string());
+        }
+    }
+
+    lines.join("\n") + "\n"
+}
+
+fn outcome_kind_name(kind: OutcomeKind) -> &'static str {
+    match kind {
+        OutcomeKind::Pass => "pass",
+        OutcomeKind::Fail => "fail",
+        OutcomeKind::Xfail => "xfail",
+        OutcomeKind::Xpass => "xpass",
+        OutcomeKind::Future => "future",
+    }
+}
+
+fn json_escape(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+fn json_string_array(items: &[String]) -> String {
+    json_string_iter(items.iter().map(|item| item.as_str()))
+}
+
+fn json_string_iter<'a>(items: impl Iterator<Item = &'a str>) -> String {
+    let mut rendered = String::from("[");
+    for (index, item) in items.enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push('"');
+        rendered.push_str(&json_escape(item));
+        rendered.push('"');
+    }
+    rendered.push(']');
+    rendered
+}
+
+fn json_usize_set(items: &BTreeSet<usize>) -> String {
+    let mut rendered = String::from("[");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&item.to_string());
+    }
+    rendered.push(']');
+    rendered
+}
+
 fn write_failure_bundle(
     suite: &SuiteSpec,
     case: &CaseSpec,
@@ -5043,6 +5325,10 @@ end
             "run".to_string(),
             "--suite".to_string(),
             "consistency/runtime".to_string(),
+            "--json-report".to_string(),
+            "/tmp/report.json".to_string(),
+            "--markdown-report".to_string(),
+            "/tmp/report.md".to_string(),
             "--armfortas-bin".to_string(),
             "/tmp/armfortas".to_string(),
             "--gfortran-bin".to_string(),
@@ -5067,6 +5353,14 @@ end
         };
 
         assert_eq!(config.suite_filter.as_deref(), Some("consistency/runtime"));
+        assert_eq!(
+            config.json_report.as_deref(),
+            Some(Path::new("/tmp/report.json"))
+        );
+        assert_eq!(
+            config.markdown_report.as_deref(),
+            Some(Path::new("/tmp/report.md"))
+        );
         assert_eq!(
             config.tools.armfortas,
             ArmfortasCliAdapter::External("/tmp/armfortas".into())
@@ -5504,6 +5798,78 @@ end
     }
 
     #[test]
+    fn render_reports_include_outcomes() {
+        let mut summary = Summary::default();
+        summary.record_outcome(&Outcome {
+            suite: "modules/runtime-graphs".into(),
+            case: "module_chain_runtime".into(),
+            opt_level: OptLevel::O0,
+            kind: OutcomeKind::Xfail,
+            detail: "expected 42, got 0".into(),
+            bundle: Some(PathBuf::from("/tmp/bundle")),
+            consistency_observations: vec![ConsistencyObservation {
+                check: ConsistencyCheck::CliRunReproducible,
+                summary: "repeat_count=3 unique_variants=1".into(),
+                repeat_count: Some(3),
+                unique_variant_count: Some(1),
+                varying_components: Vec::new(),
+                stable_components: vec!["exit_code".into(), "stdout".into(), "stderr".into()],
+            }],
+        });
+
+        let json = render_json_report(&summary);
+        assert!(json.contains("\"outcomes\": ["));
+        assert!(json.contains("\"suite\": \"modules/runtime-graphs\""));
+        assert!(json.contains("\"bundle\": \"/tmp/bundle\""));
+
+        let markdown = render_markdown_report(&summary);
+        assert!(markdown.contains("# afs-tests report"));
+        assert!(markdown
+            .contains("### `modules/runtime-graphs` / `module_chain_runtime` / `O0` / `xfail`"));
+        assert!(markdown.contains("bundle: `/tmp/bundle`"));
+        assert!(markdown.contains("expected 42, got 0"));
+    }
+
+    #[test]
+    fn write_requested_reports_emits_files() {
+        let root = std::env::temp_dir().join("afs_tests_report_output");
+        let _ = fs::remove_dir_all(&root);
+        let json_path = root.join("result.json");
+        let markdown_path = root.join("result.md");
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: Some(json_path.clone()),
+            markdown_report: Some(markdown_path.clone()),
+            tools: ToolchainConfig::from_env(),
+        };
+        let mut summary = Summary::default();
+        summary.record_outcome(&Outcome {
+            suite: "frontend/parser".into(),
+            case: "where_construct".into(),
+            opt_level: OptLevel::O0,
+            kind: OutcomeKind::Pass,
+            detail: String::new(),
+            bundle: None,
+            consistency_observations: Vec::new(),
+        });
+
+        write_requested_reports(&config, &summary).unwrap();
+
+        let json = fs::read_to_string(&json_path).unwrap();
+        let markdown = fs::read_to_string(&markdown_path).unwrap();
+        assert!(json.contains("\"passed\": 1"));
+        assert!(markdown.contains("| passed | 1 |"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn differential_reports_armfortas_only_divergence() {
         let result = run_only_result("0\n", "", 0);
         let refs = vec![
@@ -5772,10 +6138,7 @@ end
             opt_level: OptLevel::O0,
             stage: FailureStage::Parser,
             detail: "expected 'then'".into(),
-            stages: BTreeMap::from([(
-                Stage::Tokens,
-                CapturedStage::Text("if\n".into()),
-            )]),
+            stages: BTreeMap::from([(Stage::Tokens, CapturedStage::Text("if\n".into()))]),
         };
 
         assert!(evaluate_failed_armfortas(&case, &artifacts, &failure).is_ok());
@@ -5841,10 +6204,7 @@ end
             opt_level: OptLevel::O0,
             stage: FailureStage::Run,
             detail: "Undefined symbols for architecture arm64:\n  \"_add_one\"".into(),
-            stages: BTreeMap::from([(
-                Stage::Asm,
-                CapturedStage::Text(".globl _main\n".into()),
-            )]),
+            stages: BTreeMap::from([(Stage::Asm, CapturedStage::Text(".globl _main\n".into()))]),
         };
         let artifacts = ExecutionArtifacts {
             requested: BTreeSet::from([Stage::Asm, Stage::Obj, Stage::Run]),
