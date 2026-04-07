@@ -27,4 +27,4 @@ families now live there as bench-owned inputs, along with the
 Sprint 7 begins carving authored module graphs into `fixtures/modules/` so the
 bench can model ordered multi-file inputs instead of only isolated sources.
 That corpus now covers module-use chains, renaming, module procedures, and an
-early submodule probe.
+early submodule probe, plus visibility and fan-in graph families.
