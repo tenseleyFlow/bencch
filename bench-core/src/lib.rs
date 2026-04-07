@@ -178,6 +178,12 @@ impl CaptureRequest {
     }
 }
 
+pub trait CaptureBackend {
+    fn mode_name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn capture(&self, request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure>;
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub input: PathBuf,

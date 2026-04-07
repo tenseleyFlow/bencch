@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub use bencch_core::{
-    CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage, OptLevel,
-    RunCapture, Stage,
+    CaptureBackend, CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage,
+    OptLevel, RunCapture, Stage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,11 +102,18 @@ impl ArmfortasAdapters {
             }
         }
     }
+}
 
-    pub fn capture_from_path(
-        &self,
-        request: &CaptureRequest,
-    ) -> Result<CaptureResult, CaptureFailure> {
+impl CaptureBackend for ArmfortasAdapters {
+    fn mode_name(&self) -> &'static str {
+        self.capture_mode_name()
+    }
+
+    fn description(&self) -> &'static str {
+        self.capture_description()
+    }
+
+    fn capture(&self, request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
         match self.capture {
             ArmfortasCaptureAdapter::Linked => linked_capture_from_path(request),
         }
