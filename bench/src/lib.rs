@@ -364,7 +364,17 @@ enum PrimaryCaptureBackendKind {
     Observable,
 }
 
+impl PrimaryCaptureBackendKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Observable => "observable",
+        }
+    }
+}
+
 struct SelectedPrimaryBackend {
+    kind: PrimaryCaptureBackendKind,
     backend: Box<dyn CaptureBackend>,
 }
 
@@ -705,6 +715,9 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
     let suite_root = default_suite_root();
     let report_root = default_report_root();
     let armfortas = config.tools.armfortas_adapters();
+    let observable_backend = config
+        .tools
+        .cli_observable_capture_backend(report_root.join(".tmp").join("doctor"));
     let capture_root = armfortas.capture_root();
     let capture_manifest = capture_root.join("Cargo.toml");
 
@@ -717,6 +730,14 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         format!(
             "  armfortas_capture_adapter: {}",
             armfortas.capture_description()
+        ),
+        format!(
+            "  primary_backend_full: {}",
+            armfortas.capture_description()
+        ),
+        format!(
+            "  primary_backend_observable: {}",
+            observable_backend.description()
         ),
         format!("  armfortas_capture_root: {}", display_path(&capture_root)),
         format!(
@@ -755,6 +776,10 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         "  armfortas_capture_status: linked via Cargo to {}",
         display_path(&capture_root)
     ));
+    lines.push(
+        "  primary_backend_selection: observable backend is selected for asm/obj/run-only cells when the armfortas CLI is external and the case does not require expect-fail or capture-consistency semantics; otherwise full backend"
+            .to_string(),
+    );
     lines.push(format!(
         "  gfortran: {}",
         tool_probe_status(&config.tools.gfortran, false)
@@ -1546,6 +1571,8 @@ fn execute_case_cell(
     }
 
     let prepared = prepare_case_input(case, suite, opt_level)?;
+    let selected_backend =
+        select_primary_capture_backend(case, &requested, opt_level, &config.tools);
 
     if config.verbose {
         let stage_list = requested
@@ -1571,6 +1598,15 @@ fn execute_case_cell(
         }
         println!("  opt: {}", opt_level.as_str());
         println!("  stages: {}", stage_list);
+        println!(
+            "  primary_backend: {} ({})",
+            selected_backend.kind.as_str(),
+            selected_backend.backend.mode_name()
+        );
+        println!(
+            "  primary_backend_detail: {}",
+            selected_backend.backend.description()
+        );
         println!("  refs: {}", refs);
         if !case.consistency_checks.is_empty() {
             println!("  repeat: {}", case.repeat_count);
@@ -1587,11 +1623,10 @@ fn execute_case_cell(
     };
 
     match execute_primary_armfortas(
-        case,
         &prepared,
         opt_level,
         &artifacts.requested,
-        &config.tools,
+        &selected_backend,
     ) {
         Ok(result) => artifacts.armfortas = Some(result),
         Err(failure) => artifacts.armfortas_failure = Some(failure),
@@ -1834,22 +1869,20 @@ fn select_primary_capture_backend(
             Box::new(tools.cli_observable_capture_backend(next_primary_cli_temp_root(opt_level)))
         }
     };
-    SelectedPrimaryBackend { backend }
+    SelectedPrimaryBackend { kind, backend }
 }
 
 fn execute_primary_armfortas(
-    case: &CaseSpec,
     prepared: &PreparedInput,
     opt_level: OptLevel,
     requested: &BTreeSet<Stage>,
-    tools: &ToolchainConfig,
+    selected: &SelectedPrimaryBackend,
 ) -> Result<CaptureResult, CaptureFailure> {
     let request = CaptureRequest {
         input: prepared.compiler_source.clone(),
         requested: requested.clone(),
         opt_level,
     };
-    let selected = select_primary_capture_backend(case, requested, opt_level, tools);
     selected.backend.capture(&request)
 }
 
@@ -5563,15 +5596,13 @@ mod tests {
             otool: "otool".into(),
             nm: "nm".into(),
         };
+        let requested = BTreeSet::from([Stage::Asm, Stage::Run]);
+        let selected = select_primary_capture_backend(&case, &requested, OptLevel::O0, &tools);
+        assert_eq!(selected.kind, PrimaryCaptureBackendKind::Observable);
+        assert_eq!(selected.backend.mode_name(), "cli-observable");
 
-        let result = execute_primary_armfortas(
-            &case,
-            &prepared,
-            OptLevel::O0,
-            &BTreeSet::from([Stage::Asm, Stage::Run]),
-            &tools,
-        )
-        .unwrap();
+        let result =
+            execute_primary_armfortas(&prepared, OptLevel::O0, &requested, &selected).unwrap();
         let asm = capture_text_stage(&result, Stage::Asm).unwrap();
         let run = capture_run_stage(&result).unwrap();
         assert!(asm.contains(".globl _main"));
@@ -6350,6 +6381,15 @@ end
             .contains("armfortas_capture_adapter: linked armfortas::testing capture adapter"));
         assert!(rendered.contains("armfortas_capture_mode: linked"));
         assert!(rendered.contains("armfortas_capture_manifest:"));
+        assert!(
+            rendered.contains("primary_backend_full: linked armfortas::testing capture adapter")
+        );
+        assert!(rendered.contains(
+            "primary_backend_observable: cli-observable armfortas driver capture adapter"
+        ));
+        assert!(rendered.contains(
+            "primary_backend_selection: observable backend is selected for asm/obj/run-only cells"
+        ));
         assert!(rendered.contains(&format!(
             "configured={} resolved={}",
             armfortas_bin.display(),
