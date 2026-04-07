@@ -180,6 +180,78 @@ impl ReferenceCompiler {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArmfortasCliAdapter {
+    Linked,
+    External(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolchainConfig {
+    armfortas: ArmfortasCliAdapter,
+    gfortran: String,
+    flang_new: String,
+    system_as: String,
+    otool: String,
+    nm: String,
+}
+
+impl ToolchainConfig {
+    fn from_env() -> Self {
+        Self {
+            armfortas: match std::env::var("BENCCH_ARMFORTAS_BIN") {
+                Ok(value) if !value.trim().is_empty() => ArmfortasCliAdapter::External(value),
+                _ => ArmfortasCliAdapter::Linked,
+            },
+            gfortran: tool_override("BENCCH_GFORTRAN_BIN", "gfortran"),
+            flang_new: tool_override("BENCCH_FLANG_BIN", "flang-new"),
+            system_as: tool_override("BENCCH_AS_BIN", "as"),
+            otool: tool_override("BENCCH_OTOOL_BIN", "otool"),
+            nm: tool_override("BENCCH_NM_BIN", "nm"),
+        }
+    }
+
+    fn armfortas_command_name(&self) -> &str {
+        match &self.armfortas {
+            ArmfortasCliAdapter::Linked => "armfortas (linked)",
+            ArmfortasCliAdapter::External(binary) => binary,
+        }
+    }
+
+    fn armfortas_external_bin(&self) -> Option<&str> {
+        match &self.armfortas {
+            ArmfortasCliAdapter::Linked => None,
+            ArmfortasCliAdapter::External(binary) => Some(binary),
+        }
+    }
+
+    fn reference_binary(&self, compiler: ReferenceCompiler) -> &str {
+        match compiler {
+            ReferenceCompiler::Gfortran => &self.gfortran,
+            ReferenceCompiler::FlangNew => &self.flang_new,
+        }
+    }
+
+    fn system_as_bin(&self) -> &str {
+        &self.system_as
+    }
+
+    fn otool_bin(&self) -> &str {
+        &self.otool
+    }
+
+    fn nm_bin(&self) -> &str {
+        &self.nm
+    }
+}
+
+fn tool_override(var: &str, default: &str) -> String {
+    match std::env::var(var) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => default.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutcomeKind {
     Pass,
@@ -238,6 +310,7 @@ struct RunConfig {
     fail_fast: bool,
     include_future: bool,
     all_stages: bool,
+    tools: ToolchainConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +495,7 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                 fail_fast: false,
                 include_future: false,
                 all_stages: false,
+                tools: ToolchainConfig::from_env(),
             };
             let mut queue: VecDeque<&String> = args[1..].iter().collect();
             while let Some(arg) = queue.pop_front() {
@@ -444,6 +518,31 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                     "--fail-fast" => config.fail_fast = true,
                     "--include-future" => config.include_future = true,
                     "--all" => config.all_stages = true,
+                    "--armfortas-bin" => {
+                        let value = queue.pop_front().ok_or("--armfortas-bin requires a value")?;
+                        config.tools.armfortas =
+                            ArmfortasCliAdapter::External(value.clone());
+                    }
+                    "--gfortran-bin" => {
+                        let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
+                        config.tools.gfortran = value.clone();
+                    }
+                    "--flang-bin" => {
+                        let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
+                        config.tools.flang_new = value.clone();
+                    }
+                    "--as-bin" => {
+                        let value = queue.pop_front().ok_or("--as-bin requires a value")?;
+                        config.tools.system_as = value.clone();
+                    }
+                    "--otool-bin" => {
+                        let value = queue.pop_front().ok_or("--otool-bin requires a value")?;
+                        config.tools.otool = value.clone();
+                    }
+                    "--nm-bin" => {
+                        let value = queue.pop_front().ok_or("--nm-bin requires a value")?;
+                        config.tools.nm = value.clone();
+                    }
                     "--help" | "-h" => return Ok(CommandKind::Help),
                     other => return Err(format!("unknown run option: {}", other)),
                 }
@@ -461,8 +560,12 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  cargo run -p afs-tests -- list [--suite <filter>]");
     eprintln!(
-        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all]"
+        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
     );
+    eprintln!();
+    eprintln!("env overrides:");
+    eprintln!("  BENCCH_ARMFORTAS_BIN, BENCCH_GFORTRAN_BIN, BENCCH_FLANG_BIN");
+    eprintln!("  BENCCH_AS_BIN, BENCCH_OTOOL_BIN, BENCCH_NM_BIN");
 }
 
 fn default_suite_root() -> PathBuf {
@@ -1177,7 +1280,7 @@ fn execute_case_cell(
         opt_level,
     };
 
-    let references = run_reference_compilers(case, opt_level);
+    let references = run_reference_compilers(case, opt_level, &config.tools);
     let mut artifacts = ExecutionArtifacts {
         requested,
         armfortas: None,
@@ -1204,7 +1307,8 @@ fn execute_case_cell(
                     execution = compare_differential(result, &artifacts.references);
                 }
                 if execution.is_ok() && !case.consistency_checks.is_empty() {
-                    artifacts.consistency_issues = run_consistency_checks(case, opt_level, result);
+                    artifacts.consistency_issues =
+                        run_consistency_checks(case, opt_level, result, &config.tools);
                     if !artifacts.consistency_issues.is_empty() {
                         execution = Err(format_consistency_issues(&artifacts.consistency_issues));
                     }
@@ -1649,55 +1753,64 @@ fn run_consistency_checks(
     case: &CaseSpec,
     opt_level: OptLevel,
     capture_result: &CaptureResult,
+    tools: &ToolchainConfig,
 ) -> Vec<ConsistencyIssue> {
     let mut failures = Vec::new();
     for check in &case.consistency_checks {
         let issue = match check {
-            ConsistencyCheck::CliObjVsSystemAs => run_cli_obj_vs_system_as(&case.source, opt_level),
+            ConsistencyCheck::CliObjVsSystemAs => {
+                run_cli_obj_vs_system_as(&case.source, opt_level, tools)
+            }
             ConsistencyCheck::CliAsmReproducible => {
-                run_cli_asm_reproducible(&case.source, opt_level, case.repeat_count)
+                run_cli_asm_reproducible(&case.source, opt_level, case.repeat_count, tools)
             }
             ConsistencyCheck::CliObjReproducible => {
-                run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count)
+                run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count, tools)
             }
             ConsistencyCheck::CliRunReproducible => {
-                run_cli_run_reproducible(&case.source, opt_level, case.repeat_count)
+                run_cli_run_reproducible(&case.source, opt_level, case.repeat_count, tools)
             }
             ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
                 &case.source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
+                tools,
             ),
             ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
                 &case.source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
+                tools,
             ),
             ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
                 &case.source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
+                tools,
             ),
             ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
                 &case.source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
+                tools,
             ),
             ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
                 &case.source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
+                tools,
             ),
             ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
                 &case.source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
+                tools,
             ),
         };
         if let Some(issue) = issue {
@@ -1727,7 +1840,11 @@ fn cleanup_consistency_issues(issues: &[ConsistencyIssue]) {
     }
 }
 
-fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<ConsistencyIssue> {
+fn run_cli_obj_vs_system_as(
+    source: &Path,
+    opt_level: OptLevel,
+    tools: &ToolchainConfig,
+) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
         return Some(ConsistencyIssue {
@@ -1750,7 +1867,8 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
     let asm_obj_path = temp_root.join("from_cli_asm.o");
     let obj_path = temp_root.join("from_cli_obj.o");
 
-    let asm_command = match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path) {
+    let asm_command =
+        match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path, tools) {
         Ok(command) => command,
         Err(detail) => {
             return Some(ConsistencyIssue {
@@ -1771,8 +1889,8 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
         asm_obj_path.display().to_string(),
         asm_path.display().to_string(),
     ];
-    let as_command = render_command("as", &as_args);
-    let as_output = match Command::new("as")
+    let as_command = render_command(tools.system_as_bin(), &as_args);
+    let as_output = match Command::new(tools.system_as_bin())
         .args([
             "-o",
             asm_obj_path.to_str().unwrap(),
@@ -1808,7 +1926,8 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
         });
     }
 
-    let obj_command = match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path) {
+    let obj_command =
+        match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path, tools) {
         Ok(command) => command,
         Err(detail) => {
             return Some(ConsistencyIssue {
@@ -1824,7 +1943,7 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
         }
     };
 
-    let asm_snapshot = match object_snapshot(&asm_obj_path) {
+    let asm_snapshot = match object_snapshot(&asm_obj_path, tools) {
         Ok(snapshot) => snapshot,
         Err(detail) => {
             return Some(ConsistencyIssue {
@@ -1839,7 +1958,7 @@ fn run_cli_obj_vs_system_as(source: &Path, opt_level: OptLevel) -> Option<Consis
             })
         }
     };
-    let obj_snapshot = match object_snapshot(&obj_path) {
+    let obj_snapshot = match object_snapshot(&obj_path, tools) {
         Ok(snapshot) => snapshot,
         Err(detail) => {
             return Some(ConsistencyIssue {
@@ -1895,6 +2014,7 @@ fn run_cli_asm_reproducible(
     source: &Path,
     opt_level: OptLevel,
     repeat_count: usize,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -1917,7 +2037,13 @@ fn run_cli_asm_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let asm_path = temp_root.join(format!("run_{:02}.s", index));
-        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path) {
+        let command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Asm,
+            &asm_path,
+            tools,
+        ) {
             Ok(command) => command,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -1985,6 +2111,7 @@ fn run_cli_obj_reproducible(
     source: &Path,
     opt_level: OptLevel,
     repeat_count: usize,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -2007,7 +2134,13 @@ fn run_cli_obj_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let obj_path = temp_root.join(format!("run_{:02}.o", index));
-        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path) {
+        let command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Obj,
+            &obj_path,
+            tools,
+        ) {
             Ok(command) => command,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -2022,7 +2155,7 @@ fn run_cli_obj_reproducible(
                 })
             }
         };
-        let snapshot = match object_snapshot(&obj_path) {
+        let snapshot = match object_snapshot(&obj_path, tools) {
             Ok(snapshot) => snapshot,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -2095,6 +2228,7 @@ fn run_cli_run_reproducible(
     source: &Path,
     opt_level: OptLevel,
     repeat_count: usize,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -2117,8 +2251,13 @@ fn run_cli_run_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
-        let build_command =
-            match compile_with_driver(source, opt_level, DriverEmitMode::Binary, &binary_path) {
+        let build_command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Binary,
+            &binary_path,
+            tools,
+        ) {
                 Ok(command) => command,
                 Err(detail) => {
                     return Some(ConsistencyIssue {
@@ -2221,6 +2360,7 @@ fn run_capture_asm_vs_cli_asm(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -2274,7 +2414,13 @@ fn run_capture_asm_vs_cli_asm(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let asm_path = temp_root.join(format!("cli_run_{:02}.s", index));
-        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path) {
+        let command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Asm,
+            &asm_path,
+            tools,
+        ) {
             Ok(command) => command,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -2361,6 +2507,7 @@ fn run_capture_obj_vs_cli_obj(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -2428,7 +2575,13 @@ fn run_capture_obj_vs_cli_obj(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let obj_path = temp_root.join(format!("cli_run_{:02}.o", index));
-        let command = match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path) {
+        let command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Obj,
+            &obj_path,
+            tools,
+        ) {
             Ok(command) => command,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -2443,7 +2596,7 @@ fn run_capture_obj_vs_cli_obj(
                 })
             }
         };
-        let snapshot = match object_snapshot(&obj_path) {
+        let snapshot = match object_snapshot(&obj_path, tools) {
             Ok(snapshot) => snapshot,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -2548,6 +2701,7 @@ fn run_capture_run_vs_cli_run(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
+    tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -2603,8 +2757,13 @@ fn run_capture_run_vs_cli_run(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
-        let build_command =
-            match compile_with_driver(source, opt_level, DriverEmitMode::Binary, &binary_path) {
+        let build_command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Binary,
+            &binary_path,
+            tools,
+        ) {
                 Ok(command) => command,
                 Err(detail) => {
                     return Some(ConsistencyIssue {
@@ -2729,6 +2888,7 @@ fn run_capture_asm_reproducible(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
+    _tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -2851,6 +3011,7 @@ fn run_capture_obj_reproducible(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
+    _tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -3021,6 +3182,7 @@ fn run_capture_run_reproducible(
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
+    _tools: &ToolchainConfig,
 ) -> Option<ConsistencyIssue> {
     let temp_root = next_consistency_temp_root(opt_level);
     if let Err(err) = fs::create_dir_all(&temp_root) {
@@ -3158,11 +3320,15 @@ fn run_capture_run_reproducible(
     None
 }
 
-fn run_reference_compilers(case: &CaseSpec, opt_level: OptLevel) -> Vec<ReferenceResult> {
+fn run_reference_compilers(
+    case: &CaseSpec,
+    opt_level: OptLevel,
+    tools: &ToolchainConfig,
+) -> Vec<ReferenceResult> {
     case.reference_compilers
         .iter()
         .copied()
-        .map(|compiler| run_reference_case(&case.source, opt_level, compiler))
+        .map(|compiler| run_reference_case(&case.source, opt_level, compiler, tools))
         .collect()
 }
 
@@ -3170,6 +3336,7 @@ fn run_reference_case(
     source: &Path,
     opt_level: OptLevel,
     compiler: ReferenceCompiler,
+    tools: &ToolchainConfig,
 ) -> ReferenceResult {
     let temp_root = next_report_temp_root(compiler, opt_level);
     let binary = temp_root.join("reference.out");
@@ -3183,7 +3350,8 @@ fn run_reference_case(
     args.push("-o".to_string());
     args.push(binary.display().to_string());
 
-    let command_string = render_command(compiler.binary_name(), &args);
+    let compiler_bin = tools.reference_binary(compiler);
+    let command_string = render_command(compiler_bin, &args);
 
     if let Err(err) = fs::create_dir_all(&temp_root) {
         return ReferenceResult::infrastructure_error(
@@ -3193,7 +3361,7 @@ fn run_reference_case(
         );
     }
 
-    let compile = match Command::new(compiler.binary_name())
+    let compile = match Command::new(compiler_bin)
         .current_dir(&temp_root)
         .args(&args)
         .output()
@@ -3203,7 +3371,7 @@ fn run_reference_case(
             return ReferenceResult::infrastructure_error(
                 compiler,
                 command_string,
-                format!("cannot run {}: {}", compiler.binary_name(), err),
+                format!("cannot run {}: {}", compiler_bin, err),
             );
         }
     };
@@ -3255,19 +3423,41 @@ fn compile_with_driver(
     opt_level: OptLevel,
     mode: DriverEmitMode,
     output: &Path,
+    tools: &ToolchainConfig,
 ) -> Result<String, String> {
-    let command = render_armfortas_command(source, opt_level, mode, output);
-    let opts = driver::Options {
-        input: source.to_path_buf(),
-        output: Some(output.to_path_buf()),
-        emit_asm: matches!(mode, DriverEmitMode::Asm),
-        emit_obj: matches!(mode, DriverEmitMode::Obj),
-        emit_ir: false,
-        preprocess_only: false,
-        opt_level,
-    };
+    let command = render_armfortas_command(source, opt_level, mode, output, tools);
+    if let Some(binary) = tools.armfortas_external_bin() {
+        let mut args = vec![opt_level.as_flag().to_string()];
+        match mode {
+            DriverEmitMode::Asm => args.push("-S".to_string()),
+            DriverEmitMode::Obj => args.push("-c".to_string()),
+            DriverEmitMode::Binary => {}
+        }
+        args.push(source.display().to_string());
+        args.push("-o".to_string());
+        args.push(output.display().to_string());
 
-    driver::compile(&opts).map_err(|detail| format!("{} failed:\n{}", command, detail))?;
+        let compile = Command::new(binary)
+            .args(&args)
+            .output()
+            .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
+        if !compile.status.success() {
+            let stderr = String::from_utf8_lossy(&compile.stderr);
+            return Err(format!("{} failed:\n{}", command, stderr.trim_end()));
+        }
+    } else {
+        let opts = driver::Options {
+            input: source.to_path_buf(),
+            output: Some(output.to_path_buf()),
+            emit_asm: matches!(mode, DriverEmitMode::Asm),
+            emit_obj: matches!(mode, DriverEmitMode::Obj),
+            emit_ir: false,
+            preprocess_only: false,
+            opt_level,
+        };
+
+        driver::compile(&opts).map_err(|detail| format!("{} failed:\n{}", command, detail))?;
+    }
     Ok(command)
 }
 
@@ -3276,6 +3466,7 @@ fn render_armfortas_command(
     opt_level: OptLevel,
     mode: DriverEmitMode,
     output: &Path,
+    tools: &ToolchainConfig,
 ) -> String {
     let mut args = vec![opt_level.as_flag().to_string()];
     match mode {
@@ -3286,7 +3477,7 @@ fn render_armfortas_command(
     args.push(source.display().to_string());
     args.push("-o".to_string());
     args.push(output.display().to_string());
-    render_command("armfortas", &args)
+    render_command(tools.armfortas_command_name(), &args)
 }
 
 fn render_binary_run_command(binary: &Path) -> String {
@@ -3526,13 +3717,13 @@ struct ObjectRun {
     snapshot: ObjectSnapshot,
 }
 
-fn object_snapshot(path: &Path) -> Result<ObjectSnapshot, String> {
-    let text = normalize_tool_output(&tool_output("otool", &["-t", path.to_str().unwrap()])?);
+fn object_snapshot(path: &Path, tools: &ToolchainConfig) -> Result<ObjectSnapshot, String> {
+    let text = normalize_tool_output(&tool_output(tools.otool_bin(), &["-t", path.to_str().unwrap()])?);
     let load_commands =
-        normalize_tool_output(&tool_output("otool", &["-l", path.to_str().unwrap()])?);
+        normalize_tool_output(&tool_output(tools.otool_bin(), &["-l", path.to_str().unwrap()])?);
     let relocations =
-        normalize_tool_output(&tool_output("otool", &["-rv", path.to_str().unwrap()])?);
-    let symbols = normalize_tool_output(&tool_output("nm", &["-m", path.to_str().unwrap()])?);
+        normalize_tool_output(&tool_output(tools.otool_bin(), &["-rv", path.to_str().unwrap()])?);
+    let symbols = normalize_tool_output(&tool_output(tools.nm_bin(), &["-m", path.to_str().unwrap()])?);
 
     Ok(ObjectSnapshot {
         text,
@@ -4591,6 +4782,44 @@ end
         );
         assert_eq!(case.repeat_count, 5);
         let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parse_cli_collects_tool_overrides() {
+        let args = vec![
+            "run".to_string(),
+            "--suite".to_string(),
+            "consistency/runtime".to_string(),
+            "--armfortas-bin".to_string(),
+            "/tmp/armfortas".to_string(),
+            "--gfortran-bin".to_string(),
+            "/tmp/gfortran".to_string(),
+            "--flang-bin".to_string(),
+            "/tmp/flang-new".to_string(),
+            "--as-bin".to_string(),
+            "/tmp/as".to_string(),
+            "--otool-bin".to_string(),
+            "/tmp/otool".to_string(),
+            "--nm-bin".to_string(),
+            "/tmp/nm".to_string(),
+        ];
+
+        let command = parse_cli(&args).unwrap();
+        let config = match command {
+            CommandKind::Run(config) => config,
+            other => panic!("expected run command, got {:?}", std::mem::discriminant(&other)),
+        };
+
+        assert_eq!(config.suite_filter.as_deref(), Some("consistency/runtime"));
+        assert_eq!(
+            config.tools.armfortas,
+            ArmfortasCliAdapter::External("/tmp/armfortas".into())
+        );
+        assert_eq!(config.tools.gfortran, "/tmp/gfortran");
+        assert_eq!(config.tools.flang_new, "/tmp/flang-new");
+        assert_eq!(config.tools.system_as, "/tmp/as");
+        assert_eq!(config.tools.otool, "/tmp/otool");
+        assert_eq!(config.tools.nm, "/tmp/nm");
     }
 
     #[test]
