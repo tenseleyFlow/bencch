@@ -1,7 +1,7 @@
 suite "consistency/runtime-behavior"
 
 case "mixed_types_cli_run_reproducible"
-source "../../../test_programs/mixed_types.f90"
+source "../../fixtures/runtime/mixed_types.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -11,7 +11,7 @@ expect run.exit_code equals 0
 end
 
 case "mixed_types_capture_run_matches_cli"
-source "../../../test_programs/mixed_types.f90"
+source "../../fixtures/runtime/mixed_types.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -21,7 +21,7 @@ expect run.exit_code equals 0
 end
 
 case "mixed_types_capture_run_reproducible"
-source "../../../test_programs/mixed_types.f90"
+source "../../fixtures/runtime/mixed_types.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -31,7 +31,7 @@ expect run.exit_code equals 0
 end
 
 case "where_construct_cli_run_reproducible"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -41,7 +41,7 @@ expect run.exit_code equals 0
 end
 
 case "where_construct_capture_run_matches_cli"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -51,7 +51,7 @@ expect run.exit_code equals 0
 end
 
 case "where_construct_capture_run_reproducible"
-source "../../../test_programs/where_construct.f90"
+source "../../fixtures/runtime/where_construct.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -61,7 +61,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_basic_cli_run_reproducible"
-source "../../../test_programs/derived_type_basic.f90"
+source "../../fixtures/runtime/derived_type_basic.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -71,7 +71,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_basic_capture_run_matches_cli"
-source "../../../test_programs/derived_type_basic.f90"
+source "../../fixtures/runtime/derived_type_basic.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -81,7 +81,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_basic_capture_run_reproducible"
-source "../../../test_programs/derived_type_basic.f90"
+source "../../fixtures/runtime/derived_type_basic.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -91,7 +91,7 @@ expect run.exit_code equals 0
 end
 
 case "string_fixed_cli_run_reproducible"
-source "../../../test_programs/string_fixed.f90"
+source "../../fixtures/runtime/string_fixed.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -101,7 +101,7 @@ expect run.exit_code equals 0
 end
 
 case "string_fixed_capture_run_matches_cli"
-source "../../../test_programs/string_fixed.f90"
+source "../../fixtures/runtime/string_fixed.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -111,7 +111,7 @@ expect run.exit_code equals 0
 end
 
 case "string_fixed_capture_run_reproducible"
-source "../../../test_programs/string_fixed.f90"
+source "../../fixtures/runtime/string_fixed.f90"
 opts => all
 armfortas => run
 repeat => 3
