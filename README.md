@@ -37,6 +37,11 @@ That means this repo already carries:
   `armfortas::testing` `run` capture, and capture-vs-CLI behavior comparisons,
   which currently stays green on the bench-owned backend fixtures and narrows
   the observed nondeterminism below the sampled runtime surface
+- expanded runtime consistency coverage over real behavioral programs including
+  numerics, array/control-flow, derived types, fixed-length strings, file I/O,
+  and `bind(c)` interop, which is also green across the sampled opt matrix and
+  reinforces that the current nondeterminism has not yet leaked into observed
+  runtime behavior on this initial corpus
 
 ## Layout
 
@@ -71,6 +76,9 @@ Next planned slice from this extraction point:
   CLI runtime reproducibility, capture runtime reproducibility, and
   capture-vs-CLI runtime behavior are all in place alongside the existing
   `asm`/`obj` families
+- broader runtime-consistency corpus work around larger programs, more I/O
+  modes, and higher-surface language features so the bench can keep testing how
+  far the current “stable at runtime, unstable below it” diagnosis really holds
 - report-surface follow-up beyond the current console/bundle rollups, once we
   want machine-readable or cross-run consistency summaries
 - sharper standalone boundaries between the generic bench and armfortas-local
