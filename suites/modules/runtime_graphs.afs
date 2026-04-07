@@ -113,3 +113,27 @@ expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
+
+case "mixed_only_runtime"
+entry "../../fixtures/modules/mixed_only/main_alias.f90"
+file "../../fixtures/modules/mixed_only/base_values.f90"
+file "../../fixtures/modules/mixed_only/bridge_values.f90"
+file "../../fixtures/modules/mixed_only/main_alias.f90"
+opts => O0, O1, O2
+armfortas => run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "collision_alias_runtime"
+entry "../../fixtures/modules/collision_shadow/main_aliases.f90"
+file "../../fixtures/modules/collision_shadow/left_values.f90"
+file "../../fixtures/modules/collision_shadow/right_values.f90"
+file "../../fixtures/modules/collision_shadow/main_aliases.f90"
+opts => O0, O1, O2
+armfortas => run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end

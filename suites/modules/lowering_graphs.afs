@@ -56,3 +56,25 @@ expect ir not-contains "global @base_values::payload: i32 = zeroinit"
 expect ir not-contains "global @bridge_aliases::lifted: i32 = zeroinit"
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
+
+case "mixed_only_ir_values"
+entry "../../fixtures/modules/mixed_only/main_alias.f90"
+file "../../fixtures/modules/mixed_only/base_values.f90"
+file "../../fixtures/modules/mixed_only/bridge_values.f90"
+file "../../fixtures/modules/mixed_only/main_alias.f90"
+armfortas => ir
+expect ir not-contains "global @mixed_only_values::alpha: i32 = zeroinit"
+expect ir not-contains "global @mixed_only_values::beta: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "collision_alias_ir_values"
+entry "../../fixtures/modules/collision_shadow/main_aliases.f90"
+file "../../fixtures/modules/collision_shadow/left_values.f90"
+file "../../fixtures/modules/collision_shadow/right_values.f90"
+file "../../fixtures/modules/collision_shadow/main_aliases.f90"
+armfortas => ir
+expect ir not-contains "global @collision_left_values::payload: i32 = zeroinit"
+expect ir not-contains "global @collision_right_values::payload: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end

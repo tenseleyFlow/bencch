@@ -113,3 +113,48 @@ armfortas => sema
 expect-fail sema contains "payload"
 xfail "Original names still leak through renamed re-export graphs."
 end
+
+case "mixed_only_frontend"
+entry "../../fixtures/modules/mixed_only/main_alias.f90"
+file "../../fixtures/modules/mixed_only/base_values.f90"
+file "../../fixtures/modules/mixed_only/bridge_values.f90"
+file "../../fixtures/modules/mixed_only/main_alias.f90"
+armfortas => ast, sema
+expect ast contains "local: \"kept\""
+expect ast contains "local: \"chosen\""
+expect sema contains "local_name: \"chosen\""
+expect sema contains "local_name: \"beta\""
+expect sema contains "original_name: \"kept\""
+end
+
+case "mixed_only_hidden_name_rejected"
+entry "../../fixtures/modules/mixed_only/main_hidden.f90"
+file "../../fixtures/modules/mixed_only/base_values.f90"
+file "../../fixtures/modules/mixed_only/bridge_values.f90"
+file "../../fixtures/modules/mixed_only/main_hidden.f90"
+armfortas => sema
+expect-fail sema contains "alpha"
+xfail "Original names still leak through mixed ONLY graphs."
+end
+
+case "collision_alias_frontend"
+entry "../../fixtures/modules/collision_shadow/main_aliases.f90"
+file "../../fixtures/modules/collision_shadow/left_values.f90"
+file "../../fixtures/modules/collision_shadow/right_values.f90"
+file "../../fixtures/modules/collision_shadow/main_aliases.f90"
+armfortas => ast, sema
+expect ast contains "local: \"left_value\""
+expect ast contains "local: \"right_value\""
+expect sema contains "local_name: \"left_value\""
+expect sema contains "local_name: \"right_value\""
+end
+
+case "collision_ambiguous_import_rejected"
+entry "../../fixtures/modules/collision_shadow/main_ambiguous.f90"
+file "../../fixtures/modules/collision_shadow/left_values.f90"
+file "../../fixtures/modules/collision_shadow/right_values.f90"
+file "../../fixtures/modules/collision_shadow/main_ambiguous.f90"
+armfortas => sema
+expect-fail sema contains "ambiguous"
+xfail "Ambiguous USE imports are not rejected in graph cases yet."
+end
