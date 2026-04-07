@@ -1,0 +1,33 @@
+suite "differential/runtime-structured"
+
+case "derived_type_nested_refs"
+source "../../../test_programs/derived_type_nested.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_formatted_write_refs"
+source "../../../test_programs/io_formatted_write.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_to_unit_refs"
+source "../../../test_programs/io_write_to_unit.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "io_write_types_refs"
+source "../../../test_programs/io_write_types.f90"
+armfortas => run
+differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
