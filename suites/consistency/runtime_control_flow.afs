@@ -1,0 +1,241 @@
+suite "consistency/runtime-control-flow"
+
+case "if_else_cli_run_reproducible"
+source "../../../test_programs/if_else.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "if_else_capture_run_matches_cli"
+source "../../../test_programs/if_else.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "if_else_capture_run_reproducible"
+source "../../../test_programs/if_else.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "do_while_cli_run_reproducible"
+source "../../../test_programs/do_while.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "do_while_capture_run_matches_cli"
+source "../../../test_programs/do_while.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "do_while_capture_run_reproducible"
+source "../../../test_programs/do_while.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "nested_loops_cli_run_reproducible"
+source "../../../test_programs/nested_loops.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "nested_loops_capture_run_matches_cli"
+source "../../../test_programs/nested_loops.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "nested_loops_capture_run_reproducible"
+source "../../../test_programs/nested_loops.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "exit_cycle_cli_run_reproducible"
+source "../../../test_programs/exit_cycle.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "exit_cycle_capture_run_matches_cli"
+source "../../../test_programs/exit_cycle.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "exit_cycle_capture_run_reproducible"
+source "../../../test_programs/exit_cycle.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "select_case_cli_run_reproducible"
+source "../../../test_programs/select_case.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "select_case_capture_run_matches_cli"
+source "../../../test_programs/select_case.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "select_case_capture_run_reproducible"
+source "../../../test_programs/select_case.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "function_call_cli_run_reproducible"
+source "../../../test_programs/function_call.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "function_call_capture_run_matches_cli"
+source "../../../test_programs/function_call.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "function_call_capture_run_reproducible"
+source "../../../test_programs/function_call.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "subroutine_call_cli_run_reproducible"
+source "../../../test_programs/subroutine_call.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "subroutine_call_capture_run_matches_cli"
+source "../../../test_programs/subroutine_call.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "subroutine_call_capture_run_reproducible"
+source "../../../test_programs/subroutine_call.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "real_function_cli_run_reproducible"
+source "../../../test_programs/real_function.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "real_function_capture_run_matches_cli"
+source "../../../test_programs/real_function.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_vs_cli_run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "real_function_capture_run_reproducible"
+source "../../../test_programs/real_function.f90"
+opts => all
+armfortas => run
+repeat => 3
+consistency => capture_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
