@@ -21,8 +21,9 @@ still comes from the surrounding workspace. That linked compiler surface is
 currently isolated in `bench/src/compiler.rs`, and the bench-owned
 compiler-facing types now live in `bench-core/`. `afs-tests doctor` reports
 the CLI adapter and capture adapter separately so the current boundary is
-obvious. Run-only cases can already use an external `armfortas` binary as the
-primary execution path; richer stage capture is still linked.
+obvious. CLI-observable cases using `asm`, `obj`, and `run` can already use an
+external `armfortas` binary as the primary execution path; richer stage capture
+is still linked.
 
 ```bash
 cargo run -p afs-tests -- list
@@ -55,6 +56,12 @@ Run against an explicit compiler binary:
 
 ```bash
 cargo run -p afs-tests -- run --suite consistency/runtime-control-flow --armfortas-bin ./target/debug/armfortas
+```
+
+Run an asm/object surface through an explicit compiler binary:
+
+```bash
+cargo run -p afs-tests -- run --suite backend/asm --case runtime_wrapper_and_calls --armfortas-bin ./target/debug/armfortas
 ```
 
 Run differential checks with explicit reference compiler paths:
