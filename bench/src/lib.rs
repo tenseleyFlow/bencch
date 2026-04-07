@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compiler::{
     ArmfortasAdapters, ArmfortasCliAdapter, CaptureBackend, CaptureFailure, CaptureRequest,
-    CaptureResult, CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
+    CaptureResult, CapturedStage, CliObservableCaptureBackend, EmitMode, FailureStage, OptLevel,
+    RunCapture, Stage,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -246,6 +247,15 @@ impl ToolchainConfig {
 
     fn armfortas_adapters(&self) -> ArmfortasAdapters {
         ArmfortasAdapters::new(self.armfortas.clone())
+    }
+
+    fn cli_observable_capture_backend(&self, work_root: PathBuf) -> CliObservableCaptureBackend {
+        CliObservableCaptureBackend::new(
+            self.armfortas.clone(),
+            work_root,
+            self.otool.clone(),
+            self.nm.clone(),
+        )
     }
 
     fn reference_binary(&self, compiler: ReferenceCompiler) -> &str {
@@ -1824,145 +1834,16 @@ fn execute_primary_armfortas(
             tools.armfortas_adapters().capture(&request)
         }
         ArmfortasPrimaryMode::CliObservable => {
-            execute_cli_primary_capture(&prepared.compiler_source, requested, opt_level, tools)
-        }
-    }
-}
-
-fn execute_cli_primary_capture(
-    source: &Path,
-    requested: &BTreeSet<Stage>,
-    opt_level: OptLevel,
-    tools: &ToolchainConfig,
-) -> Result<CaptureResult, CaptureFailure> {
-    let temp_root = next_primary_cli_temp_root(opt_level);
-    if let Err(err) = fs::create_dir_all(&temp_root) {
-        return Err(CaptureFailure {
-            input: source.to_path_buf(),
-            opt_level,
-            stage: FailureStage::Obj,
-            detail: format!(
-                "cannot create primary cli temp dir '{}': {}",
-                temp_root.display(),
-                err
-            ),
-            stages: BTreeMap::new(),
-        });
-    }
-
-    let mut stages = BTreeMap::new();
-
-    if requested.contains(&Stage::Asm) {
-        let asm_path = temp_root.join("armfortas_primary.s");
-        match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path, tools) {
-            Ok(_) => {}
-            Err(detail) => {
-                let _ = fs::remove_dir_all(&temp_root);
-                return Err(CaptureFailure {
-                    input: source.to_path_buf(),
-                    opt_level,
-                    stage: FailureStage::Obj,
-                    detail,
-                    stages,
-                });
-            }
-        }
-        let asm_text = match read_text_artifact(&asm_path) {
-            Ok(text) => text,
-            Err(detail) => {
-                let _ = fs::remove_dir_all(&temp_root);
-                return Err(CaptureFailure {
-                    input: source.to_path_buf(),
-                    opt_level,
-                    stage: FailureStage::Obj,
-                    detail,
-                    stages,
-                });
-            }
-        };
-        stages.insert(Stage::Asm, CapturedStage::Text(asm_text));
-    }
-
-    if requested.contains(&Stage::Obj) {
-        let obj_path = temp_root.join("armfortas_primary.o");
-        let build_command =
-            match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path, tools) {
-                Ok(command) => command,
-                Err(detail) => {
-                    let _ = fs::remove_dir_all(&temp_root);
-                    return Err(CaptureFailure {
-                        input: source.to_path_buf(),
-                        opt_level,
-                        stage: FailureStage::Obj,
-                        detail,
-                        stages,
-                    });
-                }
+            let request = CaptureRequest {
+                input: prepared.compiler_source.clone(),
+                requested: requested.clone(),
+                opt_level,
             };
-        let snapshot = match object_snapshot(&obj_path, tools) {
-            Ok(snapshot) => snapshot,
-            Err(detail) => {
-                let _ = fs::remove_dir_all(&temp_root);
-                return Err(CaptureFailure {
-                    input: source.to_path_buf(),
-                    opt_level,
-                    stage: FailureStage::Obj,
-                    detail: format!("{}\n{}", build_command, detail),
-                    stages,
-                });
-            }
-        };
-        stages.insert(
-            Stage::Obj,
-            CapturedStage::Text(render_object_snapshot(&snapshot)),
-        );
+            tools
+                .cli_observable_capture_backend(next_primary_cli_temp_root(opt_level))
+                .capture(&request)
+        }
     }
-
-    if requested.contains(&Stage::Run) {
-        let binary_path = temp_root.join("armfortas_primary.out");
-        let build_command = match compile_with_driver(
-            source,
-            opt_level,
-            DriverEmitMode::Binary,
-            &binary_path,
-            tools,
-        ) {
-            Ok(command) => command,
-            Err(detail) => {
-                let _ = fs::remove_dir_all(&temp_root);
-                return Err(CaptureFailure {
-                    input: source.to_path_buf(),
-                    opt_level,
-                    stage: FailureStage::Obj,
-                    detail,
-                    stages,
-                });
-            }
-        };
-
-        let run_command = render_binary_run_command(&binary_path);
-        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
-            Ok(run) => run,
-            Err(detail) => {
-                let _ = fs::remove_dir_all(&temp_root);
-                return Err(CaptureFailure {
-                    input: source.to_path_buf(),
-                    opt_level,
-                    stage: FailureStage::Run,
-                    detail: format!("build: {}\n{}", build_command, detail),
-                    stages,
-                });
-            }
-        };
-        stages.insert(Stage::Run, CapturedStage::Run(run));
-    }
-
-    let _ = fs::remove_dir_all(&temp_root);
-    Ok(CaptureResult {
-        input: source.to_path_buf(),
-        opt_level,
-        stages,
-    })
 }
 
 fn status_for_opt(case: &CaseSpec, opt_level: OptLevel) -> EffectiveStatus {
