@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compiler::{
-    ArmfortasAdapters, ArmfortasCliAdapter, CaptureFailure, CaptureRequest, CaptureResult,
-    CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
+    ArmfortasAdapters, ArmfortasCliAdapter, CaptureBackend, CaptureFailure, CaptureRequest,
+    CaptureResult, CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -351,7 +351,7 @@ struct ExecutionArtifacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArmfortasPrimaryMode {
     LinkedCapture,
-    CliRun,
+    CliObservable,
 }
 
 #[derive(Debug, Clone)]
@@ -1783,7 +1783,10 @@ fn primary_mode_for_case(
     requested: &BTreeSet<Stage>,
     tools: &ToolchainConfig,
 ) -> ArmfortasPrimaryMode {
-    let cli_only_run = requested.len() == 1 && requested.contains(&Stage::Run);
+    let cli_observable_only = !requested.is_empty()
+        && requested
+            .iter()
+            .all(|stage| matches!(stage, Stage::Asm | Stage::Obj | Stage::Run));
     let supports_cli_primary = matches!(
         tools.armfortas_adapters().cli(),
         ArmfortasCliAdapter::External(_)
@@ -1794,11 +1797,11 @@ fn primary_mode_for_case(
         .any(ConsistencyCheck::requires_capture_result);
 
     if supports_cli_primary
-        && cli_only_run
+        && cli_observable_only
         && !has_failure_expectation(case)
         && !capture_checks_required
     {
-        ArmfortasPrimaryMode::CliRun
+        ArmfortasPrimaryMode::CliObservable
     } else {
         ArmfortasPrimaryMode::LinkedCapture
     }
@@ -1818,16 +1821,17 @@ fn execute_primary_armfortas(
                 requested: requested.clone(),
                 opt_level,
             };
-            tools.armfortas_adapters().capture_from_path(&request)
+            tools.armfortas_adapters().capture(&request)
         }
-        ArmfortasPrimaryMode::CliRun => {
-            execute_cli_primary_run(&prepared.compiler_source, opt_level, tools)
+        ArmfortasPrimaryMode::CliObservable => {
+            execute_cli_primary_capture(&prepared.compiler_source, requested, opt_level, tools)
         }
     }
 }
 
-fn execute_cli_primary_run(
+fn execute_cli_primary_capture(
     source: &Path,
+    requested: &BTreeSet<Stage>,
     opt_level: OptLevel,
     tools: &ToolchainConfig,
 ) -> Result<CaptureResult, CaptureFailure> {
@@ -1846,47 +1850,118 @@ fn execute_cli_primary_run(
         });
     }
 
-    let binary_path = temp_root.join("armfortas_primary.out");
-    let build_command = match compile_with_driver(
-        source,
-        opt_level,
-        DriverEmitMode::Binary,
-        &binary_path,
-        tools,
-    ) {
-        Ok(command) => command,
-        Err(detail) => {
-            let _ = fs::remove_dir_all(&temp_root);
-            return Err(CaptureFailure {
-                input: source.to_path_buf(),
-                opt_level,
-                stage: FailureStage::Obj,
-                detail,
-                stages: BTreeMap::new(),
-            });
-        }
-    };
+    let mut stages = BTreeMap::new();
 
-    let run_command = render_binary_run_command(&binary_path);
-    let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
-        Ok(run) => run,
-        Err(detail) => {
-            let _ = fs::remove_dir_all(&temp_root);
-            return Err(CaptureFailure {
-                input: source.to_path_buf(),
-                opt_level,
-                stage: FailureStage::Run,
-                detail: format!("build: {}\n{}", build_command, detail),
-                stages: BTreeMap::new(),
-            });
+    if requested.contains(&Stage::Asm) {
+        let asm_path = temp_root.join("armfortas_primary.s");
+        match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path, tools) {
+            Ok(_) => {}
+            Err(detail) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return Err(CaptureFailure {
+                    input: source.to_path_buf(),
+                    opt_level,
+                    stage: FailureStage::Obj,
+                    detail,
+                    stages,
+                });
+            }
         }
-    };
+        let asm_text = match read_text_artifact(&asm_path) {
+            Ok(text) => text,
+            Err(detail) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return Err(CaptureFailure {
+                    input: source.to_path_buf(),
+                    opt_level,
+                    stage: FailureStage::Obj,
+                    detail,
+                    stages,
+                });
+            }
+        };
+        stages.insert(Stage::Asm, CapturedStage::Text(asm_text));
+    }
+
+    if requested.contains(&Stage::Obj) {
+        let obj_path = temp_root.join("armfortas_primary.o");
+        let build_command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path, tools) {
+                Ok(command) => command,
+                Err(detail) => {
+                    let _ = fs::remove_dir_all(&temp_root);
+                    return Err(CaptureFailure {
+                        input: source.to_path_buf(),
+                        opt_level,
+                        stage: FailureStage::Obj,
+                        detail,
+                        stages,
+                    });
+                }
+            };
+        let snapshot = match object_snapshot(&obj_path, tools) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return Err(CaptureFailure {
+                    input: source.to_path_buf(),
+                    opt_level,
+                    stage: FailureStage::Obj,
+                    detail: format!("{}\n{}", build_command, detail),
+                    stages,
+                });
+            }
+        };
+        stages.insert(
+            Stage::Obj,
+            CapturedStage::Text(render_object_snapshot(&snapshot)),
+        );
+    }
+
+    if requested.contains(&Stage::Run) {
+        let binary_path = temp_root.join("armfortas_primary.out");
+        let build_command = match compile_with_driver(
+            source,
+            opt_level,
+            DriverEmitMode::Binary,
+            &binary_path,
+            tools,
+        ) {
+            Ok(command) => command,
+            Err(detail) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return Err(CaptureFailure {
+                    input: source.to_path_buf(),
+                    opt_level,
+                    stage: FailureStage::Obj,
+                    detail,
+                    stages,
+                });
+            }
+        };
+
+        let run_command = render_binary_run_command(&binary_path);
+        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+            Ok(run) => run,
+            Err(detail) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return Err(CaptureFailure {
+                    input: source.to_path_buf(),
+                    opt_level,
+                    stage: FailureStage::Run,
+                    detail: format!("build: {}\n{}", build_command, detail),
+                    stages,
+                });
+            }
+        };
+        stages.insert(Stage::Run, CapturedStage::Run(run));
+    }
 
     let _ = fs::remove_dir_all(&temp_root);
     Ok(CaptureResult {
         input: source.to_path_buf(),
         opt_level,
-        stages: BTreeMap::from([(Stage::Run, CapturedStage::Run(run))]),
+        stages,
     })
 }
 
@@ -3973,7 +4048,7 @@ fn capture_text_from_testing(
     };
     let result = tools
         .armfortas_adapters()
-        .capture_from_path(&request)
+        .capture(&request)
         .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
     capture_text_stage(&result, stage).map(str::to_string)
 }
@@ -3991,7 +4066,7 @@ fn capture_run_from_testing(
     };
     let result = tools
         .armfortas_adapters()
-        .capture_from_path(&request)
+        .capture(&request)
         .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
     capture_run_stage(&result).cloned()
 }
@@ -5473,7 +5548,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_mode_uses_cli_run_only_for_external_run_only_cases() {
+    fn primary_mode_uses_cli_observable_stages_for_external_cases() {
         let case = CaseSpec {
             name: "runtime_case".into(),
             source: PathBuf::from("demo.f90"),
@@ -5501,7 +5576,7 @@ mod tests {
 
         assert_eq!(
             primary_mode_for_case(&case, &requested, &external_tools),
-            ArmfortasPrimaryMode::CliRun
+            ArmfortasPrimaryMode::CliObservable
         );
 
         let linked_tools = ToolchainConfig {
@@ -5533,13 +5608,19 @@ mod tests {
         let richer_request = BTreeSet::from([Stage::Run, Stage::Asm]);
         assert_eq!(
             primary_mode_for_case(&case, &richer_request, &external_tools),
-            ArmfortasPrimaryMode::LinkedCapture
+            ArmfortasPrimaryMode::CliObservable
+        );
+
+        let asm_only_request = BTreeSet::from([Stage::Asm]);
+        assert_eq!(
+            primary_mode_for_case(&case, &asm_only_request, &external_tools),
+            ArmfortasPrimaryMode::CliObservable
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn external_cli_primary_execution_returns_run_stage() {
+    fn external_cli_primary_execution_returns_observable_stages() {
         let root = std::env::temp_dir().join("afs_tests_external_cli_primary");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -5550,7 +5631,7 @@ mod tests {
         let compiler = root.join("fake-armfortas");
         fs::write(
             &compiler,
-            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then\n    out=\"$2\"\n    shift 2\n  else\n    shift\n  fi\ndone\ncat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '42\\n'\nEOF\nchmod +x \"$out\"\n",
+            "#!/bin/sh\nmode=bin\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -S)\n      mode=asm\n      shift\n      ;;\n    -c)\n      mode=obj\n      shift\n      ;;\n    -o)\n      out=\"$2\"\n      shift 2\n      ;;\n    *)\n      shift\n      ;;\n  esac\ndone\nif [ \"$mode\" = asm ]; then\n  cat > \"$out\" <<'EOF'\n.globl _main\n_main:\n  ret\nEOF\nelif [ \"$mode\" = obj ]; then\n  printf 'fake object\\n' > \"$out\"\nelse\n  cat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '42\\n'\nEOF\n  chmod +x \"$out\"\nfi\n",
         )
         .unwrap();
         let mut perms = fs::metadata(&compiler).unwrap().permissions();
@@ -5561,15 +5642,21 @@ mod tests {
             name: "runtime_case".into(),
             source: source.clone(),
             graph_files: Vec::new(),
-            requested: BTreeSet::from([Stage::Run]),
+            requested: BTreeSet::from([Stage::Asm, Stage::Run]),
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
             consistency_checks: Vec::new(),
-            expectations: vec![Expectation::Contains {
-                target: Target::RunStdout,
-                needle: "42".into(),
-            }],
+            expectations: vec![
+                Expectation::Contains {
+                    target: Target::Stage(Stage::Asm),
+                    needle: ".globl _main".into(),
+                },
+                Expectation::Contains {
+                    target: Target::RunStdout,
+                    needle: "42".into(),
+                },
+            ],
             status_rules: Vec::new(),
         };
         let prepared = PreparedInput {
@@ -5590,15 +5677,17 @@ mod tests {
             &case,
             &prepared,
             OptLevel::O0,
-            &BTreeSet::from([Stage::Run]),
+            &BTreeSet::from([Stage::Asm, Stage::Run]),
             &tools,
         )
         .unwrap();
+        let asm = capture_text_stage(&result, Stage::Asm).unwrap();
         let run = capture_run_stage(&result).unwrap();
+        assert!(asm.contains(".globl _main"));
         assert_eq!(run.exit_code, 0);
         assert_eq!(run.stdout, "42\n");
         assert!(run.stderr.is_empty());
-        assert_eq!(result.stages.len(), 1);
+        assert_eq!(result.stages.len(), 2);
 
         let _ = fs::remove_dir_all(&root);
     }
