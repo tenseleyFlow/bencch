@@ -11,14 +11,14 @@ expect run.exit_code equals 0
 end
 
 case "if_else"
-source "../../../test_programs/if_else.f90"
+source "../../fixtures/runtime/if_else.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
 end
 
 case "do_while"
-source "../../../test_programs/do_while.f90"
+source "../../fixtures/runtime/do_while.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
@@ -32,7 +32,7 @@ expect run.exit_code equals 0
 end
 
 case "exit_cycle"
-source "../../../test_programs/exit_cycle.f90"
+source "../../fixtures/runtime/exit_cycle.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
@@ -74,14 +74,14 @@ expect run.exit_code equals 0
 end
 
 case "nested_loops"
-source "../../../test_programs/nested_loops.f90"
+source "../../fixtures/runtime/nested_loops.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
 end
 
 case "select_case"
-source "../../../test_programs/select_case.f90"
+source "../../fixtures/runtime/select_case.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
@@ -95,14 +95,14 @@ expect run.exit_code equals 0
 end
 
 case "subroutine_call"
-source "../../../test_programs/subroutine_call.f90"
+source "../../fixtures/runtime/subroutine_call.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
 end
 
 case "function_call"
-source "../../../test_programs/function_call.f90"
+source "../../fixtures/runtime/function_call.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

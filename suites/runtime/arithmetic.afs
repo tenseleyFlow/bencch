@@ -15,7 +15,7 @@ expect run.exit_code equals 0
 end
 
 case "real_function"
-source "../../../test_programs/real_function.f90"
+source "../../fixtures/runtime/real_function.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

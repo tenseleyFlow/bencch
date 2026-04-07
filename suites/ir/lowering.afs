@@ -10,7 +10,7 @@ expect optir contains "iadd"
 end
 
 case "function_call_by_reference"
-source "../../../test_programs/function_call.f90"
+source "../../fixtures/runtime/function_call.f90"
 armfortas => ir, optir
 expect ir contains "func @square(%0: ptr<i32>) -> i32"
 expect ir contains "call @square(%0)"
