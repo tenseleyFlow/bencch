@@ -12,12 +12,14 @@ This repo holds:
 
 ## Current Setup
 
-Today `bencch` is wired to a surrounding `armfortas` checkout. The practical way
-to use it is from the `armfortas` workspace root. CLI-side compiler and tool
-paths are overridable now; linked capture still comes from the surrounding
-workspace. That linked compiler surface is currently isolated in
-`bench/src/compiler.rs`, and the bench-owned compiler-facing types now live in
-`bench-core/`.
+`bencch` now has its own workspace manifest, so you can run it from the
+`bencch/` repo root.
+
+Today it is still wired to a surrounding `armfortas` checkout for linked
+capture. CLI-side compiler and tool paths are overridable now; linked capture
+still comes from the surrounding workspace. That linked compiler surface is
+currently isolated in `bench/src/compiler.rs`, and the bench-owned
+compiler-facing types now live in `bench-core/`.
 
 ```bash
 cargo run -p afs-tests -- list
