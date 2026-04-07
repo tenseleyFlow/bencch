@@ -19,3 +19,5 @@ generation, and Mach-O snapshot assertions.
 
 Sprint 6 begins carving stable runtime programs into `fixtures/runtime/` so
 targeted suites can stop depending on the surrounding parent repo layout.
+The `runtime-completion` and `runtime-control-flow` families now live there
+as bench-owned inputs.
