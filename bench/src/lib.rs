@@ -159,6 +159,18 @@ impl ConsistencyCheck {
             Self::CaptureRunVsCliRun | Self::CaptureRunReproducible => Some(Stage::Run),
         }
     }
+
+    fn requires_capture_result(&self) -> bool {
+        matches!(
+            self,
+            Self::CaptureAsmVsCliAsm
+                | Self::CaptureObjVsCliObj
+                | Self::CaptureRunVsCliRun
+                | Self::CaptureAsmReproducible
+                | Self::CaptureObjReproducible
+                | Self::CaptureRunReproducible
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +346,12 @@ struct ExecutionArtifacts {
     armfortas_failure: Option<CaptureFailure>,
     references: Vec<ReferenceResult>,
     consistency_issues: Vec<ConsistencyIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmfortasPrimaryMode {
+    LinkedCapture,
+    CliRun,
 }
 
 #[derive(Debug, Clone)]
@@ -1545,12 +1563,6 @@ fn execute_case_cell(
         }
     }
 
-    let request = CaptureRequest {
-        input: prepared.compiler_source.clone(),
-        requested: requested.clone(),
-        opt_level,
-    };
-
     let references = run_reference_compilers(&prepared, case, opt_level, &config.tools);
     let mut artifacts = ExecutionArtifacts {
         requested,
@@ -1560,11 +1572,13 @@ fn execute_case_cell(
         consistency_issues: Vec::new(),
     };
 
-    match config
-        .tools
-        .armfortas_adapters()
-        .capture_from_path(&request)
-    {
+    match execute_primary_armfortas(
+        case,
+        &prepared,
+        opt_level,
+        &artifacts.requested,
+        &config.tools,
+    ) {
         Ok(result) => artifacts.armfortas = Some(result),
         Err(failure) => artifacts.armfortas_failure = Some(failure),
     }
@@ -1762,6 +1776,118 @@ fn cleanup_prepared_input(prepared: &PreparedInput) {
     if let Some(temp_root) = &prepared.temp_root {
         let _ = fs::remove_dir_all(temp_root);
     }
+}
+
+fn primary_mode_for_case(
+    case: &CaseSpec,
+    requested: &BTreeSet<Stage>,
+    tools: &ToolchainConfig,
+) -> ArmfortasPrimaryMode {
+    let cli_only_run = requested.len() == 1 && requested.contains(&Stage::Run);
+    let supports_cli_primary = matches!(
+        tools.armfortas_adapters().cli(),
+        ArmfortasCliAdapter::External(_)
+    );
+    let capture_checks_required = case
+        .consistency_checks
+        .iter()
+        .any(ConsistencyCheck::requires_capture_result);
+
+    if supports_cli_primary
+        && cli_only_run
+        && !has_failure_expectation(case)
+        && !capture_checks_required
+    {
+        ArmfortasPrimaryMode::CliRun
+    } else {
+        ArmfortasPrimaryMode::LinkedCapture
+    }
+}
+
+fn execute_primary_armfortas(
+    case: &CaseSpec,
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    requested: &BTreeSet<Stage>,
+    tools: &ToolchainConfig,
+) -> Result<CaptureResult, CaptureFailure> {
+    match primary_mode_for_case(case, requested, tools) {
+        ArmfortasPrimaryMode::LinkedCapture => {
+            let request = CaptureRequest {
+                input: prepared.compiler_source.clone(),
+                requested: requested.clone(),
+                opt_level,
+            };
+            tools.armfortas_adapters().capture_from_path(&request)
+        }
+        ArmfortasPrimaryMode::CliRun => {
+            execute_cli_primary_run(&prepared.compiler_source, opt_level, tools)
+        }
+    }
+}
+
+fn execute_cli_primary_run(
+    source: &Path,
+    opt_level: OptLevel,
+    tools: &ToolchainConfig,
+) -> Result<CaptureResult, CaptureFailure> {
+    let temp_root = next_primary_cli_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Err(CaptureFailure {
+            input: source.to_path_buf(),
+            opt_level,
+            stage: FailureStage::Obj,
+            detail: format!(
+                "cannot create primary cli temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            stages: BTreeMap::new(),
+        });
+    }
+
+    let binary_path = temp_root.join("armfortas_primary.out");
+    let build_command = match compile_with_driver(
+        source,
+        opt_level,
+        DriverEmitMode::Binary,
+        &binary_path,
+        tools,
+    ) {
+        Ok(command) => command,
+        Err(detail) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(CaptureFailure {
+                input: source.to_path_buf(),
+                opt_level,
+                stage: FailureStage::Obj,
+                detail,
+                stages: BTreeMap::new(),
+            });
+        }
+    };
+
+    let run_command = render_binary_run_command(&binary_path);
+    let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+        Ok(run) => run,
+        Err(detail) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(CaptureFailure {
+                input: source.to_path_buf(),
+                opt_level,
+                stage: FailureStage::Run,
+                detail: format!("build: {}\n{}", build_command, detail),
+                stages: BTreeMap::new(),
+            });
+        }
+    };
+
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(CaptureResult {
+        input: source.to_path_buf(),
+        opt_level,
+        stages: BTreeMap::from([(Stage::Run, CapturedStage::Run(run))]),
+    })
 }
 
 fn status_for_opt(case: &CaseSpec, opt_level: OptLevel) -> EffectiveStatus {
@@ -5214,6 +5340,14 @@ fn next_report_temp_root(compiler: ReferenceCompiler, opt_level: OptLevel) -> Pa
     ))
 }
 
+fn next_primary_cli_temp_root(opt_level: OptLevel) -> PathBuf {
+    default_report_root().join(".tmp").join(format!(
+        "primary_cli_{}_{}",
+        opt_level.as_str().to_ascii_lowercase(),
+        next_report_suffix(opt_level)
+    ))
+}
+
 fn next_consistency_temp_root(opt_level: OptLevel) -> PathBuf {
     default_report_root().join(".tmp").join(format!(
         "consistency_{}_{}",
@@ -5327,6 +5461,8 @@ mod tests {
         verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType, Module,
         Position, Span, Terminator, ValueId,
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn dummy_span() -> Span {
         Span {
@@ -5334,6 +5470,137 @@ mod tests {
             start: Position { line: 1, col: 1 },
             end: Position { line: 1, col: 1 },
         }
+    }
+
+    #[test]
+    fn primary_mode_uses_cli_run_only_for_external_run_only_cases() {
+        let case = CaseSpec {
+            name: "runtime_case".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: vec![ReferenceCompiler::Gfortran],
+            consistency_checks: vec![ConsistencyCheck::CliRunReproducible],
+            expectations: vec![Expectation::Contains {
+                target: Target::RunStdout,
+                needle: "42".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let requested = BTreeSet::from([Stage::Run]);
+        let external_tools = ToolchainConfig {
+            armfortas: ArmfortasCliAdapter::External("/tmp/armfortas".into()),
+            gfortran: "gfortran".into(),
+            flang_new: "flang-new".into(),
+            system_as: "as".into(),
+            otool: "otool".into(),
+            nm: "nm".into(),
+        };
+
+        assert_eq!(
+            primary_mode_for_case(&case, &requested, &external_tools),
+            ArmfortasPrimaryMode::CliRun
+        );
+
+        let linked_tools = ToolchainConfig {
+            armfortas: ArmfortasCliAdapter::Linked,
+            ..external_tools.clone()
+        };
+        assert_eq!(
+            primary_mode_for_case(&case, &requested, &linked_tools),
+            ArmfortasPrimaryMode::LinkedCapture
+        );
+
+        let mut capture_check_case = case.clone();
+        capture_check_case.consistency_checks = vec![ConsistencyCheck::CaptureRunVsCliRun];
+        assert_eq!(
+            primary_mode_for_case(&capture_check_case, &requested, &external_tools),
+            ArmfortasPrimaryMode::LinkedCapture
+        );
+
+        let mut failure_case = case.clone();
+        failure_case.expectations.push(Expectation::FailContains {
+            stage: FailureStage::Run,
+            needle: "broken".into(),
+        });
+        assert_eq!(
+            primary_mode_for_case(&failure_case, &requested, &external_tools),
+            ArmfortasPrimaryMode::LinkedCapture
+        );
+
+        let richer_request = BTreeSet::from([Stage::Run, Stage::Asm]);
+        assert_eq!(
+            primary_mode_for_case(&case, &richer_request, &external_tools),
+            ArmfortasPrimaryMode::LinkedCapture
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_cli_primary_execution_returns_run_stage() {
+        let root = std::env::temp_dir().join("afs_tests_external_cli_primary");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let source = root.join("demo.f90");
+        fs::write(&source, "program demo\nprint *, 42\nend program\n").unwrap();
+
+        let compiler = root.join("fake-armfortas");
+        fs::write(
+            &compiler,
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then\n    out=\"$2\"\n    shift 2\n  else\n    shift\n  fi\ndone\ncat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '42\\n'\nEOF\nchmod +x \"$out\"\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&compiler).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&compiler, perms).unwrap();
+
+        let case = CaseSpec {
+            name: "runtime_case".into(),
+            source: source.clone(),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Contains {
+                target: Target::RunStdout,
+                needle: "42".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let prepared = PreparedInput {
+            compiler_source: source.clone(),
+            generated_source: None,
+            temp_root: None,
+        };
+        let tools = ToolchainConfig {
+            armfortas: ArmfortasCliAdapter::External(compiler.display().to_string()),
+            gfortran: "gfortran".into(),
+            flang_new: "flang-new".into(),
+            system_as: "as".into(),
+            otool: "otool".into(),
+            nm: "nm".into(),
+        };
+
+        let result = execute_primary_armfortas(
+            &case,
+            &prepared,
+            OptLevel::O0,
+            &BTreeSet::from([Stage::Run]),
+            &tools,
+        )
+        .unwrap();
+        let run = capture_run_stage(&result).unwrap();
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "42\n");
+        assert!(run.stderr.is_empty());
+        assert_eq!(result.stages.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -6097,13 +6364,10 @@ end
 
         let rendered = render_doctor_report(&config);
         assert!(rendered.contains("Doctor"));
-        assert!(rendered.contains(
-            "armfortas_cli_adapter: external armfortas binary adapter"
-        ));
+        assert!(rendered.contains("armfortas_cli_adapter: external armfortas binary adapter"));
         assert!(rendered.contains("armfortas_cli_mode: external"));
-        assert!(rendered.contains(
-            "armfortas_capture_adapter: linked armfortas::testing capture adapter"
-        ));
+        assert!(rendered
+            .contains("armfortas_capture_adapter: linked armfortas::testing capture adapter"));
         assert!(rendered.contains("armfortas_capture_mode: linked"));
         assert!(rendered.contains("armfortas_capture_manifest:"));
         assert!(rendered.contains(&format!(
