@@ -1,14 +1,14 @@
 suite "runtime/strings"
 
 case "allocatable"
-source "../../../test_programs/allocatable.f90"
+source "../../fixtures/runtime/allocatable.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
 end
 
 case "string_deferred"
-source "../../../test_programs/string_deferred.f90"
+source "../../fixtures/runtime/string_deferred.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
@@ -36,7 +36,7 @@ expect run.exit_code equals 0
 end
 
 case "string_reassign_loop"
-source "../../../test_programs/string_reassign_loop.f90"
+source "../../fixtures/runtime/string_reassign_loop.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0

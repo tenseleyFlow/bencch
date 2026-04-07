@@ -22,7 +22,7 @@ expect run.exit_code equals 0
 end
 
 case "io_flush_stress"
-source "../../../test_programs/io_flush_stress.f90"
+source "../../fixtures/runtime/io_flush_stress.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
@@ -43,14 +43,14 @@ expect run.exit_code equals 0
 end
 
 case "io_multi_value_read"
-source "../../../test_programs/io_multi_value_read.f90"
+source "../../fixtures/runtime/io_multi_value_read.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
 end
 
 case "io_rewind"
-source "../../../test_programs/io_rewind.f90"
+source "../../fixtures/runtime/io_rewind.f90"
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
