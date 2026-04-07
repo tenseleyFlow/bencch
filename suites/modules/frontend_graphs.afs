@@ -158,3 +158,33 @@ armfortas => sema
 expect-fail sema contains "ambiguous"
 xfail "Ambiguous USE imports are not rejected in graph cases yet."
 end
+
+case "layered_total_frontend"
+entry "../../fixtures/modules/layered_leaves/main_total.f90"
+file "../../fixtures/modules/layered_leaves/root_seed.f90"
+file "../../fixtures/modules/layered_leaves/left_metrics.f90"
+file "../../fixtures/modules/layered_leaves/right_metrics.f90"
+file "../../fixtures/modules/layered_leaves/total_metrics.f90"
+file "../../fixtures/modules/layered_leaves/main_total.f90"
+armfortas => ast, sema
+expect ast contains "module: \"layered_left_metrics\""
+expect ast contains "module: \"layered_right_metrics\""
+expect ast contains "module: \"layered_total_metrics\""
+expect sema contains "local_name: \"total\""
+expect sema contains "original_name: \"total\""
+end
+
+case "layered_gap_frontend"
+entry "../../fixtures/modules/layered_leaves/main_gap.f90"
+file "../../fixtures/modules/layered_leaves/root_seed.f90"
+file "../../fixtures/modules/layered_leaves/left_metrics.f90"
+file "../../fixtures/modules/layered_leaves/right_metrics.f90"
+file "../../fixtures/modules/layered_leaves/delta_metrics.f90"
+file "../../fixtures/modules/layered_leaves/main_gap.f90"
+armfortas => ast, sema
+expect ast contains "module: \"layered_left_metrics\""
+expect ast contains "module: \"layered_right_metrics\""
+expect ast contains "module: \"layered_delta_metrics\""
+expect sema contains "local_name: \"gap\""
+expect sema contains "original_name: \"gap\""
+end

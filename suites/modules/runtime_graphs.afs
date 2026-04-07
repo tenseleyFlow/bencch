@@ -137,3 +137,31 @@ expect run.stdout check-comments
 expect run.exit_code equals 0
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
+
+case "layered_total_runtime"
+entry "../../fixtures/modules/layered_leaves/main_total.f90"
+file "../../fixtures/modules/layered_leaves/root_seed.f90"
+file "../../fixtures/modules/layered_leaves/left_metrics.f90"
+file "../../fixtures/modules/layered_leaves/right_metrics.f90"
+file "../../fixtures/modules/layered_leaves/total_metrics.f90"
+file "../../fixtures/modules/layered_leaves/main_total.f90"
+opts => O0, O1, O2
+armfortas => run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "layered_gap_runtime"
+entry "../../fixtures/modules/layered_leaves/main_gap.f90"
+file "../../fixtures/modules/layered_leaves/root_seed.f90"
+file "../../fixtures/modules/layered_leaves/left_metrics.f90"
+file "../../fixtures/modules/layered_leaves/right_metrics.f90"
+file "../../fixtures/modules/layered_leaves/delta_metrics.f90"
+file "../../fixtures/modules/layered_leaves/main_gap.f90"
+opts => O0, O1, O2
+armfortas => run
+expect run.stdout check-comments
+expect run.exit_code equals 0
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end

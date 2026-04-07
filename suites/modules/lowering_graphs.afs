@@ -78,3 +78,33 @@ expect ir not-contains "global @collision_left_values::payload: i32 = zeroinit"
 expect ir not-contains "global @collision_right_values::payload: i32 = zeroinit"
 xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
+
+case "layered_total_ir_values"
+entry "../../fixtures/modules/layered_leaves/main_total.f90"
+file "../../fixtures/modules/layered_leaves/root_seed.f90"
+file "../../fixtures/modules/layered_leaves/left_metrics.f90"
+file "../../fixtures/modules/layered_leaves/right_metrics.f90"
+file "../../fixtures/modules/layered_leaves/total_metrics.f90"
+file "../../fixtures/modules/layered_leaves/main_total.f90"
+armfortas => ir
+expect ir not-contains "global @layered_root_seed::seed: i32 = zeroinit"
+expect ir not-contains "global @layered_left_metrics::doubled: i32 = zeroinit"
+expect ir not-contains "global @layered_right_metrics::shifted: i32 = zeroinit"
+expect ir not-contains "global @layered_total_metrics::total: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
+
+case "layered_gap_ir_values"
+entry "../../fixtures/modules/layered_leaves/main_gap.f90"
+file "../../fixtures/modules/layered_leaves/root_seed.f90"
+file "../../fixtures/modules/layered_leaves/left_metrics.f90"
+file "../../fixtures/modules/layered_leaves/right_metrics.f90"
+file "../../fixtures/modules/layered_leaves/delta_metrics.f90"
+file "../../fixtures/modules/layered_leaves/main_gap.f90"
+armfortas => ir
+expect ir not-contains "global @layered_root_seed::seed: i32 = zeroinit"
+expect ir not-contains "global @layered_left_metrics::doubled: i32 = zeroinit"
+expect ir not-contains "global @layered_right_metrics::shifted: i32 = zeroinit"
+expect ir not-contains "global @layered_delta_metrics::gap: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
