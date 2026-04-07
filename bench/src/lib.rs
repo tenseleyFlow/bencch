@@ -359,9 +359,13 @@ struct ExecutionArtifacts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArmfortasPrimaryMode {
-    LinkedCapture,
-    CliObservable,
+enum PrimaryCaptureBackendKind {
+    Full,
+    Observable,
+}
+
+struct SelectedPrimaryBackend {
+    backend: Box<dyn CaptureBackend>,
 }
 
 #[derive(Debug, Clone)]
@@ -1788,11 +1792,11 @@ fn cleanup_prepared_input(prepared: &PreparedInput) {
     }
 }
 
-fn primary_mode_for_case(
+fn primary_backend_kind_for_case(
     case: &CaseSpec,
     requested: &BTreeSet<Stage>,
     tools: &ToolchainConfig,
-) -> ArmfortasPrimaryMode {
+) -> PrimaryCaptureBackendKind {
     let cli_observable_only = !requested.is_empty()
         && requested
             .iter()
@@ -1811,10 +1815,26 @@ fn primary_mode_for_case(
         && !has_failure_expectation(case)
         && !capture_checks_required
     {
-        ArmfortasPrimaryMode::CliObservable
+        PrimaryCaptureBackendKind::Observable
     } else {
-        ArmfortasPrimaryMode::LinkedCapture
+        PrimaryCaptureBackendKind::Full
     }
+}
+
+fn select_primary_capture_backend(
+    case: &CaseSpec,
+    requested: &BTreeSet<Stage>,
+    opt_level: OptLevel,
+    tools: &ToolchainConfig,
+) -> SelectedPrimaryBackend {
+    let kind = primary_backend_kind_for_case(case, requested, tools);
+    let backend: Box<dyn CaptureBackend> = match kind {
+        PrimaryCaptureBackendKind::Full => Box::new(tools.armfortas_adapters()),
+        PrimaryCaptureBackendKind::Observable => {
+            Box::new(tools.cli_observable_capture_backend(next_primary_cli_temp_root(opt_level)))
+        }
+    };
+    SelectedPrimaryBackend { backend }
 }
 
 fn execute_primary_armfortas(
@@ -1824,26 +1844,13 @@ fn execute_primary_armfortas(
     requested: &BTreeSet<Stage>,
     tools: &ToolchainConfig,
 ) -> Result<CaptureResult, CaptureFailure> {
-    match primary_mode_for_case(case, requested, tools) {
-        ArmfortasPrimaryMode::LinkedCapture => {
-            let request = CaptureRequest {
-                input: prepared.compiler_source.clone(),
-                requested: requested.clone(),
-                opt_level,
-            };
-            tools.armfortas_adapters().capture(&request)
-        }
-        ArmfortasPrimaryMode::CliObservable => {
-            let request = CaptureRequest {
-                input: prepared.compiler_source.clone(),
-                requested: requested.clone(),
-                opt_level,
-            };
-            tools
-                .cli_observable_capture_backend(next_primary_cli_temp_root(opt_level))
-                .capture(&request)
-        }
-    }
+    let request = CaptureRequest {
+        input: prepared.compiler_source.clone(),
+        requested: requested.clone(),
+        opt_level,
+    };
+    let selected = select_primary_capture_backend(case, requested, opt_level, tools);
+    selected.backend.capture(&request)
 }
 
 fn status_for_opt(case: &CaseSpec, opt_level: OptLevel) -> EffectiveStatus {
@@ -5429,7 +5436,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_mode_uses_cli_observable_stages_for_external_cases() {
+    fn primary_backend_selection_uses_observable_backend_for_external_cases() {
         let case = CaseSpec {
             name: "runtime_case".into(),
             source: PathBuf::from("demo.f90"),
@@ -5456,24 +5463,27 @@ mod tests {
         };
 
         assert_eq!(
-            primary_mode_for_case(&case, &requested, &external_tools),
-            ArmfortasPrimaryMode::CliObservable
+            primary_backend_kind_for_case(&case, &requested, &external_tools),
+            PrimaryCaptureBackendKind::Observable
         );
+        let selected =
+            select_primary_capture_backend(&case, &requested, OptLevel::O0, &external_tools);
+        assert_eq!(selected.backend.mode_name(), "cli-observable");
 
         let linked_tools = ToolchainConfig {
             armfortas: ArmfortasCliAdapter::Linked,
             ..external_tools.clone()
         };
         assert_eq!(
-            primary_mode_for_case(&case, &requested, &linked_tools),
-            ArmfortasPrimaryMode::LinkedCapture
+            primary_backend_kind_for_case(&case, &requested, &linked_tools),
+            PrimaryCaptureBackendKind::Full
         );
 
         let mut capture_check_case = case.clone();
         capture_check_case.consistency_checks = vec![ConsistencyCheck::CaptureRunVsCliRun];
         assert_eq!(
-            primary_mode_for_case(&capture_check_case, &requested, &external_tools),
-            ArmfortasPrimaryMode::LinkedCapture
+            primary_backend_kind_for_case(&capture_check_case, &requested, &external_tools),
+            PrimaryCaptureBackendKind::Full
         );
 
         let mut failure_case = case.clone();
@@ -5482,20 +5492,20 @@ mod tests {
             needle: "broken".into(),
         });
         assert_eq!(
-            primary_mode_for_case(&failure_case, &requested, &external_tools),
-            ArmfortasPrimaryMode::LinkedCapture
+            primary_backend_kind_for_case(&failure_case, &requested, &external_tools),
+            PrimaryCaptureBackendKind::Full
         );
 
         let richer_request = BTreeSet::from([Stage::Run, Stage::Asm]);
         assert_eq!(
-            primary_mode_for_case(&case, &richer_request, &external_tools),
-            ArmfortasPrimaryMode::CliObservable
+            primary_backend_kind_for_case(&case, &richer_request, &external_tools),
+            PrimaryCaptureBackendKind::Observable
         );
 
         let asm_only_request = BTreeSet::from([Stage::Asm]);
         assert_eq!(
-            primary_mode_for_case(&case, &asm_only_request, &external_tools),
-            ArmfortasPrimaryMode::CliObservable
+            primary_backend_kind_for_case(&case, &asm_only_request, &external_tools),
+            PrimaryCaptureBackendKind::Observable
         );
     }
 
