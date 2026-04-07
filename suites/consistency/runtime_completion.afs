@@ -1,7 +1,7 @@
 suite "consistency/runtime-completion"
 
 case "array_intrinsics_cli_run_reproducible"
-source "../../../test_programs/array_intrinsics.f90"
+source "../../fixtures/runtime/array_intrinsics.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -11,7 +11,7 @@ expect run.exit_code equals 0
 end
 
 case "array_intrinsics_capture_run_matches_cli"
-source "../../../test_programs/array_intrinsics.f90"
+source "../../fixtures/runtime/array_intrinsics.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -21,7 +21,7 @@ expect run.exit_code equals 0
 end
 
 case "array_intrinsics_capture_run_reproducible"
-source "../../../test_programs/array_intrinsics.f90"
+source "../../fixtures/runtime/array_intrinsics.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -31,7 +31,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_constructor_cli_run_reproducible"
-source "../../../test_programs/derived_type_constructor.f90"
+source "../../fixtures/runtime/derived_type_constructor.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -41,7 +41,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_constructor_capture_run_matches_cli"
-source "../../../test_programs/derived_type_constructor.f90"
+source "../../fixtures/runtime/derived_type_constructor.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -51,7 +51,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_constructor_capture_run_reproducible"
-source "../../../test_programs/derived_type_constructor.f90"
+source "../../fixtures/runtime/derived_type_constructor.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -61,7 +61,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_extends_cli_run_reproducible"
-source "../../../test_programs/derived_type_extends.f90"
+source "../../fixtures/runtime/derived_type_extends.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -71,7 +71,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_extends_capture_run_matches_cli"
-source "../../../test_programs/derived_type_extends.f90"
+source "../../fixtures/runtime/derived_type_extends.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -81,7 +81,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_extends_capture_run_reproducible"
-source "../../../test_programs/derived_type_extends.f90"
+source "../../fixtures/runtime/derived_type_extends.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -91,7 +91,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_param_cli_run_reproducible"
-source "../../../test_programs/derived_type_param.f90"
+source "../../fixtures/runtime/derived_type_param.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -101,7 +101,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_param_capture_run_matches_cli"
-source "../../../test_programs/derived_type_param.f90"
+source "../../fixtures/runtime/derived_type_param.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -111,7 +111,7 @@ expect run.exit_code equals 0
 end
 
 case "derived_type_param_capture_run_reproducible"
-source "../../../test_programs/derived_type_param.f90"
+source "../../fixtures/runtime/derived_type_param.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -121,7 +121,7 @@ expect run.exit_code equals 0
 end
 
 case "factorial_cli_run_reproducible"
-source "../../../test_programs/factorial.f90"
+source "../../fixtures/runtime/factorial.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -131,7 +131,7 @@ expect run.exit_code equals 0
 end
 
 case "factorial_capture_run_matches_cli"
-source "../../../test_programs/factorial.f90"
+source "../../fixtures/runtime/factorial.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -141,7 +141,7 @@ expect run.exit_code equals 0
 end
 
 case "factorial_capture_run_reproducible"
-source "../../../test_programs/factorial.f90"
+source "../../fixtures/runtime/factorial.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -151,7 +151,7 @@ expect run.exit_code equals 0
 end
 
 case "register_pressure_cli_run_reproducible"
-source "../../../test_programs/register_pressure.f90"
+source "../../fixtures/runtime/register_pressure.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -161,7 +161,7 @@ expect run.exit_code equals 0
 end
 
 case "register_pressure_capture_run_matches_cli"
-source "../../../test_programs/register_pressure.f90"
+source "../../fixtures/runtime/register_pressure.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -171,7 +171,7 @@ expect run.exit_code equals 0
 end
 
 case "register_pressure_capture_run_reproducible"
-source "../../../test_programs/register_pressure.f90"
+source "../../fixtures/runtime/register_pressure.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -181,7 +181,7 @@ expect run.exit_code equals 0
 end
 
 case "select_type_cli_run_reproducible"
-source "../../../test_programs/select_type.f90"
+source "../../fixtures/runtime/select_type.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -192,7 +192,7 @@ future "SELECT TYPE CLI runtime consistency is still too volatile to model sharp
 end
 
 case "select_type_capture_run_matches_cli"
-source "../../../test_programs/select_type.f90"
+source "../../fixtures/runtime/select_type.f90"
 opts => all
 armfortas => run
 repeat => 3
@@ -203,7 +203,7 @@ future "SELECT TYPE capture-vs-CLI runtime consistency is still too volatile to 
 end
 
 case "select_type_capture_run_reproducible"
-source "../../../test_programs/select_type.f90"
+source "../../fixtures/runtime/select_type.f90"
 opts => all
 armfortas => run
 repeat => 3
