@@ -26,6 +26,7 @@ struct SuiteSpec {
 struct CaseSpec {
     name: String,
     source: PathBuf,
+    graph_files: Vec<PathBuf>,
     requested: BTreeSet<Stage>,
     opt_levels: Vec<OptLevel>,
     repeat_count: usize,
@@ -33,6 +34,31 @@ struct CaseSpec {
     consistency_checks: Vec<ConsistencyCheck>,
     expectations: Vec<Expectation>,
     status_rules: Vec<StatusRule>,
+}
+
+impl CaseSpec {
+    fn is_graph(&self) -> bool {
+        !self.graph_files.is_empty()
+    }
+
+    fn source_label(&self) -> String {
+        if self.is_graph() {
+            format!(
+                "graph entry {} ({} files)",
+                self.source.display(),
+                self.graph_files.len()
+            )
+        } else {
+            self.source.display().to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedInput {
+    compiler_source: PathBuf,
+    generated_source: Option<PathBuf>,
+    temp_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -520,9 +546,10 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                     "--include-future" => config.include_future = true,
                     "--all" => config.all_stages = true,
                     "--armfortas-bin" => {
-                        let value = queue.pop_front().ok_or("--armfortas-bin requires a value")?;
-                        config.tools.armfortas =
-                            ArmfortasCliAdapter::External(value.clone());
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--armfortas-bin requires a value")?;
+                        config.tools.armfortas = ArmfortasCliAdapter::External(value.clone());
                     }
                     "--gfortran-bin" => {
                         let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
@@ -666,12 +693,13 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
         })?;
 
         if let Some(rest) = line.strip_prefix("source ") {
-            let relative = parse_quoted(rest, path, line_no)?;
-            let source = path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(relative);
-            builder.source = Some(source);
+            builder.source = Some(resolve_suite_relative_path(rest, path, line_no)?);
+        } else if let Some(rest) = line.strip_prefix("entry ") {
+            builder.graph_entry = Some(resolve_suite_relative_path(rest, path, line_no)?);
+        } else if let Some(rest) = line.strip_prefix("file ") {
+            builder
+                .graph_files
+                .push(resolve_suite_relative_path(rest, path, line_no)?);
         } else if let Some(rest) = line.strip_prefix("armfortas =>") {
             builder.requested = parse_stage_list(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("repeat =>") {
@@ -728,6 +756,8 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
 struct CaseBuilder {
     name: String,
     source: Option<PathBuf>,
+    graph_entry: Option<PathBuf>,
+    graph_files: Vec<PathBuf>,
     requested: BTreeSet<Stage>,
     opt_levels: Vec<OptLevel>,
     repeat_count: usize,
@@ -742,6 +772,8 @@ impl CaseBuilder {
         Self {
             name,
             source: None,
+            graph_entry: None,
+            graph_files: Vec::new(),
             requested: BTreeSet::new(),
             opt_levels: Vec::new(),
             repeat_count: 2,
@@ -753,13 +785,49 @@ impl CaseBuilder {
     }
 
     fn build(self, suite_path: &Path) -> Result<CaseSpec, String> {
-        let source = self.source.ok_or_else(|| {
-            format!(
-                "{}: case '{}' is missing a source path",
+        if self.source.is_some() && (self.graph_entry.is_some() || !self.graph_files.is_empty()) {
+            return Err(format!(
+                "{}: case '{}' mixes source with graph entry/file declarations",
                 suite_path.display(),
                 self.name
-            )
-        })?;
+            ));
+        }
+
+        if self.graph_entry.is_some() && self.graph_files.is_empty() {
+            return Err(format!(
+                "{}: case '{}' declares an entry without any file members",
+                suite_path.display(),
+                self.name
+            ));
+        }
+
+        if self.graph_entry.is_none() && !self.graph_files.is_empty() {
+            return Err(format!(
+                "{}: case '{}' declares file members without an entry",
+                suite_path.display(),
+                self.name
+            ));
+        }
+
+        let (source, graph_files) = if let Some(source) = self.source {
+            (source, Vec::new())
+        } else if let Some(entry) = self.graph_entry {
+            if !self.graph_files.iter().any(|file| file == &entry) {
+                return Err(format!(
+                    "{}: case '{}' entry '{}' is not listed in file declarations",
+                    suite_path.display(),
+                    self.name,
+                    entry.display()
+                ));
+            }
+            (entry, self.graph_files)
+        } else {
+            return Err(format!(
+                "{}: case '{}' is missing a source path or graph entry",
+                suite_path.display(),
+                self.name
+            ));
+        };
 
         let mut requested = self.requested;
         if requested.is_empty() {
@@ -775,6 +843,7 @@ impl CaseBuilder {
         Ok(CaseSpec {
             name: self.name,
             source,
+            graph_files,
             requested,
             opt_levels,
             repeat_count: self.repeat_count,
@@ -784,6 +853,14 @@ impl CaseBuilder {
             status_rules: self.status_rules,
         })
     }
+}
+
+fn resolve_suite_relative_path(rest: &str, path: &Path, line_no: usize) -> Result<PathBuf, String> {
+    let relative = parse_quoted(rest, path, line_no)?;
+    Ok(path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(relative))
 }
 
 fn parse_stage_list(rest: &str, path: &Path, line_no: usize) -> Result<BTreeSet<Stage>, String> {
@@ -1251,6 +1328,8 @@ fn execute_case_cell(
         ensure_consistency_stage(*check, &mut requested);
     }
 
+    let prepared = prepare_case_input(case, suite, opt_level)?;
+
     if config.verbose {
         let stage_list = requested
             .iter()
@@ -1266,7 +1345,13 @@ fn execute_case_cell(
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        println!("  source: {}", case.source.display());
+        println!("  source: {}", case.source_label());
+        if case.is_graph() {
+            for file in &case.graph_files {
+                println!("  file: {}", file.display());
+            }
+            println!("  compiled_as: {}", prepared.compiler_source.display());
+        }
         println!("  opt: {}", opt_level.as_str());
         println!("  stages: {}", stage_list);
         println!("  refs: {}", refs);
@@ -1276,12 +1361,12 @@ fn execute_case_cell(
     }
 
     let request = CaptureRequest {
-        input: case.source.clone(),
+        input: prepared.compiler_source.clone(),
         requested: requested.clone(),
         opt_level,
     };
 
-    let references = run_reference_compilers(case, opt_level, &config.tools);
+    let references = run_reference_compilers(&prepared, case, opt_level, &config.tools);
     let mut artifacts = ExecutionArtifacts {
         requested,
         armfortas: None,
@@ -1309,7 +1394,7 @@ fn execute_case_cell(
                 }
                 if execution.is_ok() && !case.consistency_checks.is_empty() {
                     artifacts.consistency_issues =
-                        run_consistency_checks(case, opt_level, result, &config.tools);
+                        run_consistency_checks(case, &prepared, opt_level, result, &config.tools);
                     if !artifacts.consistency_issues.is_empty() {
                         execution = Err(format_consistency_issues(&artifacts.consistency_issues));
                     }
@@ -1404,7 +1489,7 @@ fn execute_case_cell(
         || (matches!(outcome.kind, OutcomeKind::Xfail) && !artifacts.consistency_issues.is_empty());
 
     if should_bundle {
-        match write_failure_bundle(suite, case, &outcome, &artifacts) {
+        match write_failure_bundle(suite, case, &prepared, &outcome, &artifacts) {
             Ok(bundle) => outcome.bundle = Some(bundle),
             Err(err) => {
                 if outcome.detail.is_empty() {
@@ -1419,9 +1504,83 @@ fn execute_case_cell(
         }
     }
 
+    cleanup_prepared_input(&prepared);
     cleanup_consistency_issues(&artifacts.consistency_issues);
 
     Ok(outcome)
+}
+
+fn prepare_case_input(
+    case: &CaseSpec,
+    suite: &SuiteSpec,
+    opt_level: OptLevel,
+) -> Result<PreparedInput, String> {
+    if case.graph_files.is_empty() {
+        return Ok(PreparedInput {
+            compiler_source: case.source.clone(),
+            generated_source: None,
+            temp_root: None,
+        });
+    }
+
+    let temp_root = default_report_root().join(".tmp").join(format!(
+        "graph_{}_{}_{}",
+        sanitize_component(&suite.name),
+        sanitize_component(&case.name),
+        next_report_suffix(opt_level)
+    ));
+    fs::create_dir_all(&temp_root).map_err(|e| {
+        format!(
+            "cannot create graph temp dir '{}': {}",
+            temp_root.display(),
+            e
+        )
+    })?;
+
+    let extension = case
+        .source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or("f90");
+    let generated_source = temp_root.join(format!(
+        "{}_graph.{}",
+        sanitize_component(&case.name),
+        extension
+    ));
+
+    let mut combined = String::new();
+    for (index, file) in case.graph_files.iter().enumerate() {
+        let text = fs::read_to_string(file)
+            .map_err(|e| format!("cannot read graph file '{}': {}", file.display(), e))?;
+        if index > 0 {
+            combined.push('\n');
+        }
+        combined.push_str(&text);
+        if !text.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+
+    fs::write(&generated_source, combined).map_err(|e| {
+        format!(
+            "cannot write generated graph input '{}': {}",
+            generated_source.display(),
+            e
+        )
+    })?;
+
+    Ok(PreparedInput {
+        compiler_source: generated_source.clone(),
+        generated_source: Some(generated_source),
+        temp_root: Some(temp_root),
+    })
+}
+
+fn cleanup_prepared_input(prepared: &PreparedInput) {
+    if let Some(temp_root) = &prepared.temp_root {
+        let _ = fs::remove_dir_all(temp_root);
+    }
 }
 
 fn status_for_opt(case: &CaseSpec, opt_level: OptLevel) -> EffectiveStatus {
@@ -1752,6 +1911,7 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
 
 fn run_consistency_checks(
     case: &CaseSpec,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     capture_result: &CaptureResult,
     tools: &ToolchainConfig,
@@ -1760,54 +1920,63 @@ fn run_consistency_checks(
     for check in &case.consistency_checks {
         let issue = match check {
             ConsistencyCheck::CliObjVsSystemAs => {
-                run_cli_obj_vs_system_as(&case.source, opt_level, tools)
+                run_cli_obj_vs_system_as(&prepared.compiler_source, opt_level, tools)
             }
-            ConsistencyCheck::CliAsmReproducible => {
-                run_cli_asm_reproducible(&case.source, opt_level, case.repeat_count, tools)
-            }
-            ConsistencyCheck::CliObjReproducible => {
-                run_cli_obj_reproducible(&case.source, opt_level, case.repeat_count, tools)
-            }
-            ConsistencyCheck::CliRunReproducible => {
-                run_cli_run_reproducible(&case.source, opt_level, case.repeat_count, tools)
-            }
+            ConsistencyCheck::CliAsmReproducible => run_cli_asm_reproducible(
+                &prepared.compiler_source,
+                opt_level,
+                case.repeat_count,
+                tools,
+            ),
+            ConsistencyCheck::CliObjReproducible => run_cli_obj_reproducible(
+                &prepared.compiler_source,
+                opt_level,
+                case.repeat_count,
+                tools,
+            ),
+            ConsistencyCheck::CliRunReproducible => run_cli_run_reproducible(
+                &prepared.compiler_source,
+                opt_level,
+                case.repeat_count,
+                tools,
+            ),
             ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
-                &case.source,
+                &prepared.compiler_source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
                 tools,
             ),
             ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
-                &case.source,
+                &prepared.compiler_source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
                 tools,
             ),
             ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
-                &case.source,
+                &prepared.compiler_source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
                 tools,
             ),
             ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
-                &case.source,
+                &prepared.compiler_source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
                 tools,
             ),
             ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
-                &case.source,
+                &prepared.compiler_source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
                 tools,
             ),
             ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
-                &case.source,
+                &prepared.compiler_source,
                 opt_level,
                 case.repeat_count,
                 capture_result,
@@ -1870,20 +2039,20 @@ fn run_cli_obj_vs_system_as(
 
     let asm_command =
         match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path, tools) {
-        Ok(command) => command,
-        Err(detail) => {
-            return Some(ConsistencyIssue {
-                check: ConsistencyCheck::CliObjVsSystemAs,
-                summary: "armfortas -S failed during consistency check".into(),
-                repeat_count: None,
-                unique_variant_count: None,
-                varying_components: Vec::new(),
-                stable_components: Vec::new(),
-                detail,
-                temp_root,
-            })
-        }
-    };
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliObjVsSystemAs,
+                    summary: "armfortas -S failed during consistency check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
 
     let as_args = vec![
         "-o".to_string(),
@@ -1929,20 +2098,20 @@ fn run_cli_obj_vs_system_as(
 
     let obj_command =
         match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path, tools) {
-        Ok(command) => command,
-        Err(detail) => {
-            return Some(ConsistencyIssue {
-                check: ConsistencyCheck::CliObjVsSystemAs,
-                summary: "armfortas -c failed during consistency check".into(),
-                repeat_count: None,
-                unique_variant_count: None,
-                varying_components: Vec::new(),
-                stable_components: Vec::new(),
-                detail,
-                temp_root,
-            })
-        }
-    };
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliObjVsSystemAs,
+                    summary: "armfortas -c failed during consistency check".into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
 
     let asm_snapshot = match object_snapshot(&asm_obj_path, tools) {
         Ok(snapshot) => snapshot,
@@ -2038,27 +2207,22 @@ fn run_cli_asm_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let asm_path = temp_root.join(format!("run_{:02}.s", index));
-        let command = match compile_with_driver(
-            source,
-            opt_level,
-            DriverEmitMode::Asm,
-            &asm_path,
-            tools,
-        ) {
-            Ok(command) => command,
-            Err(detail) => {
-                return Some(ConsistencyIssue {
-                    check: ConsistencyCheck::CliAsmReproducible,
-                    summary: "armfortas -S failed during reproducibility check".into(),
-                    repeat_count: None,
-                    unique_variant_count: None,
-                    varying_components: Vec::new(),
-                    stable_components: Vec::new(),
-                    detail,
-                    temp_root,
-                })
-            }
-        };
+        let command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path, tools) {
+                Ok(command) => command,
+                Err(detail) => {
+                    return Some(ConsistencyIssue {
+                        check: ConsistencyCheck::CliAsmReproducible,
+                        summary: "armfortas -S failed during reproducibility check".into(),
+                        repeat_count: None,
+                        unique_variant_count: None,
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail,
+                        temp_root,
+                    })
+                }
+            };
         let text = match read_text_artifact(&asm_path) {
             Ok(text) => text,
             Err(detail) => {
@@ -2135,27 +2299,22 @@ fn run_cli_obj_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let obj_path = temp_root.join(format!("run_{:02}.o", index));
-        let command = match compile_with_driver(
-            source,
-            opt_level,
-            DriverEmitMode::Obj,
-            &obj_path,
-            tools,
-        ) {
-            Ok(command) => command,
-            Err(detail) => {
-                return Some(ConsistencyIssue {
-                    check: ConsistencyCheck::CliObjReproducible,
-                    summary: "armfortas -c failed during reproducibility check".into(),
-                    repeat_count: None,
-                    unique_variant_count: None,
-                    varying_components: Vec::new(),
-                    stable_components: Vec::new(),
-                    detail,
-                    temp_root,
-                })
-            }
-        };
+        let command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path, tools) {
+                Ok(command) => command,
+                Err(detail) => {
+                    return Some(ConsistencyIssue {
+                        check: ConsistencyCheck::CliObjReproducible,
+                        summary: "armfortas -c failed during reproducibility check".into(),
+                        repeat_count: None,
+                        unique_variant_count: None,
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail,
+                        temp_root,
+                    })
+                }
+            };
         let snapshot = match object_snapshot(&obj_path, tools) {
             Ok(snapshot) => snapshot,
             Err(detail) => {
@@ -2259,22 +2418,21 @@ fn run_cli_run_reproducible(
             &binary_path,
             tools,
         ) {
-                Ok(command) => command,
-                Err(detail) => {
-                    return Some(ConsistencyIssue {
-                        check: ConsistencyCheck::CliRunReproducible,
-                        summary:
-                            "armfortas binary build failed during runtime reproducibility check"
-                                .into(),
-                        repeat_count: None,
-                        unique_variant_count: None,
-                        varying_components: Vec::new(),
-                        stable_components: Vec::new(),
-                        detail,
-                        temp_root,
-                    })
-                }
-            };
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliRunReproducible,
+                    summary: "armfortas binary build failed during runtime reproducibility check"
+                        .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
         let run_command = render_binary_run_command(&binary_path);
         let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
             Ok(run) => run,
@@ -2415,27 +2573,23 @@ fn run_capture_asm_vs_cli_asm(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let asm_path = temp_root.join(format!("cli_run_{:02}.s", index));
-        let command = match compile_with_driver(
-            source,
-            opt_level,
-            DriverEmitMode::Asm,
-            &asm_path,
-            tools,
-        ) {
-            Ok(command) => command,
-            Err(detail) => {
-                return Some(ConsistencyIssue {
-                    check: ConsistencyCheck::CaptureAsmVsCliAsm,
-                    summary: "armfortas -S failed during capture-vs-cli consistency check".into(),
-                    repeat_count: None,
-                    unique_variant_count: None,
-                    varying_components: Vec::new(),
-                    stable_components: Vec::new(),
-                    detail,
-                    temp_root,
-                })
-            }
-        };
+        let command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Asm, &asm_path, tools) {
+                Ok(command) => command,
+                Err(detail) => {
+                    return Some(ConsistencyIssue {
+                        check: ConsistencyCheck::CaptureAsmVsCliAsm,
+                        summary: "armfortas -S failed during capture-vs-cli consistency check"
+                            .into(),
+                        repeat_count: None,
+                        unique_variant_count: None,
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail,
+                        temp_root,
+                    })
+                }
+            };
         let text = match read_text_artifact(&asm_path) {
             Ok(text) => text,
             Err(detail) => {
@@ -2576,27 +2730,23 @@ fn run_capture_obj_vs_cli_obj(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let obj_path = temp_root.join(format!("cli_run_{:02}.o", index));
-        let command = match compile_with_driver(
-            source,
-            opt_level,
-            DriverEmitMode::Obj,
-            &obj_path,
-            tools,
-        ) {
-            Ok(command) => command,
-            Err(detail) => {
-                return Some(ConsistencyIssue {
-                    check: ConsistencyCheck::CaptureObjVsCliObj,
-                    summary: "armfortas -c failed during capture-vs-cli consistency check".into(),
-                    repeat_count: None,
-                    unique_variant_count: None,
-                    varying_components: Vec::new(),
-                    stable_components: Vec::new(),
-                    detail,
-                    temp_root,
-                })
-            }
-        };
+        let command =
+            match compile_with_driver(source, opt_level, DriverEmitMode::Obj, &obj_path, tools) {
+                Ok(command) => command,
+                Err(detail) => {
+                    return Some(ConsistencyIssue {
+                        check: ConsistencyCheck::CaptureObjVsCliObj,
+                        summary: "armfortas -c failed during capture-vs-cli consistency check"
+                            .into(),
+                        repeat_count: None,
+                        unique_variant_count: None,
+                        varying_components: Vec::new(),
+                        stable_components: Vec::new(),
+                        detail,
+                        temp_root,
+                    })
+                }
+            };
         let snapshot = match object_snapshot(&obj_path, tools) {
             Ok(snapshot) => snapshot,
             Err(detail) => {
@@ -2765,22 +2915,21 @@ fn run_capture_run_vs_cli_run(
             &binary_path,
             tools,
         ) {
-                Ok(command) => command,
-                Err(detail) => {
-                    return Some(ConsistencyIssue {
-                        check: ConsistencyCheck::CaptureRunVsCliRun,
-                        summary:
-                            "armfortas binary build failed during capture-vs-cli runtime check"
-                                .into(),
-                        repeat_count: None,
-                        unique_variant_count: None,
-                        varying_components: Vec::new(),
-                        stable_components: Vec::new(),
-                        detail,
-                        temp_root,
-                    })
-                }
-            };
+            Ok(command) => command,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CaptureRunVsCliRun,
+                    summary: "armfortas binary build failed during capture-vs-cli runtime check"
+                        .into(),
+                    repeat_count: None,
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
         let run_command = render_binary_run_command(&binary_path);
         let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
             Ok(run) => run,
@@ -3322,6 +3471,7 @@ fn run_capture_run_reproducible(
 }
 
 fn run_reference_compilers(
+    prepared: &PreparedInput,
     case: &CaseSpec,
     opt_level: OptLevel,
     tools: &ToolchainConfig,
@@ -3329,7 +3479,7 @@ fn run_reference_compilers(
     case.reference_compilers
         .iter()
         .copied()
-        .map(|compiler| run_reference_case(&case.source, opt_level, compiler, tools))
+        .map(|compiler| run_reference_case(&prepared.compiler_source, opt_level, compiler, tools))
         .collect()
 }
 
@@ -3715,12 +3865,22 @@ struct ObjectRun {
 }
 
 fn object_snapshot(path: &Path, tools: &ToolchainConfig) -> Result<ObjectSnapshot, String> {
-    let text = normalize_tool_output(&tool_output(tools.otool_bin(), &["-t", path.to_str().unwrap()])?);
-    let load_commands =
-        normalize_tool_output(&tool_output(tools.otool_bin(), &["-l", path.to_str().unwrap()])?);
-    let relocations =
-        normalize_tool_output(&tool_output(tools.otool_bin(), &["-rv", path.to_str().unwrap()])?);
-    let symbols = normalize_tool_output(&tool_output(tools.nm_bin(), &["-m", path.to_str().unwrap()])?);
+    let text = normalize_tool_output(&tool_output(
+        tools.otool_bin(),
+        &["-t", path.to_str().unwrap()],
+    )?);
+    let load_commands = normalize_tool_output(&tool_output(
+        tools.otool_bin(),
+        &["-l", path.to_str().unwrap()],
+    )?);
+    let relocations = normalize_tool_output(&tool_output(
+        tools.otool_bin(),
+        &["-rv", path.to_str().unwrap()],
+    )?);
+    let symbols = normalize_tool_output(&tool_output(
+        tools.nm_bin(),
+        &["-m", path.to_str().unwrap()],
+    )?);
 
     Ok(ObjectSnapshot {
         text,
@@ -4188,6 +4348,7 @@ fn render_summary(summary: &Summary) -> String {
 fn write_failure_bundle(
     suite: &SuiteSpec,
     case: &CaseSpec,
+    prepared: &PreparedInput,
     outcome: &Outcome,
     artifacts: &ExecutionArtifacts,
 ) -> Result<PathBuf, String> {
@@ -4233,7 +4394,7 @@ fn write_failure_bundle(
         case.name,
         outcome.kind,
         outcome.opt_level.as_str(),
-        case.source.display(),
+        case.source_label(),
         stage_list,
         case.repeat_count,
         refs,
@@ -4244,10 +4405,7 @@ fn write_failure_bundle(
     fs::write(bundle_root.join("detail.txt"), &outcome.detail)
         .map_err(|e| format!("cannot write bundle detail: {}", e))?;
 
-    let source_text = fs::read_to_string(&case.source)
-        .map_err(|e| format!("cannot read case source '{}': {}", case.source.display(), e))?;
-    fs::write(bundle_root.join("source.f90"), source_text)
-        .map_err(|e| format!("cannot write bundle source copy: {}", e))?;
+    write_case_sources_bundle(&bundle_root, case, prepared)?;
 
     let armfortas_root = bundle_root.join("armfortas");
     fs::create_dir_all(&armfortas_root)
@@ -4278,6 +4436,52 @@ fn write_failure_bundle(
     }
 
     Ok(bundle_root)
+}
+
+fn write_case_sources_bundle(
+    bundle_root: &Path,
+    case: &CaseSpec,
+    prepared: &PreparedInput,
+) -> Result<(), String> {
+    if case.graph_files.is_empty() {
+        let source_text = fs::read_to_string(&case.source)
+            .map_err(|e| format!("cannot read case source '{}': {}", case.source.display(), e))?;
+        fs::write(bundle_root.join("source.f90"), source_text)
+            .map_err(|e| format!("cannot write bundle source copy: {}", e))?;
+        return Ok(());
+    }
+
+    let generated_source = prepared.generated_source.as_ref().ok_or_else(|| {
+        format!(
+            "graph case '{}' was missing a generated compiler source",
+            case.name
+        )
+    })?;
+    let generated_text = fs::read_to_string(generated_source).map_err(|e| {
+        format!(
+            "cannot read generated graph source '{}': {}",
+            generated_source.display(),
+            e
+        )
+    })?;
+    fs::write(bundle_root.join("source.f90"), generated_text)
+        .map_err(|e| format!("cannot write generated bundle source copy: {}", e))?;
+
+    let sources_root = bundle_root.join("sources");
+    fs::create_dir_all(&sources_root)
+        .map_err(|e| format!("cannot create bundle sources dir: {}", e))?;
+    for (index, file) in case.graph_files.iter().enumerate() {
+        let text = fs::read_to_string(file)
+            .map_err(|e| format!("cannot read graph source '{}': {}", file.display(), e))?;
+        let file_name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("source.f90");
+        let target = sources_root.join(format!("{:02}_{}", index, file_name));
+        fs::write(target, text).map_err(|e| format!("cannot write bundle graph source: {}", e))?;
+    }
+
+    Ok(())
 }
 
 fn write_capture_result(root: &Path, result: &CaptureResult) -> Result<(), String> {
@@ -4656,8 +4860,8 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
 mod tests {
     use super::*;
     use crate::compiler::test_support::{
-        verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType,
-        Module, Position, Span, Terminator, ValueId,
+        verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType, Module,
+        Position, Span, Terminator, ValueId,
     };
 
     fn dummy_span() -> Span {
@@ -4782,6 +4986,43 @@ end
     }
 
     #[test]
+    fn parses_graph_case() {
+        let root = std::env::temp_dir().join("afs_tests_graph_spec");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("math_values.f90"),
+            "module math_values\nend module\n",
+        )
+        .unwrap();
+        fs::write(root.join("main.f90"), "program main\nend program\n").unwrap();
+        fs::write(
+            root.join("graph.afs"),
+            r#"suite "modules/graph"
+
+case "basic_use"
+entry "main.f90"
+file "math_values.f90"
+file "main.f90"
+armfortas => run
+expect run.exit_code equals 0
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root.join("graph.afs")).unwrap();
+        let case = &suite.cases[0];
+        assert_eq!(case.source, root.join("main.f90"));
+        assert_eq!(
+            case.graph_files,
+            vec![root.join("math_values.f90"), root.join("main.f90")]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn parse_cli_collects_tool_overrides() {
         let args = vec![
             "run".to_string(),
@@ -4804,7 +5045,10 @@ end
         let command = parse_cli(&args).unwrap();
         let config = match command {
             CommandKind::Run(config) => config,
-            other => panic!("expected run command, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected run command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         };
 
         assert_eq!(config.suite_filter.as_deref(), Some("consistency/runtime"));
@@ -4899,6 +5143,7 @@ end
         let case = CaseSpec {
             name: "no_reserved_register".into(),
             source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm]),
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
@@ -4945,6 +5190,7 @@ end
         let case = CaseSpec {
             name: "hello_bundle".into(),
             source: source.clone(),
+            graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Ir, Stage::Run]),
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
@@ -5034,8 +5280,13 @@ end
             bundle: None,
             consistency_observations: Vec::new(),
         };
+        let prepared = PreparedInput {
+            compiler_source: source.clone(),
+            generated_source: None,
+            temp_root: None,
+        };
 
-        let bundle = write_failure_bundle(&suite, &case, &outcome, &artifacts).unwrap();
+        let bundle = write_failure_bundle(&suite, &case, &prepared, &outcome, &artifacts).unwrap();
         assert!(bundle.join("metadata.txt").exists());
         assert!(bundle.join("detail.txt").exists());
         assert!(bundle.join("source.f90").exists());
@@ -5087,6 +5338,114 @@ end
         let _ =
             fs::remove_dir_all(std::env::temp_dir().join("afs_tests_consistency_bundle_issue_obj"));
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn materializes_graph_input_in_declared_file_order() {
+        let root = std::env::temp_dir().join("afs_tests_graph_materialize");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let module = root.join("math_values.f90");
+        let main = root.join("main.f90");
+        fs::write(&module, "module math_values\ncontains\nend module\n").unwrap();
+        fs::write(&main, "program main\nuse math_values\nend program\n").unwrap();
+
+        let suite = SuiteSpec {
+            name: "modules/graph".into(),
+            path: root.join("graph.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "basic_use".into(),
+            source: main.clone(),
+            graph_files: vec![module.clone(), main.clone()],
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+
+        let prepared = prepare_case_input(&case, &suite, OptLevel::O0).unwrap();
+        let generated = fs::read_to_string(&prepared.compiler_source).unwrap();
+        assert!(generated.contains("module math_values"));
+        assert!(generated.contains("program main"));
+        assert!(
+            generated.find("module math_values").unwrap() < generated.find("program main").unwrap()
+        );
+
+        cleanup_prepared_input(&prepared);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_failure_bundle_writes_authored_sources() {
+        let root = std::env::temp_dir().join("afs_tests_graph_bundle");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let module = root.join("math_values.f90");
+        let main = root.join("main.f90");
+        let generated = root.join("generated.f90");
+        fs::write(
+            &module,
+            "module math_values\n integer :: answer = 42\nend module\n",
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            "program main\n use math_values\n print *, answer\nend program\n",
+        )
+        .unwrap();
+        fs::write(&generated, "module math_values\n integer :: answer = 42\nend module\n\nprogram main\n use math_values\n print *, answer\nend program\n").unwrap();
+
+        let suite = SuiteSpec {
+            name: "modules/bundles".into(),
+            path: root.join("bundle.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "graph_bundle".into(),
+            source: main.clone(),
+            graph_files: vec![module.clone(), main.clone()],
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+        let outcome = Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level: OptLevel::O0,
+            kind: OutcomeKind::Fail,
+            detail: "boom".into(),
+            bundle: None,
+            consistency_observations: Vec::new(),
+        };
+        let artifacts = ExecutionArtifacts {
+            requested: BTreeSet::from([Stage::Run]),
+            armfortas: Some(run_only_result("42\n", "", 0)),
+            armfortas_failure: None,
+            references: Vec::new(),
+            consistency_issues: Vec::new(),
+        };
+        let prepared = PreparedInput {
+            compiler_source: generated.clone(),
+            generated_source: Some(generated.clone()),
+            temp_root: None,
+        };
+
+        let bundle = write_failure_bundle(&suite, &case, &prepared, &outcome, &artifacts).unwrap();
+        assert!(bundle.join("source.f90").exists());
+        assert!(bundle.join("sources").join("00_math_values.f90").exists());
+        assert!(bundle.join("sources").join("01_main.f90").exists());
+
+        let _ = fs::remove_dir_all(bundle);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
