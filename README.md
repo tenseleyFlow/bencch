@@ -79,7 +79,7 @@ cargo run -p afs-tests -- run --suite frontend --case stage_walk --all --verbose
 Write machine-readable reports:
 
 ```bash
-cargo run -p afs-tests -- run --suite modules --all --json-report bencch/reports/modules.json --markdown-report bencch/reports/modules.md
+cargo run -p afs-tests -- run --suite modules --all --json-report reports/modules.json --markdown-report reports/modules.md
 ```
 
 Run consistency coverage:
@@ -94,13 +94,20 @@ Run differential coverage:
 cargo run -p afs-tests -- run --suite differential
 ```
 
-Reports are written under `bencch/reports/`.
+Reports are written under `reports/`.
 
 Environment overrides work too:
 
 ```bash
 BENCCH_ARMFORTAS_BIN=./target/debug/armfortas cargo run -p afs-tests -- run --suite consistency/object
 ```
+
+Backend choice is visible in:
+
+- `cargo run -p afs-tests -- doctor`
+- `--verbose` case runs
+- JSON and Markdown reports as `primary_backend`
+- bundle `metadata.txt` and `armfortas/metadata.txt`
 
 ## Suite Format
 
