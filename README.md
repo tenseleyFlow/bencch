@@ -57,6 +57,12 @@ Compare two compilers on one program:
 cargo run -p afs-tests --bin bencch -- compare armfortas gfortran --program fixtures/runtime/mixed_types.f90
 ```
 
+Compare named compilers with an explicit armfortas binary:
+
+```bash
+cargo run -p afs-tests --bin bencch -- compare armfortas gfortran --program fixtures/runtime/if_else.f90 --armfortas-bin ../target/debug/armfortas
+```
+
 Compare with an extra artifact diff:
 
 ```bash
@@ -126,7 +132,8 @@ cargo run -p afs-tests --bin bencch -- run --suite differential
 Reports are written under `reports/`.
 
 `compare` now prints a short summary block with status, basis, difference count,
-and the backend used on each side before any per-artifact diffs.
+changed artifacts, and the backend used on each side before any per-artifact
+diffs.
 
 Environment overrides work too:
 

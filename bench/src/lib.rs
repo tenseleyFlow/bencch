@@ -1693,7 +1693,16 @@ fn compare_status(result: &ComparisonResult) -> &'static str {
     }
 }
 
+fn compare_changed_artifacts(result: &ComparisonResult) -> Vec<String> {
+    result
+        .differences
+        .iter()
+        .map(|difference| difference.artifact.clone())
+        .collect()
+}
+
 fn render_compare_text(result: &ComparisonResult) -> String {
+    let changed_artifacts = compare_changed_artifacts(result);
     let mut lines = vec![
         "Compare".to_string(),
         format!("  left: {}", result.left.compiler.display_name()),
@@ -1703,6 +1712,14 @@ fn render_compare_text(result: &ComparisonResult) -> String {
         format!("  status: {}", compare_status(result)),
         format!("  basis: {}", result.basis),
         format!("  difference_count: {}", result.differences.len()),
+        format!(
+            "  changed_artifacts: {}",
+            if changed_artifacts.is_empty() {
+                "none".to_string()
+            } else {
+                changed_artifacts.join(", ")
+            }
+        ),
         format!(
             "  left_backend: {} ({})",
             result.left.provenance.backend_mode, result.left.provenance.backend_detail
@@ -1800,10 +1817,12 @@ fn render_introspection_text(observation: &CompilerObservation) -> String {
 }
 
 fn render_compare_json(result: &ComparisonResult) -> String {
+    let changed_artifacts = compare_changed_artifacts(result);
     format!(
-        "{{\n  \"status\": \"{}\",\n  \"difference_count\": {},\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
+        "{{\n  \"status\": \"{}\",\n  \"difference_count\": {},\n  \"changed_artifacts\": {},\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
         compare_status(result),
         result.differences.len(),
+        json_string_array(&changed_artifacts),
         json_escape(&result.basis),
         render_observation_json(&result.left),
         render_observation_json(&result.right),
@@ -1812,6 +1831,7 @@ fn render_compare_json(result: &ComparisonResult) -> String {
 }
 
 fn render_compare_markdown(result: &ComparisonResult) -> String {
+    let changed_artifacts = compare_changed_artifacts(result);
     let mut lines = vec![
         "# bencch compare report".to_string(),
         String::new(),
@@ -1823,6 +1843,14 @@ fn render_compare_markdown(result: &ComparisonResult) -> String {
         ),
         format!("basis: {}", result.basis),
         format!("difference_count: {}", result.differences.len()),
+        format!(
+            "changed_artifacts: {}",
+            if changed_artifacts.is_empty() {
+                "none".to_string()
+            } else {
+                changed_artifacts.join(", ")
+            }
+        ),
         String::new(),
         "## Left".to_string(),
         render_observation_markdown(&result.left),
@@ -6912,6 +6940,36 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).unwrap();
     }
+
+    #[cfg(unix)]
+    fn command_is_available(name: &str) -> bool {
+        Command::new("which")
+            .arg(name)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    fn armfortas_smoke_binary() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("BENCCH_ARMFORTAS_SMOKE_BIN") {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+
+        let candidate = bencch_repo_root()
+            .parent()?
+            .join("target")
+            .join("debug")
+            .join("armfortas");
+        if candidate.is_file() {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
     use crate::compiler::test_support::{
         verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType, Module,
         Position, Span, Terminator, ValueId,
@@ -7180,12 +7238,69 @@ mod tests {
         let json = fs::read_to_string(&json_report).unwrap();
         assert!(json.contains("\"status\": \"match\""));
         assert!(json.contains("\"difference_count\": 0"));
+        assert!(json.contains("\"changed_artifacts\": []"));
 
         let markdown = fs::read_to_string(&markdown_report).unwrap();
         assert!(markdown.contains("status: match"));
         assert!(markdown.contains("difference_count: 0"));
+        assert!(markdown.contains("changed_artifacts: none"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compare_named_real_compilers_match_on_runtime_fixture() {
+        if !command_is_available("gfortran") || !command_is_available("flang-new") {
+            return;
+        }
+
+        let config = CompareConfig {
+            left: CompilerSpec::Named(NamedCompiler::Gfortran),
+            right: CompilerSpec::Named(NamedCompiler::FlangNew),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::new(),
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let result = run_compare(&config).unwrap();
+        assert_eq!(compare_status(&result), "match");
+        assert!(result.differences.is_empty());
+        assert_eq!(result.left.provenance.adapter_kind, "named");
+        assert_eq!(result.right.provenance.adapter_kind, "named");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compare_armfortas_and_gfortran_match_on_runtime_fixture_when_available() {
+        if !command_is_available("gfortran") {
+            return;
+        }
+        let Some(armfortas_bin) = armfortas_smoke_binary() else {
+            return;
+        };
+
+        let mut tools = ToolchainConfig::from_env();
+        tools.armfortas = ArmfortasCliAdapter::External(armfortas_bin.display().to_string());
+
+        let config = CompareConfig {
+            left: CompilerSpec::Named(NamedCompiler::Armfortas),
+            right: CompilerSpec::Named(NamedCompiler::Gfortran),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::new(),
+            json_report: None,
+            markdown_report: None,
+            tools,
+        };
+
+        let result = run_compare(&config).unwrap();
+        assert_eq!(compare_status(&result), "match");
+        assert!(result.differences.is_empty());
+        assert_eq!(result.left.provenance.backend_mode, "cli-observable");
     }
 
     #[test]
@@ -8065,12 +8180,14 @@ end
         assert!(compare_markdown.contains("# bencch compare report"));
         assert!(compare_markdown.contains("status: diff"));
         assert!(compare_markdown.contains("difference_count: 1"));
+        assert!(compare_markdown.contains("changed_artifacts: asm"));
         assert!(compare_markdown.contains("backend_mode: `external-driver`"));
         assert!(compare_markdown.contains("### `asm`"));
 
         let compare_json = render_compare_json(&compare);
         assert!(compare_json.contains("\"status\": \"diff\""));
         assert!(compare_json.contains("\"difference_count\": 1"));
+        assert!(compare_json.contains("\"changed_artifacts\": [\"asm\"]"));
     }
 
     #[test]
