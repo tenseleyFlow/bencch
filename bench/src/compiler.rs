@@ -405,7 +405,7 @@ fn read_text_artifact(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {}", path.display(), e))
 }
 
-fn object_snapshot_text(path: &Path, otool: &str, nm: &str) -> Result<String, String> {
+pub(crate) fn object_snapshot_text(path: &Path, otool: &str, nm: &str) -> Result<String, String> {
     let text = normalize_tool_output(&tool_output(otool, &["-t", path.to_str().unwrap()])?);
     let load_commands =
         normalize_tool_output(&tool_output(otool, &["-l", path.to_str().unwrap()])?);

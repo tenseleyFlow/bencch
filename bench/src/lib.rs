@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use bencch_core::{
+    ArtifactDifference, ArtifactKey, ArtifactValue, ComparisonResult, CompilerObservation,
+    CompilerSpec, NamedCompiler, ObservationProvenance,
+};
 use crate::compiler::{
     ArmfortasAdapters, ArmfortasCliAdapter, CaptureBackend, CaptureFailure, CaptureRequest,
     CaptureResult, CapturedStage, CliObservableCaptureBackend, EmitMode, FailureStage, OptLevel,
-    RunCapture, Stage,
+    RunCapture, Stage, object_snapshot_text,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -276,6 +280,17 @@ impl ToolchainConfig {
     fn nm_bin(&self) -> &str {
         &self.nm
     }
+
+    fn named_compiler_binary(&self, compiler: NamedCompiler) -> Option<String> {
+        match compiler {
+            NamedCompiler::Armfortas => match &self.armfortas {
+                ArmfortasCliAdapter::Linked => None,
+                ArmfortasCliAdapter::External(binary) => Some(binary.clone()),
+            },
+            NamedCompiler::Gfortran => Some(self.gfortran.clone()),
+            NamedCompiler::FlangNew => Some(self.flang_new.clone()),
+        }
+    }
 }
 
 fn tool_override(var: &str, default: &str) -> String {
@@ -351,12 +366,41 @@ struct RunConfig {
 }
 
 #[derive(Debug, Clone)]
+struct CompareConfig {
+    left: CompilerSpec,
+    right: CompilerSpec,
+    program: PathBuf,
+    opt_level: OptLevel,
+    artifacts: BTreeSet<ArtifactKey>,
+    json_report: Option<PathBuf>,
+    markdown_report: Option<PathBuf>,
+    tools: ToolchainConfig,
+}
+
+#[derive(Debug, Clone)]
+struct IntrospectConfig {
+    compiler: CompilerSpec,
+    program: PathBuf,
+    opt_level: OptLevel,
+    artifacts: BTreeSet<ArtifactKey>,
+    json_report: Option<PathBuf>,
+    markdown_report: Option<PathBuf>,
+    all_artifacts: bool,
+    tools: ToolchainConfig,
+}
+
+#[derive(Debug, Clone)]
 struct ExecutionArtifacts {
     requested: BTreeSet<Stage>,
     armfortas: Option<CaptureResult>,
     armfortas_failure: Option<CaptureFailure>,
     references: Vec<ReferenceResult>,
     consistency_issues: Vec<ConsistencyIssue>,
+}
+
+#[derive(Debug, Clone)]
+struct ObservedProgram {
+    observation: CompilerObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +541,10 @@ struct RunSignature {
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
+    run_cli_named("afs-tests", args)
+}
+
+pub fn run_cli_named(program_name: &str, args: &[String]) -> i32 {
     match parse_cli(args) {
         Ok(CommandKind::List { suite_filter }) => match discover_suites(default_suite_root()) {
             Ok(suites) => {
@@ -504,7 +552,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 0
             }
             Err(err) => {
-                eprintln!("afs-tests: {}", err);
+                eprintln!("{}: {}", program_name, err);
                 1
             }
         },
@@ -522,7 +570,43 @@ pub fn run_cli(args: &[String]) -> i32 {
                 }
             }
             Err(err) => {
-                eprintln!("afs-tests: {}", err);
+                eprintln!("{}: {}", program_name, err);
+                1
+            }
+        },
+        Ok(CommandKind::Compare(config)) => match run_compare(&config) {
+            Ok(result) => {
+                print_compare_result(&result);
+                if let Err(err) = write_compare_reports(&config, &result) {
+                    eprintln!("{}: {}", program_name, err);
+                    return 1;
+                }
+                if result.differences.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(err) => {
+                eprintln!("{}: {}", program_name, err);
+                1
+            }
+        },
+        Ok(CommandKind::Introspect(config)) => match run_introspect(&config) {
+            Ok(observation) => {
+                print_introspection(&observation);
+                if let Err(err) = write_introspection_reports(&config, &observation) {
+                    eprintln!("{}: {}", program_name, err);
+                    return 1;
+                }
+                if observation.observation.compile_exit_code == 0 {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(err) => {
+                eprintln!("{}: {}", program_name, err);
                 1
             }
         },
@@ -531,12 +615,12 @@ pub fn run_cli(args: &[String]) -> i32 {
             0
         }
         Ok(CommandKind::Help) => {
-            print_usage();
+            print_usage(program_name);
             0
         }
         Err(err) => {
-            eprintln!("afs-tests: {}", err);
-            print_usage();
+            eprintln!("{}: {}", program_name, err);
+            print_usage(program_name);
             2
         }
     }
@@ -545,6 +629,8 @@ pub fn run_cli(args: &[String]) -> i32 {
 enum CommandKind {
     List { suite_filter: Option<String> },
     Run(RunConfig),
+    Compare(CompareConfig),
+    Introspect(IntrospectConfig),
     Doctor(DoctorConfig),
     Help,
 }
@@ -552,6 +638,48 @@ enum CommandKind {
 #[derive(Debug, Clone)]
 struct DoctorConfig {
     tools: ToolchainConfig,
+}
+
+fn parse_tool_override_arg(
+    arg: &str,
+    queue: &mut VecDeque<&String>,
+    tools: &mut ToolchainConfig,
+) -> Result<bool, String> {
+    match arg {
+        "--armfortas-bin" => {
+            let value = queue
+                .pop_front()
+                .ok_or("--armfortas-bin requires a value")?;
+            tools.armfortas = ArmfortasCliAdapter::External(value.clone());
+            Ok(true)
+        }
+        "--gfortran-bin" => {
+            let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
+            tools.gfortran = value.clone();
+            Ok(true)
+        }
+        "--flang-bin" => {
+            let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
+            tools.flang_new = value.clone();
+            Ok(true)
+        }
+        "--as-bin" => {
+            let value = queue.pop_front().ok_or("--as-bin requires a value")?;
+            tools.system_as = value.clone();
+            Ok(true)
+        }
+        "--otool-bin" => {
+            let value = queue.pop_front().ok_or("--otool-bin requires a value")?;
+            tools.otool = value.clone();
+            Ok(true)
+        }
+        "--nm-bin" => {
+            let value = queue.pop_front().ok_or("--nm-bin requires a value")?;
+            tools.nm = value.clone();
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
@@ -590,6 +718,9 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
             };
             let mut queue: VecDeque<&String> = args[1..].iter().collect();
             while let Some(arg) = queue.pop_front() {
+                if parse_tool_override_arg(arg, &mut queue, &mut config.tools)? {
+                    continue;
+                }
                 match arg.as_str() {
                     "--suite" => {
                         let value = queue.pop_front().ok_or("--suite requires a value")?;
@@ -619,37 +750,135 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                             .ok_or("--markdown-report requires a value")?;
                         config.markdown_report = Some(PathBuf::from(value));
                     }
-                    "--armfortas-bin" => {
-                        let value = queue
-                            .pop_front()
-                            .ok_or("--armfortas-bin requires a value")?;
-                        config.tools.armfortas = ArmfortasCliAdapter::External(value.clone());
-                    }
-                    "--gfortran-bin" => {
-                        let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
-                        config.tools.gfortran = value.clone();
-                    }
-                    "--flang-bin" => {
-                        let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
-                        config.tools.flang_new = value.clone();
-                    }
-                    "--as-bin" => {
-                        let value = queue.pop_front().ok_or("--as-bin requires a value")?;
-                        config.tools.system_as = value.clone();
-                    }
-                    "--otool-bin" => {
-                        let value = queue.pop_front().ok_or("--otool-bin requires a value")?;
-                        config.tools.otool = value.clone();
-                    }
-                    "--nm-bin" => {
-                        let value = queue.pop_front().ok_or("--nm-bin requires a value")?;
-                        config.tools.nm = value.clone();
-                    }
                     "--help" | "-h" => return Ok(CommandKind::Help),
                     other => return Err(format!("unknown run option: {}", other)),
                 }
             }
             Ok(CommandKind::Run(config))
+        }
+        "compare" => {
+            if args.len() < 3 {
+                return Err(
+                    "compare requires <compiler-a> <compiler-b> and --program <path>".to_string(),
+                );
+            }
+            let left = CompilerSpec::parse(&args[1]);
+            let right = CompilerSpec::parse(&args[2]);
+            let mut config = CompareConfig {
+                left,
+                right,
+                program: PathBuf::new(),
+                opt_level: OptLevel::O0,
+                artifacts: BTreeSet::new(),
+                json_report: None,
+                markdown_report: None,
+                tools: ToolchainConfig::from_env(),
+            };
+            let mut queue: VecDeque<&String> = args[3..].iter().collect();
+            while let Some(arg) = queue.pop_front() {
+                if parse_tool_override_arg(arg, &mut queue, &mut config.tools)? {
+                    continue;
+                }
+                match arg.as_str() {
+                    "--program" => {
+                        let value = queue.pop_front().ok_or("--program requires a value")?;
+                        config.program = PathBuf::from(value);
+                    }
+                    "--opt" => {
+                        let value = queue.pop_front().ok_or("--opt requires a value")?;
+                        let parsed = parse_opt_level_list(value)?;
+                        let opt = parsed
+                            .into_iter()
+                            .next()
+                            .ok_or("--opt requires at least one optimization level")?;
+                        config.opt_level = opt;
+                    }
+                    "--artifact" => {
+                        let value = queue.pop_front().ok_or("--artifact requires a value")?;
+                        let parsed = ArtifactKey::parse_list(value)?;
+                        for artifact in parsed {
+                            if matches!(artifact, ArtifactKey::Extra(_)) {
+                                return Err(format!(
+                                    "compare only supports generic artifacts today; got '{}'",
+                                    artifact.as_str()
+                                ));
+                            }
+                            config.artifacts.insert(artifact);
+                        }
+                    }
+                    "--json-report" => {
+                        let value = queue.pop_front().ok_or("--json-report requires a value")?;
+                        config.json_report = Some(PathBuf::from(value));
+                    }
+                    "--markdown-report" => {
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--markdown-report requires a value")?;
+                        config.markdown_report = Some(PathBuf::from(value));
+                    }
+                    "--help" | "-h" => return Ok(CommandKind::Help),
+                    other => return Err(format!("unknown compare option: {}", other)),
+                }
+            }
+            if config.program.as_os_str().is_empty() {
+                return Err("compare requires --program <path>".to_string());
+            }
+            Ok(CommandKind::Compare(config))
+        }
+        "introspect" => {
+            if args.len() < 3 {
+                return Err("introspect requires <compiler> <program>".to_string());
+            }
+            let compiler = CompilerSpec::parse(&args[1]);
+            let mut config = IntrospectConfig {
+                compiler,
+                program: PathBuf::from(&args[2]),
+                opt_level: OptLevel::O0,
+                artifacts: BTreeSet::new(),
+                json_report: None,
+                markdown_report: None,
+                all_artifacts: false,
+                tools: ToolchainConfig::from_env(),
+            };
+            let mut queue: VecDeque<&String> = args[3..].iter().collect();
+            while let Some(arg) = queue.pop_front() {
+                if parse_tool_override_arg(arg, &mut queue, &mut config.tools)? {
+                    continue;
+                }
+                match arg.as_str() {
+                    "--program" => {
+                        let value = queue.pop_front().ok_or("--program requires a value")?;
+                        config.program = PathBuf::from(value);
+                    }
+                    "--opt" => {
+                        let value = queue.pop_front().ok_or("--opt requires a value")?;
+                        let parsed = parse_opt_level_list(value)?;
+                        let opt = parsed
+                            .into_iter()
+                            .next()
+                            .ok_or("--opt requires at least one optimization level")?;
+                        config.opt_level = opt;
+                    }
+                    "--artifact" => {
+                        let value = queue.pop_front().ok_or("--artifact requires a value")?;
+                        config.artifacts.extend(ArtifactKey::parse_list(value)?);
+                    }
+                    "--all" => config.all_artifacts = true,
+                    "--json-report" => {
+                        let value = queue.pop_front().ok_or("--json-report requires a value")?;
+                        config.json_report = Some(PathBuf::from(value));
+                    }
+                    "--markdown-report" => {
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--markdown-report requires a value")?;
+                        config.markdown_report = Some(PathBuf::from(value));
+                    }
+                    "--help" | "-h" => return Ok(CommandKind::Help),
+                    other => return Err(format!("unknown introspect option: {}", other)),
+                }
+            }
+            Ok(CommandKind::Introspect(config))
         }
         "doctor" => {
             let mut config = DoctorConfig {
@@ -657,33 +886,10 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
             };
             let mut queue: VecDeque<&String> = args[1..].iter().collect();
             while let Some(arg) = queue.pop_front() {
+                if parse_tool_override_arg(arg, &mut queue, &mut config.tools)? {
+                    continue;
+                }
                 match arg.as_str() {
-                    "--armfortas-bin" => {
-                        let value = queue
-                            .pop_front()
-                            .ok_or("--armfortas-bin requires a value")?;
-                        config.tools.armfortas = ArmfortasCliAdapter::External(value.clone());
-                    }
-                    "--gfortran-bin" => {
-                        let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
-                        config.tools.gfortran = value.clone();
-                    }
-                    "--flang-bin" => {
-                        let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
-                        config.tools.flang_new = value.clone();
-                    }
-                    "--as-bin" => {
-                        let value = queue.pop_front().ok_or("--as-bin requires a value")?;
-                        config.tools.system_as = value.clone();
-                    }
-                    "--otool-bin" => {
-                        let value = queue.pop_front().ok_or("--otool-bin requires a value")?;
-                        config.tools.otool = value.clone();
-                    }
-                    "--nm-bin" => {
-                        let value = queue.pop_front().ok_or("--nm-bin requires a value")?;
-                        config.tools.nm = value.clone();
-                    }
                     "--help" | "-h" => return Ok(CommandKind::Help),
                     other => return Err(format!("unknown doctor option: {}", other)),
                 }
@@ -695,21 +901,1007 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
     }
 }
 
-fn print_usage() {
-    eprintln!("afs-tests — structured ARMFORTAS bench runner");
+fn print_usage(program_name: &str) {
+    eprintln!(
+        "{} — generic compiler bench runner (afs-tests compatibility preserved)",
+        program_name
+    );
     eprintln!();
     eprintln!("usage:");
-    eprintln!("  cargo run -p afs-tests -- list [--suite <filter>]");
+    eprintln!("  {} list [--suite <filter>]", program_name);
     eprintln!(
-        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--json-report <path>] [--markdown-report <path>] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
+        "  {} run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--json-report <path>] [--markdown-report <path>] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]",
+        program_name
     );
     eprintln!(
-        "  cargo run -p afs-tests -- doctor [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
+        "  {} compare <compiler-a> <compiler-b> --program <path> [--opt <O0>] [--artifact <asm,obj>] [--json-report <path>] [--markdown-report <path>] [tool overrides]",
+        program_name
+    );
+    eprintln!(
+        "  {} introspect <compiler> <program> [--opt <O0>] [--artifact <list>] [--all] [--json-report <path>] [--markdown-report <path>] [tool overrides]",
+        program_name
+    );
+    eprintln!(
+        "  {} doctor [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]",
+        program_name
     );
     eprintln!();
     eprintln!("env overrides:");
     eprintln!("  BENCCH_ARMFORTAS_BIN, BENCCH_GFORTRAN_BIN, BENCCH_FLANG_BIN");
     eprintln!("  BENCCH_AS_BIN, BENCCH_OTOOL_BIN, BENCCH_NM_BIN");
+}
+
+fn default_compare_artifacts(extra: &BTreeSet<ArtifactKey>) -> BTreeSet<ArtifactKey> {
+    let mut requested = BTreeSet::from([ArtifactKey::Diagnostics, ArtifactKey::Runtime]);
+    requested.extend(extra.iter().cloned());
+    requested
+}
+
+fn default_introspection_artifacts(
+    compiler: &CompilerSpec,
+    all_artifacts: bool,
+) -> BTreeSet<ArtifactKey> {
+    let mut requested = BTreeSet::from([
+        ArtifactKey::Diagnostics,
+        ArtifactKey::Runtime,
+        ArtifactKey::Asm,
+        ArtifactKey::Obj,
+    ]);
+    if matches!(compiler, CompilerSpec::Named(NamedCompiler::Armfortas)) {
+        requested.insert(ArtifactKey::Extra("armfortas.ir".into()));
+        if all_artifacts {
+            for name in [
+                "armfortas.preprocess",
+                "armfortas.tokens",
+                "armfortas.ast",
+                "armfortas.sema",
+                "armfortas.ir",
+                "armfortas.optir",
+                "armfortas.mir",
+                "armfortas.regalloc",
+            ] {
+                requested.insert(ArtifactKey::Extra(name.to_string()));
+            }
+        }
+    }
+    requested
+}
+
+fn run_compare(config: &CompareConfig) -> Result<ComparisonResult, String> {
+    let requested = default_compare_artifacts(&config.artifacts);
+    let left = observe_compiler(&config.left, &config.program, config.opt_level, &requested, &config.tools)?;
+    let right =
+        observe_compiler(&config.right, &config.program, config.opt_level, &requested, &config.tools)?;
+    Ok(compare_observations(left, right, &requested))
+}
+
+fn run_introspect(config: &IntrospectConfig) -> Result<ObservedProgram, String> {
+    let requested = if config.artifacts.is_empty() {
+        default_introspection_artifacts(&config.compiler, config.all_artifacts)
+    } else {
+        let mut requested = config.artifacts.clone();
+        if config.all_artifacts
+            && matches!(config.compiler, CompilerSpec::Named(NamedCompiler::Armfortas))
+        {
+            requested.extend(default_introspection_artifacts(&config.compiler, true));
+        }
+        requested
+    };
+    Ok(ObservedProgram {
+        observation: observe_compiler(
+            &config.compiler,
+            &config.program,
+            config.opt_level,
+            &requested,
+            &config.tools,
+        )?,
+    })
+}
+
+fn observe_compiler(
+    spec: &CompilerSpec,
+    program: &Path,
+    opt_level: OptLevel,
+    requested: &BTreeSet<ArtifactKey>,
+    tools: &ToolchainConfig,
+) -> Result<CompilerObservation, String> {
+    match spec {
+        CompilerSpec::Named(NamedCompiler::Armfortas) => {
+            observe_armfortas(program, opt_level, requested, tools)
+        }
+        CompilerSpec::Named(named) => {
+            let binary = tools
+                .named_compiler_binary(*named)
+                .ok_or_else(|| format!("named compiler '{}' has no resolved binary", named.as_str()))?;
+            observe_external_driver(
+                spec,
+                &binary,
+                program,
+                opt_level,
+                requested,
+                matches!(named, NamedCompiler::Gfortran | NamedCompiler::FlangNew)
+                    && source_uses_cpp(program),
+                "named".to_string(),
+                tools.otool_bin(),
+                tools.nm_bin(),
+            )
+        }
+        CompilerSpec::Binary(path) => observe_external_driver(
+            spec,
+            &path.display().to_string(),
+            program,
+            opt_level,
+            requested,
+            false,
+            "explicit-path".to_string(),
+            tools.otool_bin(),
+            tools.nm_bin(),
+        ),
+    }
+}
+
+fn observe_armfortas(
+    program: &Path,
+    opt_level: OptLevel,
+    requested: &BTreeSet<ArtifactKey>,
+    tools: &ToolchainConfig,
+) -> Result<CompilerObservation, String> {
+    let stages = armfortas_requested_stages(requested)?;
+    let cli_observable_only = requested.iter().all(|artifact| {
+        matches!(
+            artifact,
+            ArtifactKey::Diagnostics
+                | ArtifactKey::Runtime
+                | ArtifactKey::Stdout
+                | ArtifactKey::Stderr
+                | ArtifactKey::ExitCode
+                | ArtifactKey::Asm
+                | ArtifactKey::Obj
+                | ArtifactKey::Executable
+        )
+    });
+    let (backend_mode, backend_detail, capture) = if cli_observable_only
+        && matches!(tools.armfortas, ArmfortasCliAdapter::External(_))
+    {
+        let backend = tools.cli_observable_capture_backend(next_primary_cli_temp_root(opt_level));
+        let detail = backend.description().to_string();
+        let mode = backend.mode_name().to_string();
+        let request = CaptureRequest {
+            input: program.to_path_buf(),
+            requested: stages.clone(),
+            opt_level,
+        };
+        (mode, detail, backend.capture(&request))
+    } else {
+        let backend = tools.armfortas_adapters();
+        let detail = backend.capture_description().to_string();
+        let mode = backend.capture_mode_name().to_string();
+        let request = CaptureRequest {
+            input: program.to_path_buf(),
+            requested: stages.clone(),
+            opt_level,
+        };
+        (mode, detail, backend.capture(&request))
+    };
+
+    let mut artifacts = BTreeMap::new();
+    let mut compile_exit_code = 0;
+    match capture {
+        Ok(result) => {
+            for (stage, captured) in &result.stages {
+                match (stage, captured) {
+                    (Stage::Asm, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Asm) => {
+                        artifacts.insert(ArtifactKey::Asm, ArtifactValue::Text(text.clone()));
+                    }
+                    (Stage::Obj, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Obj) => {
+                        artifacts.insert(ArtifactKey::Obj, ArtifactValue::Text(text.clone()));
+                    }
+                    (Stage::Run, CapturedStage::Run(run)) => {
+                        insert_run_artifacts(requested, run, &mut artifacts);
+                    }
+                    (stage, CapturedStage::Text(text)) => {
+                        let key = ArtifactKey::Extra(format!("armfortas.{}", stage.as_str()));
+                        if requested.contains(&key) {
+                            artifacts.insert(key, ArtifactValue::Text(text.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(failure) => {
+            compile_exit_code = 1;
+            artifacts.insert(
+                ArtifactKey::Diagnostics,
+                ArtifactValue::Text(failure.detail.clone()),
+            );
+            for (stage, captured) in &failure.stages {
+                match (stage, captured) {
+                    (Stage::Asm, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Asm) => {
+                        artifacts.insert(ArtifactKey::Asm, ArtifactValue::Text(text.clone()));
+                    }
+                    (Stage::Obj, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Obj) => {
+                        artifacts.insert(ArtifactKey::Obj, ArtifactValue::Text(text.clone()));
+                    }
+                    (Stage::Run, CapturedStage::Run(run)) => {
+                        insert_run_artifacts(requested, run, &mut artifacts);
+                    }
+                    (stage, CapturedStage::Text(text)) => {
+                        let key = ArtifactKey::Extra(format!("armfortas.{}", stage.as_str()));
+                        if requested.contains(&key) {
+                            artifacts.insert(key, ArtifactValue::Text(text.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if requested.contains(&ArtifactKey::Executable) && compile_exit_code == 0 {
+        let temp_root = next_observation_temp_root("armfortas", opt_level);
+        fs::create_dir_all(&temp_root)
+            .map_err(|e| format!("cannot create introspection temp dir '{}': {}", temp_root.display(), e))?;
+        let binary = temp_root.join("introspect.out");
+        tools
+            .armfortas_adapters()
+            .compile_output(program, opt_level, EmitMode::Binary, &binary)
+            .map_err(|detail| format!("failed to build armfortas executable artifact:\n{}", detail))?;
+        artifacts.insert(ArtifactKey::Executable, ArtifactValue::Path(binary));
+    }
+
+    let artifacts_captured = artifacts
+        .keys()
+        .map(|artifact| artifact.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    Ok(CompilerObservation {
+        compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+        program: program.to_path_buf(),
+        opt_level,
+        compile_exit_code,
+        artifacts,
+        provenance: ObservationProvenance {
+            compiler_identity: "armfortas".into(),
+            adapter_kind: "named".into(),
+            backend_mode,
+            backend_detail,
+            artifacts_captured,
+            comparison_basis: None,
+        },
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DriverCompileResult {
+    command: String,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    output: PathBuf,
+}
+
+fn observe_external_driver(
+    spec: &CompilerSpec,
+    binary: &str,
+    program: &Path,
+    opt_level: OptLevel,
+    requested: &BTreeSet<ArtifactKey>,
+    uses_cpp: bool,
+    adapter_kind: String,
+    otool: &str,
+    nm: &str,
+) -> Result<CompilerObservation, String> {
+    let temp_root = next_observation_temp_root(&spec.display_name(), opt_level);
+    fs::create_dir_all(&temp_root).map_err(|e| {
+        format!(
+            "cannot create observation temp dir '{}': {}",
+            temp_root.display(),
+            e
+        )
+    })?;
+
+    let needs_runtime = requested.contains(&ArtifactKey::Runtime)
+        || requested.contains(&ArtifactKey::Stdout)
+        || requested.contains(&ArtifactKey::Stderr)
+        || requested.contains(&ArtifactKey::ExitCode)
+        || requested.contains(&ArtifactKey::Executable);
+    let primary_mode = if needs_runtime {
+        DriverEmitMode::Binary
+    } else if requested.contains(&ArtifactKey::Asm) {
+        DriverEmitMode::Asm
+    } else if requested.contains(&ArtifactKey::Obj) {
+        DriverEmitMode::Obj
+    } else {
+        DriverEmitMode::Binary
+    };
+    let primary_name = match primary_mode {
+        DriverEmitMode::Binary => "observe.out",
+        DriverEmitMode::Asm => "observe.s",
+        DriverEmitMode::Obj => "observe.o",
+    };
+    let primary = compile_with_external_driver(
+        binary,
+        program,
+        opt_level,
+        primary_mode,
+        &temp_root.join(primary_name),
+        uses_cpp,
+    )?;
+
+    let mut artifacts = BTreeMap::new();
+    if !primary.stdout.trim().is_empty() || !primary.stderr.trim().is_empty() || primary.exit_code != 0 {
+        let diagnostics = [primary.stdout.trim_end(), primary.stderr.trim_end()]
+            .iter()
+            .filter(|part| !part.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        artifacts.insert(ArtifactKey::Diagnostics, ArtifactValue::Text(diagnostics));
+    }
+
+    let mut compile_exit_code = primary.exit_code;
+    if primary.exit_code == 0 {
+        match primary_mode {
+            DriverEmitMode::Binary => {
+                if requested.contains(&ArtifactKey::Executable) {
+                    artifacts.insert(
+                        ArtifactKey::Executable,
+                        ArtifactValue::Path(primary.output.clone()),
+                    );
+                }
+                if needs_runtime {
+                    let run_command = render_binary_run_command(&primary.output);
+                    let run = run_binary_capture(&primary.output, &temp_root, &run_command)
+                        .map_err(|detail| format!("build: {}\n{}", primary.command, detail))?;
+                    insert_run_artifacts(requested, &run, &mut artifacts);
+                }
+            }
+            DriverEmitMode::Asm if requested.contains(&ArtifactKey::Asm) => {
+                artifacts.insert(
+                    ArtifactKey::Asm,
+                    ArtifactValue::Text(
+                        fs::read_to_string(&primary.output).map_err(|e| {
+                            format!("cannot read asm artifact '{}': {}", primary.output.display(), e)
+                        })?,
+                    ),
+                );
+            }
+            DriverEmitMode::Obj if requested.contains(&ArtifactKey::Obj) => {
+                artifacts.insert(
+                    ArtifactKey::Obj,
+                    ArtifactValue::Text(
+                        object_snapshot_text(&primary.output, otool, nm)
+                            .unwrap_or_else(|_| "object snapshot unavailable".into()),
+                    ),
+                );
+            }
+            _ => {}
+        }
+
+        if requested.contains(&ArtifactKey::Asm) && primary_mode != DriverEmitMode::Asm {
+            let asm = compile_with_external_driver(
+                binary,
+                program,
+                opt_level,
+                DriverEmitMode::Asm,
+                &temp_root.join("observe-extra.s"),
+                uses_cpp,
+            )?;
+            if asm.exit_code != 0 {
+                compile_exit_code = asm.exit_code;
+                artifacts.insert(
+                    ArtifactKey::Diagnostics,
+                    ArtifactValue::Text(asm.stderr.trim_end().to_string()),
+                );
+            } else {
+                artifacts.insert(
+                    ArtifactKey::Asm,
+                    ArtifactValue::Text(fs::read_to_string(&asm.output).map_err(|e| {
+                        format!("cannot read asm artifact '{}': {}", asm.output.display(), e)
+                    })?),
+                );
+            }
+        }
+
+        if requested.contains(&ArtifactKey::Obj) && primary_mode != DriverEmitMode::Obj {
+            let obj = compile_with_external_driver(
+                binary,
+                program,
+                opt_level,
+                DriverEmitMode::Obj,
+                &temp_root.join("observe-extra.o"),
+                uses_cpp,
+            )?;
+            if obj.exit_code != 0 {
+                compile_exit_code = obj.exit_code;
+                artifacts.insert(
+                    ArtifactKey::Diagnostics,
+                    ArtifactValue::Text(obj.stderr.trim_end().to_string()),
+                );
+            } else {
+                artifacts.insert(
+                    ArtifactKey::Obj,
+                    ArtifactValue::Text(
+                        object_snapshot_text(&obj.output, otool, nm)
+                            .unwrap_or_else(|_| "object snapshot unavailable".into()),
+                    ),
+                );
+            }
+        }
+    }
+
+    let artifacts_captured = artifacts
+        .keys()
+        .map(|artifact| artifact.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    Ok(CompilerObservation {
+        compiler: spec.clone(),
+        program: program.to_path_buf(),
+        opt_level,
+        compile_exit_code,
+        artifacts,
+        provenance: ObservationProvenance {
+            compiler_identity: spec.display_name(),
+            adapter_kind,
+            backend_mode: "external-driver".into(),
+            backend_detail: format!("generic external driver adapter using {}", binary),
+            artifacts_captured,
+            comparison_basis: None,
+        },
+    })
+}
+
+fn compile_with_external_driver(
+    binary: &str,
+    source: &Path,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+    uses_cpp: bool,
+) -> Result<DriverCompileResult, String> {
+    let mut args = vec![opt_level.as_flag().to_string()];
+    if uses_cpp {
+        args.push("-cpp".to_string());
+    }
+    match mode {
+        DriverEmitMode::Asm => args.push("-S".to_string()),
+        DriverEmitMode::Obj => args.push("-c".to_string()),
+        DriverEmitMode::Binary => {}
+    }
+    args.push(source.display().to_string());
+    args.push("-o".to_string());
+    args.push(output.display().to_string());
+    let command = render_command(binary, &args);
+    let output_result = Command::new(binary)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("cannot run '{}': {}", binary, e))?;
+    Ok(DriverCompileResult {
+        command,
+        exit_code: output_result.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output_result.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output_result.stderr).into_owned(),
+        output: output.to_path_buf(),
+    })
+}
+
+fn next_observation_temp_root(label: &str, opt_level: OptLevel) -> PathBuf {
+    default_report_root()
+        .join(".tmp")
+        .join(format!(
+            "observe_{}_{}",
+            sanitize_component(label),
+            next_report_suffix(opt_level)
+        ))
+}
+
+fn armfortas_requested_stages(requested: &BTreeSet<ArtifactKey>) -> Result<BTreeSet<Stage>, String> {
+    let mut stages = BTreeSet::new();
+    for artifact in requested {
+        match artifact {
+            ArtifactKey::Asm => {
+                stages.insert(Stage::Asm);
+            }
+            ArtifactKey::Obj => {
+                stages.insert(Stage::Obj);
+            }
+            ArtifactKey::Runtime
+            | ArtifactKey::Stdout
+            | ArtifactKey::Stderr
+            | ArtifactKey::ExitCode => {
+                stages.insert(Stage::Run);
+            }
+            ArtifactKey::Diagnostics | ArtifactKey::Executable => {}
+            ArtifactKey::Extra(name) => {
+                let suffix = name
+                    .strip_prefix("armfortas.")
+                    .ok_or_else(|| format!("unsupported adapter-specific artifact '{}'", name))?;
+                let stage = Stage::parse(suffix)
+                    .ok_or_else(|| format!("unknown armfortas artifact '{}'", name))?;
+                stages.insert(stage);
+            }
+        }
+    }
+    if stages.is_empty() {
+        stages.insert(Stage::Run);
+    }
+    Ok(stages)
+}
+
+fn insert_run_artifacts(
+    requested: &BTreeSet<ArtifactKey>,
+    run: &RunCapture,
+    artifacts: &mut BTreeMap<ArtifactKey, ArtifactValue>,
+) {
+    if requested.contains(&ArtifactKey::Runtime) {
+        artifacts.insert(ArtifactKey::Runtime, ArtifactValue::Run(run.clone()));
+    }
+    if requested.contains(&ArtifactKey::Stdout) {
+        artifacts.insert(ArtifactKey::Stdout, ArtifactValue::Text(run.stdout.clone()));
+    }
+    if requested.contains(&ArtifactKey::Stderr) {
+        artifacts.insert(ArtifactKey::Stderr, ArtifactValue::Text(run.stderr.clone()));
+    }
+    if requested.contains(&ArtifactKey::ExitCode) {
+        artifacts.insert(ArtifactKey::ExitCode, ArtifactValue::Int(run.exit_code));
+    }
+}
+
+fn compare_observations(
+    mut left: CompilerObservation,
+    mut right: CompilerObservation,
+    requested: &BTreeSet<ArtifactKey>,
+) -> ComparisonResult {
+    let basis = format!(
+        "compile-status, diagnostics, runtime{}",
+        if requested.is_empty() {
+            String::new()
+        } else {
+            let extras = requested
+                .iter()
+                .filter(|artifact| !matches!(artifact, ArtifactKey::Diagnostics | ArtifactKey::Runtime))
+                .map(|artifact| artifact.as_str().to_string())
+                .collect::<Vec<_>>();
+            if extras.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", extras.join(", "))
+            }
+        }
+    );
+    left.provenance.comparison_basis = Some(basis.clone());
+    right.provenance.comparison_basis = Some(basis.clone());
+
+    let mut differences = Vec::new();
+    if left.compile_exit_code != right.compile_exit_code {
+        differences.push(ArtifactDifference {
+            artifact: "compile-exit-code".into(),
+            detail: format!(
+                "{}: {}\n{}: {}",
+                left.compiler.display_name(),
+                left.compile_exit_code,
+                right.compiler.display_name(),
+                right.compile_exit_code
+            ),
+        });
+    }
+
+    compare_artifact_text(
+        &left,
+        &right,
+        &ArtifactKey::Diagnostics,
+        "diagnostics",
+        &mut differences,
+    );
+
+    if left.compile_exit_code == 0 && right.compile_exit_code == 0 {
+        if requested.contains(&ArtifactKey::Runtime) {
+            compare_artifact_runtime(&left, &right, &mut differences);
+        }
+        for artifact in requested {
+            match artifact {
+                ArtifactKey::Diagnostics | ArtifactKey::Runtime => {}
+                ArtifactKey::Stdout | ArtifactKey::Stderr | ArtifactKey::Asm | ArtifactKey::Obj => {
+                    compare_artifact_text(&left, &right, artifact, artifact.as_str(), &mut differences);
+                }
+                ArtifactKey::ExitCode => compare_artifact_int(&left, &right, artifact, &mut differences),
+                ArtifactKey::Executable => compare_artifact_path(&left, &right, artifact, &mut differences),
+                ArtifactKey::Extra(_) => {}
+            }
+        }
+    }
+
+    ComparisonResult {
+        left,
+        right,
+        basis,
+        differences,
+    }
+}
+
+fn compare_artifact_text(
+    left: &CompilerObservation,
+    right: &CompilerObservation,
+    artifact: &ArtifactKey,
+    label: &str,
+    differences: &mut Vec<ArtifactDifference>,
+) {
+    let left_text = match left.artifacts.get(artifact) {
+        Some(ArtifactValue::Text(text)) => text.as_str(),
+        _ => "",
+    };
+    let right_text = match right.artifacts.get(artifact) {
+        Some(ArtifactValue::Text(text)) => text.as_str(),
+        _ => "",
+    };
+    if left_text != right_text {
+        differences.push(ArtifactDifference {
+            artifact: label.to_string(),
+            detail: describe_text_difference(
+                left_text,
+                right_text,
+                &left.compiler.display_name(),
+                &right.compiler.display_name(),
+            ),
+        });
+    }
+}
+
+fn compare_artifact_runtime(
+    left: &CompilerObservation,
+    right: &CompilerObservation,
+    differences: &mut Vec<ArtifactDifference>,
+) {
+    let left_run = match left.artifacts.get(&ArtifactKey::Runtime) {
+        Some(ArtifactValue::Run(run)) => Some(run),
+        _ => None,
+    };
+    let right_run = match right.artifacts.get(&ArtifactKey::Runtime) {
+        Some(ArtifactValue::Run(run)) => Some(run),
+        _ => None,
+    };
+    match (left_run, right_run) {
+        (Some(left_run), Some(right_run)) => {
+            if normalize_run_signature(left_run) != normalize_run_signature(right_run) {
+                differences.push(ArtifactDifference {
+                    artifact: "runtime".into(),
+                    detail: describe_run_difference(
+                        left_run,
+                        right_run,
+                        &left.compiler.display_name(),
+                        &right.compiler.display_name(),
+                    ),
+                });
+            }
+        }
+        _ => differences.push(ArtifactDifference {
+            artifact: "runtime".into(),
+            detail: "one side did not produce a runtime result".into(),
+        }),
+    }
+}
+
+fn compare_artifact_int(
+    left: &CompilerObservation,
+    right: &CompilerObservation,
+    artifact: &ArtifactKey,
+    differences: &mut Vec<ArtifactDifference>,
+) {
+    let left_value = match left.artifacts.get(artifact) {
+        Some(ArtifactValue::Int(value)) => Some(*value),
+        _ => None,
+    };
+    let right_value = match right.artifacts.get(artifact) {
+        Some(ArtifactValue::Int(value)) => Some(*value),
+        _ => None,
+    };
+    if left_value != right_value {
+        differences.push(ArtifactDifference {
+            artifact: artifact.as_str().to_string(),
+            detail: format!(
+                "{}: {:?}\n{}: {:?}",
+                left.compiler.display_name(),
+                left_value,
+                right.compiler.display_name(),
+                right_value
+            ),
+        });
+    }
+}
+
+fn compare_artifact_path(
+    left: &CompilerObservation,
+    right: &CompilerObservation,
+    artifact: &ArtifactKey,
+    differences: &mut Vec<ArtifactDifference>,
+) {
+    let left_value = match left.artifacts.get(artifact) {
+        Some(ArtifactValue::Path(path)) => Some(path.display().to_string()),
+        _ => None,
+    };
+    let right_value = match right.artifacts.get(artifact) {
+        Some(ArtifactValue::Path(path)) => Some(path.display().to_string()),
+        _ => None,
+    };
+    if left_value != right_value {
+        differences.push(ArtifactDifference {
+            artifact: artifact.as_str().to_string(),
+            detail: format!(
+                "{}: {:?}\n{}: {:?}",
+                left.compiler.display_name(),
+                left_value,
+                right.compiler.display_name(),
+                right_value
+            ),
+        });
+    }
+}
+
+fn print_compare_result(result: &ComparisonResult) {
+    if result.differences.is_empty() {
+        println!(
+            "MATCH  {} <-> {}",
+            result.left.compiler.display_name(),
+            result.right.compiler.display_name()
+        );
+    } else {
+        println!(
+            "DIFF   {} <-> {}",
+            result.left.compiler.display_name(),
+            result.right.compiler.display_name()
+        );
+        println!("basis: {}", result.basis);
+        for difference in &result.differences {
+            println!();
+            println!("== {} ==", difference.artifact);
+            println!("{}", difference.detail);
+        }
+    }
+}
+
+fn print_introspection(observed: &ObservedProgram) {
+    println!("{}", render_introspection_text(&observed.observation));
+}
+
+fn write_compare_reports(config: &CompareConfig, result: &ComparisonResult) -> Result<(), String> {
+    if let Some(path) = &config.json_report {
+        write_report(path, &render_compare_json(result), "json report")?;
+        println!("json report: {}", path.display());
+    }
+    if let Some(path) = &config.markdown_report {
+        write_report(path, &render_compare_markdown(result), "markdown report")?;
+        println!("markdown report: {}", path.display());
+    }
+    Ok(())
+}
+
+fn write_introspection_reports(
+    config: &IntrospectConfig,
+    observed: &ObservedProgram,
+) -> Result<(), String> {
+    if let Some(path) = &config.json_report {
+        write_report(
+            path,
+            &render_introspection_json(&observed.observation),
+            "json report",
+        )?;
+        println!("json report: {}", path.display());
+    }
+    if let Some(path) = &config.markdown_report {
+        write_report(
+            path,
+            &render_introspection_markdown(&observed.observation),
+            "markdown report",
+        )?;
+        println!("markdown report: {}", path.display());
+    }
+    Ok(())
+}
+
+fn render_introspection_text(observation: &CompilerObservation) -> String {
+    let mut lines = vec![
+        "Introspect".to_string(),
+        format!("  compiler: {}", observation.compiler.display_name()),
+        format!("  program: {}", observation.program.display()),
+        format!("  opt: {}", observation.opt_level.as_str()),
+        format!("  compile_exit_code: {}", observation.compile_exit_code),
+        format!("  adapter_kind: {}", observation.provenance.adapter_kind),
+        format!("  backend_mode: {}", observation.provenance.backend_mode),
+        format!("  backend_detail: {}", observation.provenance.backend_detail),
+    ];
+    if !observation.provenance.artifacts_captured.is_empty() {
+        lines.push(format!(
+            "  artifacts: {}",
+            observation.provenance.artifacts_captured.join(", ")
+        ));
+    }
+
+    for (artifact, value) in &observation.artifacts {
+        lines.push(String::new());
+        lines.push(format!("== {} ==", artifact.as_str()));
+        lines.push(render_artifact_value_text(value));
+    }
+    lines.join("\n")
+}
+
+fn render_compare_json(result: &ComparisonResult) -> String {
+    format!(
+        "{{\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
+        json_escape(&result.basis),
+        render_observation_json(&result.left),
+        render_observation_json(&result.right),
+        render_differences_json(&result.differences)
+    )
+}
+
+fn render_compare_markdown(result: &ComparisonResult) -> String {
+    let mut lines = vec![
+        "# bencch compare report".to_string(),
+        String::new(),
+        format!("basis: {}", result.basis),
+        String::new(),
+        "## Left".to_string(),
+        render_observation_markdown(&result.left),
+        String::new(),
+        "## Right".to_string(),
+        render_observation_markdown(&result.right),
+        String::new(),
+        "## Differences".to_string(),
+    ];
+    if result.differences.is_empty() {
+        lines.push("none".to_string());
+    } else {
+        for difference in &result.differences {
+            lines.push(String::new());
+            lines.push(format!("### `{}`", difference.artifact));
+            lines.push("```text".to_string());
+            lines.extend(difference.detail.lines().map(|line| line.to_string()));
+            lines.push("```".to_string());
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+fn render_introspection_json(observation: &CompilerObservation) -> String {
+    format!("{}\n", render_observation_json(observation))
+}
+
+fn render_introspection_markdown(observation: &CompilerObservation) -> String {
+    format!(
+        "# bencch introspect report\n\n{}\n",
+        render_observation_markdown(observation)
+    )
+}
+
+fn render_observation_json(observation: &CompilerObservation) -> String {
+    let mut lines = vec![
+        "{".to_string(),
+        format!(
+            "  \"compiler\": \"{}\",",
+            json_escape(&observation.compiler.display_name())
+        ),
+        format!(
+            "  \"program\": \"{}\",",
+            json_escape(&observation.program.display().to_string())
+        ),
+        format!("  \"opt\": \"{}\",", observation.opt_level.as_str()),
+        format!(
+            "  \"compile_exit_code\": {},",
+            observation.compile_exit_code
+        ),
+        "  \"provenance\": {".to_string(),
+        format!(
+            "    \"compiler_identity\": \"{}\",",
+            json_escape(&observation.provenance.compiler_identity)
+        ),
+        format!(
+            "    \"adapter_kind\": \"{}\",",
+            json_escape(&observation.provenance.adapter_kind)
+        ),
+        format!(
+            "    \"backend_mode\": \"{}\",",
+            json_escape(&observation.provenance.backend_mode)
+        ),
+        format!(
+            "    \"backend_detail\": \"{}\",",
+            json_escape(&observation.provenance.backend_detail)
+        ),
+        format!(
+            "    \"artifacts_captured\": {},",
+            json_string_array(&observation.provenance.artifacts_captured)
+        ),
+        match &observation.provenance.comparison_basis {
+            Some(basis) => format!("    \"comparison_basis\": \"{}\"", json_escape(basis)),
+            None => "    \"comparison_basis\": null".to_string(),
+        },
+        "  },".to_string(),
+        "  \"artifacts\": {".to_string(),
+    ];
+    for (index, (artifact, value)) in observation.artifacts.iter().enumerate() {
+        lines.push(format!(
+            "    \"{}\": {}{}",
+            json_escape(artifact.as_str()),
+            render_artifact_value_json(value),
+            if index + 1 == observation.artifacts.len() {
+                ""
+            } else {
+                ","
+            }
+        ));
+    }
+    lines.push("  }".to_string());
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+fn render_observation_markdown(observation: &CompilerObservation) -> String {
+    let mut lines = vec![
+        format!("compiler: `{}`", observation.compiler.display_name()),
+        format!("program: `{}`", observation.program.display()),
+        format!("opt: `{}`", observation.opt_level.as_str()),
+        format!("compile_exit_code: `{}`", observation.compile_exit_code),
+        format!("adapter_kind: `{}`", observation.provenance.adapter_kind),
+        format!("backend_mode: `{}`", observation.provenance.backend_mode),
+        format!("backend_detail: {}", observation.provenance.backend_detail),
+    ];
+    if !observation.provenance.artifacts_captured.is_empty() {
+        lines.push(format!(
+            "artifacts: `{}`",
+            observation.provenance.artifacts_captured.join("`, `")
+        ));
+    }
+    for (artifact, value) in &observation.artifacts {
+        lines.push(String::new());
+        lines.push(format!("## `{}`", artifact.as_str()));
+        lines.push("```text".to_string());
+        lines.extend(render_artifact_value_text(value).lines().map(|line| line.to_string()));
+        lines.push("```".to_string());
+    }
+    lines.join("\n")
+}
+
+fn render_differences_json(differences: &[ArtifactDifference]) -> String {
+    let mut rendered = String::from("[");
+    for (index, difference) in differences.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&format!(
+            "{{\"artifact\":\"{}\",\"detail\":\"{}\"}}",
+            json_escape(&difference.artifact),
+            json_escape(&difference.detail)
+        ));
+    }
+    rendered.push(']');
+    rendered
+}
+
+fn render_artifact_value_json(value: &ArtifactValue) -> String {
+    match value {
+        ArtifactValue::Text(text) => format!("{{\"kind\":\"text\",\"value\":\"{}\"}}", json_escape(text)),
+        ArtifactValue::Int(value) => format!("{{\"kind\":\"int\",\"value\":{}}}", value),
+        ArtifactValue::Run(run) => format!(
+            "{{\"kind\":\"runtime\",\"exit_code\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}",
+            run.exit_code,
+            json_escape(&run.stdout),
+            json_escape(&run.stderr)
+        ),
+        ArtifactValue::Path(path) => format!(
+            "{{\"kind\":\"path\",\"value\":\"{}\"}}",
+            json_escape(&path.display().to_string())
+        ),
+    }
+}
+
+fn render_artifact_value_text(value: &ArtifactValue) -> String {
+    match value {
+        ArtifactValue::Text(text) => text.trim_end().to_string(),
+        ArtifactValue::Int(value) => value.to_string(),
+        ArtifactValue::Run(run) => format_run_capture(run),
+        ArtifactValue::Path(path) => path.display().to_string(),
+    }
 }
 
 fn default_suite_root() -> PathBuf {
@@ -796,6 +1988,23 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
     ));
     lines.push(
         "  primary_backend_selection: observable backend is selected for asm/obj/run-only cells when the armfortas CLI is external and the case does not require expect-fail or capture-consistency semantics; otherwise full backend"
+            .to_string(),
+    );
+    lines.push(format!(
+        "  named_compiler.armfortas: cli={} capture={}",
+        armfortas.cli_mode_name(),
+        armfortas.capture_mode_name()
+    ));
+    lines.push(format!(
+        "  named_compiler.gfortran: {}",
+        tool_probe_status(&config.tools.gfortran, false)
+    ));
+    lines.push(format!(
+        "  named_compiler.flang-new: {}",
+        tool_probe_status(&config.tools.flang_new, false)
+    ));
+    lines.push(
+        "  explicit_compiler_path: any filesystem path passed to compare/introspect uses the generic external-driver adapter"
             .to_string(),
     );
     lines.push(format!(
@@ -5729,6 +6938,61 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn compare_uses_generic_external_driver_observations() {
+        let root = std::env::temp_dir().join("bencch_compare_fake_compilers");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let source = root.join("demo.f90");
+        fs::write(&source, "program demo\nprint *, 42\nend program\n").unwrap();
+
+        let compiler_a = root.join("fake-a");
+        let compiler_b = root.join("fake-b");
+        fs::write(
+            &compiler_a,
+            "#!/bin/sh\nmode=bin\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -S)\n      mode=asm\n      shift\n      ;;\n    -c)\n      mode=obj\n      shift\n      ;;\n    -o)\n      out=\"$2\"\n      shift 2\n      ;;\n    *)\n      shift\n      ;;\n  esac\ndone\nif [ \"$mode\" = asm ]; then\n  cat > \"$out\" <<'EOF'\n.globl _main\n_main:\n  ret\nEOF\nelif [ \"$mode\" = obj ]; then\n  printf 'fake object a\\n' > \"$out\"\nelse\n  cat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '42\\n'\nEOF\n  chmod +x \"$out\"\nfi\n",
+        )
+        .unwrap();
+        fs::write(
+            &compiler_b,
+            "#!/bin/sh\nmode=bin\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -S)\n      mode=asm\n      shift\n      ;;\n    -c)\n      mode=obj\n      shift\n      ;;\n    -o)\n      out=\"$2\"\n      shift 2\n      ;;\n    *)\n      shift\n      ;;\n  esac\ndone\nif [ \"$mode\" = asm ]; then\n  cat > \"$out\" <<'EOF'\n.arch armv8.5-a\n.globl _main\n_main:\n  ret\nEOF\nelif [ \"$mode\" = obj ]; then\n  printf 'fake object b\\n' > \"$out\"\nelse\n  cat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '41\\n'\nEOF\n  chmod +x \"$out\"\nfi\n",
+        )
+        .unwrap();
+
+        for compiler in [&compiler_a, &compiler_b] {
+            let mut perms = fs::metadata(compiler).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(compiler, perms).unwrap();
+        }
+
+        let config = CompareConfig {
+            left: CompilerSpec::Binary(compiler_a.clone()),
+            right: CompilerSpec::Binary(compiler_b.clone()),
+            program: source.clone(),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([ArtifactKey::Asm]),
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let result = run_compare(&config).unwrap();
+        assert_eq!(result.left.provenance.backend_mode, "external-driver");
+        assert_eq!(result.right.provenance.backend_mode, "external-driver");
+        assert!(result
+            .differences
+            .iter()
+            .any(|difference| difference.artifact == "runtime"));
+        assert!(result
+            .differences
+            .iter()
+            .any(|difference| difference.artifact == "asm"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn parses_suite_and_case() {
         let root = std::env::temp_dir().join("afs_tests_parser_spec.afs");
@@ -5968,6 +7232,87 @@ end
         assert_eq!(config.tools.system_as, "/tmp/as");
         assert_eq!(config.tools.otool, "/tmp/otool");
         assert_eq!(config.tools.nm, "/tmp/nm");
+    }
+
+    #[test]
+    fn parse_cli_collects_compare_config() {
+        let args = vec![
+            "compare".to_string(),
+            "armfortas".to_string(),
+            "/tmp/other-compiler".to_string(),
+            "--program".to_string(),
+            "/tmp/demo.f90".to_string(),
+            "--opt".to_string(),
+            "O2".to_string(),
+            "--artifact".to_string(),
+            "asm,obj".to_string(),
+            "--json-report".to_string(),
+            "/tmp/compare.json".to_string(),
+            "--markdown-report".to_string(),
+            "/tmp/compare.md".to_string(),
+        ];
+
+        let command = parse_cli(&args).unwrap();
+        let config = match command {
+            CommandKind::Compare(config) => config,
+            other => panic!(
+                "expected compare command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        assert_eq!(config.left, CompilerSpec::Named(NamedCompiler::Armfortas));
+        assert_eq!(
+            config.right,
+            CompilerSpec::Binary(PathBuf::from("/tmp/other-compiler"))
+        );
+        assert_eq!(config.program, PathBuf::from("/tmp/demo.f90"));
+        assert_eq!(config.opt_level, OptLevel::O2);
+        assert!(config.artifacts.contains(&ArtifactKey::Asm));
+        assert!(config.artifacts.contains(&ArtifactKey::Obj));
+        assert_eq!(
+            config.json_report.as_deref(),
+            Some(Path::new("/tmp/compare.json"))
+        );
+        assert_eq!(
+            config.markdown_report.as_deref(),
+            Some(Path::new("/tmp/compare.md"))
+        );
+    }
+
+    #[test]
+    fn parse_cli_collects_introspect_config() {
+        let args = vec![
+            "introspect".to_string(),
+            "armfortas".to_string(),
+            "/tmp/demo.f90".to_string(),
+            "--artifact".to_string(),
+            "armfortas.ir,asm".to_string(),
+            "--all".to_string(),
+            "--json-report".to_string(),
+            "/tmp/introspect.json".to_string(),
+        ];
+
+        let command = parse_cli(&args).unwrap();
+        let config = match command {
+            CommandKind::Introspect(config) => config,
+            other => panic!(
+                "expected introspect command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        assert_eq!(config.compiler, CompilerSpec::Named(NamedCompiler::Armfortas));
+        assert_eq!(config.program, PathBuf::from("/tmp/demo.f90"));
+        assert!(config.artifacts.contains(&ArtifactKey::Asm));
+        assert!(config
+            .artifacts
+            .contains(&ArtifactKey::Extra("armfortas.ir".into())));
+        assert!(config.all_artifacts);
+        assert_eq!(
+            config.json_report.as_deref(),
+            Some(Path::new("/tmp/introspect.json"))
+        );
     }
 
     #[test]
@@ -6462,6 +7807,69 @@ end
     }
 
     #[test]
+    fn render_generic_reports_include_provenance() {
+        let observation = CompilerObservation {
+            compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 0,
+            artifacts: BTreeMap::from([
+                (
+                    ArtifactKey::Asm,
+                    ArtifactValue::Text(".globl _main\n".into()),
+                ),
+                (
+                    ArtifactKey::Extra("armfortas.ir".into()),
+                    ArtifactValue::Text("module main".into()),
+                ),
+            ]),
+            provenance: ObservationProvenance {
+                compiler_identity: "armfortas".into(),
+                adapter_kind: "named".into(),
+                backend_mode: "linked".into(),
+                backend_detail: "linked armfortas::testing capture adapter".into(),
+                artifacts_captured: vec!["asm".into(), "armfortas.ir".into()],
+                comparison_basis: None,
+            },
+        };
+        let compare = ComparisonResult {
+            left: observation.clone(),
+            right: CompilerObservation {
+                compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+                program: PathBuf::from("demo.f90"),
+                opt_level: OptLevel::O0,
+                compile_exit_code: 0,
+                artifacts: BTreeMap::from([(
+                    ArtifactKey::Asm,
+                    ArtifactValue::Text(".arch armv8.5-a".into()),
+                )]),
+                provenance: ObservationProvenance {
+                    compiler_identity: "gfortran".into(),
+                    adapter_kind: "named".into(),
+                    backend_mode: "external-driver".into(),
+                    backend_detail: "generic external driver adapter using gfortran".into(),
+                    artifacts_captured: vec!["asm".into()],
+                    comparison_basis: Some("compile-status, diagnostics, runtime, asm".into()),
+                },
+            },
+            basis: "compile-status, diagnostics, runtime, asm".into(),
+            differences: vec![ArtifactDifference {
+                artifact: "asm".into(),
+                detail: "first differing line: 1".into(),
+            }],
+        };
+
+        let introspection_json = render_introspection_json(&observation);
+        assert!(introspection_json.contains("\"backend_mode\": \"linked\""));
+        assert!(introspection_json.contains("\"armfortas.ir\""));
+
+        let compare_markdown = render_compare_markdown(&compare);
+        assert!(compare_markdown.contains("# bencch compare report"));
+        assert!(compare_markdown.contains("backend_mode: `external-driver`"));
+        assert!(compare_markdown.contains("### `asm`"));
+    }
+
+    #[test]
     fn write_requested_reports_emits_files() {
         let root = std::env::temp_dir().join("afs_tests_report_output");
         let _ = fs::remove_dir_all(&root);
@@ -6542,6 +7950,11 @@ end
         ));
         assert!(rendered.contains(
             "primary_backend_selection: observable backend is selected for asm/obj/run-only cells"
+        ));
+        assert!(rendered.contains("named_compiler.armfortas: cli=external capture=linked"));
+        assert!(rendered.contains("named_compiler.gfortran:"));
+        assert!(rendered.contains(
+            "explicit_compiler_path: any filesystem path passed to compare/introspect uses the generic external-driver adapter"
         ));
         assert!(rendered.contains(&format!(
             "configured={} resolved={}",
