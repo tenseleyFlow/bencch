@@ -31,3 +31,8 @@ early submodule probe, plus visibility, fan-in, re-export, and diamond-style
 dependency graph families, along with rename-across-hop export-surface probes
 and mixed-ONLY/collision graph shapes. Larger layered graphs with reused
 dependencies and multiple consumer leaves live there now too.
+
+Sprint 10 adds `fixtures/fake_compilers/` for stable compare-mode coverage.
+Those scripts let `bencch compare` exercise compile failures, runtime
+divergence, and artifact differences without depending on whichever real
+toolchains happen to be installed on a machine.
