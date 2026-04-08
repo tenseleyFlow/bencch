@@ -5066,6 +5066,7 @@ fn write_failure_bundle(
     let armfortas_root = bundle_root.join("armfortas");
     fs::create_dir_all(&armfortas_root)
         .map_err(|e| format!("cannot create armfortas bundle dir: {}", e))?;
+    write_armfortas_bundle_metadata(&armfortas_root, outcome, artifacts)?;
     if let Some(result) = &artifacts.armfortas {
         write_capture_result(&armfortas_root, result)?;
     }
@@ -5092,6 +5093,50 @@ fn write_failure_bundle(
     }
 
     Ok(bundle_root)
+}
+
+fn write_armfortas_bundle_metadata(
+    armfortas_root: &Path,
+    outcome: &Outcome,
+    artifacts: &ExecutionArtifacts,
+) -> Result<(), String> {
+    let primary_backend_kind = outcome
+        .primary_backend
+        .as_ref()
+        .map(|backend| backend.kind.as_str())
+        .unwrap_or("none");
+    let primary_backend_mode = outcome
+        .primary_backend
+        .as_ref()
+        .map(|backend| backend.mode.as_str())
+        .unwrap_or("none");
+    let primary_backend_detail = outcome
+        .primary_backend
+        .as_ref()
+        .map(|backend| backend.detail.as_str())
+        .unwrap_or("none");
+    let captured_stages = if let Some(result) = &artifacts.armfortas {
+        join_or_none(&result.stages.keys().map(Stage::as_str).collect::<Vec<_>>())
+    } else if let Some(failure) = &artifacts.armfortas_failure {
+        join_or_none(&failure.stages.keys().map(Stage::as_str).collect::<Vec<_>>())
+    } else {
+        "none".to_string()
+    };
+    let error_stage = artifacts
+        .armfortas_failure
+        .as_ref()
+        .map(|failure| failure.stage.as_str())
+        .unwrap_or("none");
+    let metadata = format!(
+        "primary_backend_kind: {}\nprimary_backend_mode: {}\nprimary_backend_detail: {}\ncaptured_stages: {}\nerror_stage: {}\n",
+        primary_backend_kind,
+        primary_backend_mode,
+        primary_backend_detail,
+        captured_stages,
+        error_stage
+    );
+    fs::write(armfortas_root.join("metadata.txt"), metadata)
+        .map_err(|e| format!("cannot write armfortas bundle metadata: {}", e))
 }
 
 fn write_case_sources_bundle(
@@ -6158,6 +6203,7 @@ end
         assert!(bundle.join("detail.txt").exists());
         assert!(bundle.join("source.f90").exists());
         assert!(bundle.join("armfortas").join("ir.txt").exists());
+        assert!(bundle.join("armfortas").join("metadata.txt").exists());
         assert!(bundle.join("armfortas").join("run.stdout.txt").exists());
         assert!(bundle.join("armfortas").join("error.txt").exists());
         assert!(bundle
@@ -6172,6 +6218,14 @@ end
         assert!(
             metadata.contains("primary_backend_detail: linked armfortas::testing capture adapter")
         );
+        let armfortas_metadata =
+            fs::read_to_string(bundle.join("armfortas").join("metadata.txt")).unwrap();
+        assert!(armfortas_metadata.contains("primary_backend_kind: full"));
+        assert!(armfortas_metadata.contains("primary_backend_mode: linked"));
+        assert!(armfortas_metadata
+            .contains("primary_backend_detail: linked armfortas::testing capture adapter"));
+        assert!(armfortas_metadata.contains("captured_stages: ir, run"));
+        assert!(armfortas_metadata.contains("error_stage: sema"));
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
         assert!(consistency_summary.contains("issue_count: 2"));
