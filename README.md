@@ -1,33 +1,32 @@
 # bencch
 
-Compiler bench for `armfortas`.
+Generic compiler bench, with `armfortas` as the first rich adapter.
 
 This repo holds:
 
 - `bench-core/` — bench-owned compiler-facing types
-- `bench/` — the `afs-tests` runner
+- `bench/` — the `bencch` / `afs-tests` runner
 - `suites/` — authored bench suites
 - `fixtures/` — reusable fixture programs
 - `reports/` — failure and consistency bundles
 
 ## Current Setup
 
-`bencch` now has its own workspace manifest, so you can run it from the
-`bencch/` repo root.
+`bencch` now has its own workspace manifest and public CLI.
 
 Today it is still wired to a surrounding `armfortas` checkout for linked
 capture. CLI-side compiler and tool paths are overridable now; linked capture
 still comes from the surrounding workspace. That linked compiler surface is
 currently isolated in `bench/src/compiler.rs`, and the bench-owned
-compiler-facing types now live in `bench-core/`. `afs-tests doctor` reports
-the CLI adapter and capture adapter separately so the current boundary is
-obvious. CLI-observable cases using `asm`, `obj`, and `run` can already use an
-external `armfortas` binary as the primary execution path; richer stage capture
-is still linked.
+compiler-facing types now live in `bench-core/`. `bencch doctor` reports
+named-adapter resolution, generic external-driver posture, and the linked
+capture boundary. CLI-observable cases using `asm`, `obj`, and `run` can
+already use an external `armfortas` binary as the primary execution path;
+richer stage capture is still linked.
 
 ```bash
-cargo run -p afs-tests -- list
-cargo run -p afs-tests -- run --suite frontend
+cargo run -p afs-tests --bin bencch -- list
+cargo run -p afs-tests --bin bencch -- run --suite frontend
 ```
 
 Standalone compiler adapters are not finished yet.
@@ -37,61 +36,85 @@ Standalone compiler adapters are not finished yet.
 List suites:
 
 ```bash
-cargo run -p afs-tests -- list
+cargo run -p afs-tests --bin bencch -- list
 ```
 
 Run one suite family:
 
 ```bash
-cargo run -p afs-tests -- run --suite consistency/runtime
+cargo run -p afs-tests --bin bencch -- run --suite consistency/runtime
 ```
 
 Inspect the current embedded/standalone posture:
 
 ```bash
-cargo run -p afs-tests -- doctor
+cargo run -p afs-tests --bin bencch -- doctor
+```
+
+Compare two compilers on one program:
+
+```bash
+cargo run -p afs-tests --bin bencch -- compare armfortas gfortran --program fixtures/runtime/mixed_types.f90
+```
+
+Compare with an extra artifact diff:
+
+```bash
+cargo run -p afs-tests --bin bencch -- compare armfortas gfortran --program fixtures/runtime/mixed_types.f90 --artifact asm
+```
+
+Introspect one compiler on one program:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/mixed_types.f90
+```
+
+Introspect a rich armfortas stage explicitly:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/mixed_types.f90 --artifact armfortas.ir,asm
 ```
 
 Run against an explicit compiler binary:
 
 ```bash
-cargo run -p afs-tests -- run --suite consistency/runtime-control-flow --armfortas-bin ./target/debug/armfortas
+cargo run -p afs-tests --bin bencch -- run --suite consistency/runtime-control-flow --armfortas-bin ./target/debug/armfortas
 ```
 
 Run an asm/object surface through an explicit compiler binary:
 
 ```bash
-cargo run -p afs-tests -- run --suite backend/asm --case runtime_wrapper_and_calls --armfortas-bin ./target/debug/armfortas
+cargo run -p afs-tests --bin bencch -- run --suite backend/asm --case runtime_wrapper_and_calls --armfortas-bin ./target/debug/armfortas
 ```
 
 Run differential checks with explicit reference compiler paths:
 
 ```bash
-cargo run -p afs-tests -- run --suite differential/runtime-control-flow --gfortran-bin /opt/homebrew/bin/gfortran --flang-bin /opt/homebrew/bin/flang-new
+cargo run -p afs-tests --bin bencch -- run --suite differential/runtime-control-flow --gfortran-bin /opt/homebrew/bin/gfortran --flang-bin /opt/homebrew/bin/flang-new
 ```
 
 Run one case with full stage capture:
 
 ```bash
-cargo run -p afs-tests -- run --suite frontend --case stage_walk --all --verbose
+cargo run -p afs-tests --bin bencch -- run --suite frontend --case stage_walk --all --verbose
 ```
 
 Write machine-readable reports:
 
 ```bash
-cargo run -p afs-tests -- run --suite modules --all --json-report reports/modules.json --markdown-report reports/modules.md
+cargo run -p afs-tests --bin bencch -- run --suite modules --all --json-report reports/modules.json --markdown-report reports/modules.md
 ```
 
 Run consistency coverage:
 
 ```bash
-cargo run -p afs-tests -- run --suite consistency --all
+cargo run -p afs-tests --bin bencch -- run --suite consistency --all
 ```
 
 Run differential coverage:
 
 ```bash
-cargo run -p afs-tests -- run --suite differential
+cargo run -p afs-tests --bin bencch -- run --suite differential
 ```
 
 Reports are written under `reports/`.
@@ -99,12 +122,12 @@ Reports are written under `reports/`.
 Environment overrides work too:
 
 ```bash
-BENCCH_ARMFORTAS_BIN=./target/debug/armfortas cargo run -p afs-tests -- run --suite consistency/object
+BENCCH_ARMFORTAS_BIN=./target/debug/armfortas cargo run -p afs-tests --bin bencch -- run --suite consistency/object
 ```
 
 Backend choice is visible in:
 
-- `cargo run -p afs-tests -- doctor`
+- `cargo run -p afs-tests --bin bencch -- doctor`
 - `--verbose` case runs
 - JSON and Markdown reports as `primary_backend`
 - bundle `metadata.txt` and `armfortas/metadata.txt`
@@ -157,9 +180,14 @@ Common things the runner understands:
 - consistency checks like `cli_obj_vs_system_as` and `capture_run_reproducible`
 - report outputs like `--json-report path/to/report.json` and `--markdown-report path/to/report.md`
 - environment and adapter inspection with `doctor`
+- direct one-shot compare with `compare`
+- direct one-shot artifact/stage inspection with `introspect`
 
 ## Notes
 
 - `.docs/` is local and gitignored.
+- `bencch` is now the public CLI story; `afs-tests` remains as a compatibility
+  alias.
+- The product is now centered on `compare`, `introspect`, `run`, and `doctor`.
 - The runner is currently strongest on stage capture, differential behavior,
   and consistency work around reproducibility and cross-path mismatches.
