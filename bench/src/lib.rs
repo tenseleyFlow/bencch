@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::compiler::{
+    object_snapshot_text, ArmfortasAdapters, ArmfortasCliAdapter, CaptureBackend, CaptureFailure,
+    CaptureRequest, CaptureResult, CapturedStage, CliObservableCaptureBackend, EmitMode,
+    FailureStage, OptLevel, RunCapture, Stage,
+};
 use bencch_core::{
     ArtifactDifference, ArtifactKey, ArtifactValue, ComparisonResult, CompilerObservation,
     CompilerSpec, NamedCompiler, ObservationProvenance,
-};
-use crate::compiler::{
-    ArmfortasAdapters, ArmfortasCliAdapter, CaptureBackend, CaptureFailure, CaptureRequest,
-    CaptureResult, CapturedStage, CliObservableCaptureBackend, EmitMode, FailureStage, OptLevel,
-    RunCapture, Stage, object_snapshot_text,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -914,7 +914,7 @@ fn print_usage(program_name: &str) {
         program_name
     );
     eprintln!(
-        "  {} compare <compiler-a> <compiler-b> --program <path> [--opt <O0>] [--artifact <asm,obj>] [--json-report <path>] [--markdown-report <path>] [tool overrides]",
+        "  {} compare <compiler-a> <compiler-b> --program <path> [--opt <O0>] [--artifact <asm,obj,stdout,stderr,exit-code,executable>] [--json-report <path>] [--markdown-report <path>] [tool overrides]",
         program_name
     );
     eprintln!(
@@ -969,9 +969,20 @@ fn default_introspection_artifacts(
 
 fn run_compare(config: &CompareConfig) -> Result<ComparisonResult, String> {
     let requested = default_compare_artifacts(&config.artifacts);
-    let left = observe_compiler(&config.left, &config.program, config.opt_level, &requested, &config.tools)?;
-    let right =
-        observe_compiler(&config.right, &config.program, config.opt_level, &requested, &config.tools)?;
+    let left = observe_compiler(
+        &config.left,
+        &config.program,
+        config.opt_level,
+        &requested,
+        &config.tools,
+    )?;
+    let right = observe_compiler(
+        &config.right,
+        &config.program,
+        config.opt_level,
+        &requested,
+        &config.tools,
+    )?;
     Ok(compare_observations(left, right, &requested))
 }
 
@@ -981,7 +992,10 @@ fn run_introspect(config: &IntrospectConfig) -> Result<ObservedProgram, String> 
     } else {
         let mut requested = config.artifacts.clone();
         if config.all_artifacts
-            && matches!(config.compiler, CompilerSpec::Named(NamedCompiler::Armfortas))
+            && matches!(
+                config.compiler,
+                CompilerSpec::Named(NamedCompiler::Armfortas)
+            )
         {
             requested.extend(default_introspection_artifacts(&config.compiler, true));
         }
@@ -1010,9 +1024,9 @@ fn observe_compiler(
             observe_armfortas(program, opt_level, requested, tools)
         }
         CompilerSpec::Named(named) => {
-            let binary = tools
-                .named_compiler_binary(*named)
-                .ok_or_else(|| format!("named compiler '{}' has no resolved binary", named.as_str()))?;
+            let binary = tools.named_compiler_binary(*named).ok_or_else(|| {
+                format!("named compiler '{}' has no resolved binary", named.as_str())
+            })?;
             observe_external_driver(
                 spec,
                 &binary,
@@ -1090,10 +1104,14 @@ fn observe_armfortas(
         Ok(result) => {
             for (stage, captured) in &result.stages {
                 match (stage, captured) {
-                    (Stage::Asm, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Asm) => {
+                    (Stage::Asm, CapturedStage::Text(text))
+                        if requested.contains(&ArtifactKey::Asm) =>
+                    {
                         artifacts.insert(ArtifactKey::Asm, ArtifactValue::Text(text.clone()));
                     }
-                    (Stage::Obj, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Obj) => {
+                    (Stage::Obj, CapturedStage::Text(text))
+                        if requested.contains(&ArtifactKey::Obj) =>
+                    {
                         artifacts.insert(ArtifactKey::Obj, ArtifactValue::Text(text.clone()));
                     }
                     (Stage::Run, CapturedStage::Run(run)) => {
@@ -1117,10 +1135,14 @@ fn observe_armfortas(
             );
             for (stage, captured) in &failure.stages {
                 match (stage, captured) {
-                    (Stage::Asm, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Asm) => {
+                    (Stage::Asm, CapturedStage::Text(text))
+                        if requested.contains(&ArtifactKey::Asm) =>
+                    {
                         artifacts.insert(ArtifactKey::Asm, ArtifactValue::Text(text.clone()));
                     }
-                    (Stage::Obj, CapturedStage::Text(text)) if requested.contains(&ArtifactKey::Obj) => {
+                    (Stage::Obj, CapturedStage::Text(text))
+                        if requested.contains(&ArtifactKey::Obj) =>
+                    {
                         artifacts.insert(ArtifactKey::Obj, ArtifactValue::Text(text.clone()));
                     }
                     (Stage::Run, CapturedStage::Run(run)) => {
@@ -1140,13 +1162,20 @@ fn observe_armfortas(
 
     if requested.contains(&ArtifactKey::Executable) && compile_exit_code == 0 {
         let temp_root = next_observation_temp_root("armfortas", opt_level);
-        fs::create_dir_all(&temp_root)
-            .map_err(|e| format!("cannot create introspection temp dir '{}': {}", temp_root.display(), e))?;
+        fs::create_dir_all(&temp_root).map_err(|e| {
+            format!(
+                "cannot create introspection temp dir '{}': {}",
+                temp_root.display(),
+                e
+            )
+        })?;
         let binary = temp_root.join("introspect.out");
         tools
             .armfortas_adapters()
             .compile_output(program, opt_level, EmitMode::Binary, &binary)
-            .map_err(|detail| format!("failed to build armfortas executable artifact:\n{}", detail))?;
+            .map_err(|detail| {
+                format!("failed to build armfortas executable artifact:\n{}", detail)
+            })?;
         artifacts.insert(ArtifactKey::Executable, ArtifactValue::Path(binary));
     }
 
@@ -1230,7 +1259,10 @@ fn observe_external_driver(
     )?;
 
     let mut artifacts = BTreeMap::new();
-    if !primary.stdout.trim().is_empty() || !primary.stderr.trim().is_empty() || primary.exit_code != 0 {
+    if !primary.stdout.trim().is_empty()
+        || !primary.stderr.trim().is_empty()
+        || primary.exit_code != 0
+    {
         let diagnostics = [primary.stdout.trim_end(), primary.stderr.trim_end()]
             .iter()
             .filter(|part| !part.is_empty())
@@ -1260,11 +1292,13 @@ fn observe_external_driver(
             DriverEmitMode::Asm if requested.contains(&ArtifactKey::Asm) => {
                 artifacts.insert(
                     ArtifactKey::Asm,
-                    ArtifactValue::Text(
-                        fs::read_to_string(&primary.output).map_err(|e| {
-                            format!("cannot read asm artifact '{}': {}", primary.output.display(), e)
-                        })?,
-                    ),
+                    ArtifactValue::Text(fs::read_to_string(&primary.output).map_err(|e| {
+                        format!(
+                            "cannot read asm artifact '{}': {}",
+                            primary.output.display(),
+                            e
+                        )
+                    })?),
                 );
             }
             DriverEmitMode::Obj if requested.contains(&ArtifactKey::Obj) => {
@@ -1388,16 +1422,16 @@ fn compile_with_external_driver(
 }
 
 fn next_observation_temp_root(label: &str, opt_level: OptLevel) -> PathBuf {
-    default_report_root()
-        .join(".tmp")
-        .join(format!(
-            "observe_{}_{}",
-            sanitize_component(label),
-            next_report_suffix(opt_level)
-        ))
+    default_report_root().join(".tmp").join(format!(
+        "observe_{}_{}",
+        sanitize_component(label),
+        next_report_suffix(opt_level)
+    ))
 }
 
-fn armfortas_requested_stages(requested: &BTreeSet<ArtifactKey>) -> Result<BTreeSet<Stage>, String> {
+fn armfortas_requested_stages(
+    requested: &BTreeSet<ArtifactKey>,
+) -> Result<BTreeSet<Stage>, String> {
     let mut stages = BTreeSet::new();
     for artifact in requested {
         match artifact {
@@ -1461,7 +1495,9 @@ fn compare_observations(
         } else {
             let extras = requested
                 .iter()
-                .filter(|artifact| !matches!(artifact, ArtifactKey::Diagnostics | ArtifactKey::Runtime))
+                .filter(|artifact| {
+                    !matches!(artifact, ArtifactKey::Diagnostics | ArtifactKey::Runtime)
+                })
                 .map(|artifact| artifact.as_str().to_string())
                 .collect::<Vec<_>>();
             if extras.is_empty() {
@@ -1504,10 +1540,20 @@ fn compare_observations(
             match artifact {
                 ArtifactKey::Diagnostics | ArtifactKey::Runtime => {}
                 ArtifactKey::Stdout | ArtifactKey::Stderr | ArtifactKey::Asm | ArtifactKey::Obj => {
-                    compare_artifact_text(&left, &right, artifact, artifact.as_str(), &mut differences);
+                    compare_artifact_text(
+                        &left,
+                        &right,
+                        artifact,
+                        artifact.as_str(),
+                        &mut differences,
+                    );
                 }
-                ArtifactKey::ExitCode => compare_artifact_int(&left, &right, artifact, &mut differences),
-                ArtifactKey::Executable => compare_artifact_path(&left, &right, artifact, &mut differences),
+                ArtifactKey::ExitCode => {
+                    compare_artifact_int(&left, &right, artifact, &mut differences)
+                }
+                ArtifactKey::Executable => {
+                    compare_artifact_path(&left, &right, artifact, &mut differences)
+                }
                 ArtifactKey::Extra(_) => {}
             }
         }
@@ -1639,26 +1685,50 @@ fn compare_artifact_path(
     }
 }
 
-fn print_compare_result(result: &ComparisonResult) {
+fn compare_status(result: &ComparisonResult) -> &'static str {
     if result.differences.is_empty() {
-        println!(
-            "MATCH  {} <-> {}",
-            result.left.compiler.display_name(),
-            result.right.compiler.display_name()
-        );
+        "match"
     } else {
-        println!(
-            "DIFF   {} <-> {}",
-            result.left.compiler.display_name(),
-            result.right.compiler.display_name()
-        );
-        println!("basis: {}", result.basis);
+        "diff"
+    }
+}
+
+fn render_compare_text(result: &ComparisonResult) -> String {
+    let mut lines = vec![
+        "Compare".to_string(),
+        format!("  left: {}", result.left.compiler.display_name()),
+        format!("  right: {}", result.right.compiler.display_name()),
+        format!("  program: {}", result.left.program.display()),
+        format!("  opt: {}", result.left.opt_level.as_str()),
+        format!("  status: {}", compare_status(result)),
+        format!("  basis: {}", result.basis),
+        format!("  difference_count: {}", result.differences.len()),
+        format!(
+            "  left_backend: {} ({})",
+            result.left.provenance.backend_mode, result.left.provenance.backend_detail
+        ),
+        format!(
+            "  right_backend: {} ({})",
+            result.right.provenance.backend_mode, result.right.provenance.backend_detail
+        ),
+    ];
+
+    if result.differences.is_empty() {
+        lines.push(String::new());
+        lines.push("No differences detected.".to_string());
+    } else {
         for difference in &result.differences {
-            println!();
-            println!("== {} ==", difference.artifact);
-            println!("{}", difference.detail);
+            lines.push(String::new());
+            lines.push(format!("== {} ==", difference.artifact));
+            lines.push(difference.detail.clone());
         }
     }
+
+    lines.join("\n")
+}
+
+fn print_compare_result(result: &ComparisonResult) {
+    println!("{}", render_compare_text(result));
 }
 
 fn print_introspection(observed: &ObservedProgram) {
@@ -1709,7 +1779,10 @@ fn render_introspection_text(observation: &CompilerObservation) -> String {
         format!("  compile_exit_code: {}", observation.compile_exit_code),
         format!("  adapter_kind: {}", observation.provenance.adapter_kind),
         format!("  backend_mode: {}", observation.provenance.backend_mode),
-        format!("  backend_detail: {}", observation.provenance.backend_detail),
+        format!(
+            "  backend_detail: {}",
+            observation.provenance.backend_detail
+        ),
     ];
     if !observation.provenance.artifacts_captured.is_empty() {
         lines.push(format!(
@@ -1728,7 +1801,9 @@ fn render_introspection_text(observation: &CompilerObservation) -> String {
 
 fn render_compare_json(result: &ComparisonResult) -> String {
     format!(
-        "{{\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
+        "{{\n  \"status\": \"{}\",\n  \"difference_count\": {},\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
+        compare_status(result),
+        result.differences.len(),
         json_escape(&result.basis),
         render_observation_json(&result.left),
         render_observation_json(&result.right),
@@ -1740,7 +1815,14 @@ fn render_compare_markdown(result: &ComparisonResult) -> String {
     let mut lines = vec![
         "# bencch compare report".to_string(),
         String::new(),
+        format!("status: {}", compare_status(result)),
+        format!(
+            "compilers: `{}` vs `{}`",
+            result.left.compiler.display_name(),
+            result.right.compiler.display_name()
+        ),
         format!("basis: {}", result.basis),
+        format!("difference_count: {}", result.differences.len()),
         String::new(),
         "## Left".to_string(),
         render_observation_markdown(&result.left),
@@ -1856,7 +1938,11 @@ fn render_observation_markdown(observation: &CompilerObservation) -> String {
         lines.push(String::new());
         lines.push(format!("## `{}`", artifact.as_str()));
         lines.push("```text".to_string());
-        lines.extend(render_artifact_value_text(value).lines().map(|line| line.to_string()));
+        lines.extend(
+            render_artifact_value_text(value)
+                .lines()
+                .map(|line| line.to_string()),
+        );
         lines.push("```".to_string());
     }
     lines.join("\n")
@@ -1880,7 +1966,9 @@ fn render_differences_json(differences: &[ArtifactDifference]) -> String {
 
 fn render_artifact_value_json(value: &ArtifactValue) -> String {
     match value {
-        ArtifactValue::Text(text) => format!("{{\"kind\":\"text\",\"value\":\"{}\"}}", json_escape(text)),
+        ArtifactValue::Text(text) => {
+            format!("{{\"kind\":\"text\",\"value\":\"{}\"}}", json_escape(text))
+        }
         ArtifactValue::Int(value) => format!("{{\"kind\":\"int\",\"value\":{}}}", value),
         ArtifactValue::Run(run) => format!(
             "{{\"kind\":\"runtime\",\"exit_code\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}",
@@ -5580,13 +5668,29 @@ fn describe_text_difference(
         }
     }
 
-    format!(
+    let mut detail = format!(
         "snapshot length differs\n{} lines: {}\n{} lines: {}",
         left_label,
         expected_lines.len(),
         right_label,
         actual_lines.len()
-    )
+    );
+    if let Some(extra) = expected_lines.get(shared) {
+        detail.push_str(&format!(
+            "\nfirst extra line: {}\n{}: {}",
+            shared + 1,
+            left_label,
+            extra
+        ));
+    } else if let Some(extra) = actual_lines.get(shared) {
+        detail.push_str(&format!(
+            "\nfirst extra line: {}\n{}: {}",
+            shared + 1,
+            right_label,
+            extra
+        ));
+    }
+    detail
 }
 
 fn describe_object_difference(
@@ -6777,6 +6881,37 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn bencch_repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    #[cfg(unix)]
+    fn fake_compiler_fixture(name: &str) -> PathBuf {
+        bencch_repo_root()
+            .join("fixtures")
+            .join("fake_compilers")
+            .join(name)
+    }
+
+    #[cfg(unix)]
+    fn runtime_fixture(name: &str) -> PathBuf {
+        bencch_repo_root()
+            .join("fixtures")
+            .join("runtime")
+            .join(name)
+    }
+
+    #[cfg(unix)]
+    fn ensure_fixture_executable(path: &Path) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
     use crate::compiler::test_support::{
         verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType, Module,
         Position, Span, Terminator, ValueId,
@@ -6941,31 +7076,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn compare_uses_generic_external_driver_observations() {
-        let root = std::env::temp_dir().join("bencch_compare_fake_compilers");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        let source = root.join("demo.f90");
-        fs::write(&source, "program demo\nprint *, 42\nend program\n").unwrap();
-
-        let compiler_a = root.join("fake-a");
-        let compiler_b = root.join("fake-b");
-        fs::write(
-            &compiler_a,
-            "#!/bin/sh\nmode=bin\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -S)\n      mode=asm\n      shift\n      ;;\n    -c)\n      mode=obj\n      shift\n      ;;\n    -o)\n      out=\"$2\"\n      shift 2\n      ;;\n    *)\n      shift\n      ;;\n  esac\ndone\nif [ \"$mode\" = asm ]; then\n  cat > \"$out\" <<'EOF'\n.globl _main\n_main:\n  ret\nEOF\nelif [ \"$mode\" = obj ]; then\n  printf 'fake object a\\n' > \"$out\"\nelse\n  cat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '42\\n'\nEOF\n  chmod +x \"$out\"\nfi\n",
-        )
-        .unwrap();
-        fs::write(
-            &compiler_b,
-            "#!/bin/sh\nmode=bin\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -S)\n      mode=asm\n      shift\n      ;;\n    -c)\n      mode=obj\n      shift\n      ;;\n    -o)\n      out=\"$2\"\n      shift 2\n      ;;\n    *)\n      shift\n      ;;\n  esac\ndone\nif [ \"$mode\" = asm ]; then\n  cat > \"$out\" <<'EOF'\n.arch armv8.5-a\n.globl _main\n_main:\n  ret\nEOF\nelif [ \"$mode\" = obj ]; then\n  printf 'fake object b\\n' > \"$out\"\nelse\n  cat > \"$out\" <<'EOF'\n#!/bin/sh\nprintf '41\\n'\nEOF\n  chmod +x \"$out\"\nfi\n",
-        )
-        .unwrap();
-
-        for compiler in [&compiler_a, &compiler_b] {
-            let mut perms = fs::metadata(compiler).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(compiler, perms).unwrap();
-        }
+        let compiler_a = fake_compiler_fixture("match_42_a.sh");
+        let compiler_b = fake_compiler_fixture("runtime_41.sh");
+        let source = runtime_fixture("mixed_types.f90");
+        ensure_fixture_executable(&compiler_a);
+        ensure_fixture_executable(&compiler_b);
 
         let config = CompareConfig {
             left: CompilerSpec::Binary(compiler_a.clone()),
@@ -6989,6 +7104,86 @@ mod tests {
             .differences
             .iter()
             .any(|difference| difference.artifact == "asm"));
+        let rendered = render_compare_text(&result);
+        assert!(rendered.contains("status: diff"));
+        assert!(rendered.contains("difference_count: 2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compare_fixture_compilers_report_compile_failures() {
+        let source = runtime_fixture("mixed_types.f90");
+        let compiler_fail = fake_compiler_fixture("compile_fail.sh");
+        let compiler_ok = fake_compiler_fixture("match_42_a.sh");
+        ensure_fixture_executable(&compiler_fail);
+        ensure_fixture_executable(&compiler_ok);
+
+        let config = CompareConfig {
+            left: CompilerSpec::Binary(compiler_fail),
+            right: CompilerSpec::Binary(compiler_ok),
+            program: source,
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::new(),
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let result = run_compare(&config).unwrap();
+        assert_eq!(compare_status(&result), "diff");
+        assert!(result
+            .differences
+            .iter()
+            .any(|difference| difference.artifact == "compile-exit-code"));
+        let diagnostics = result
+            .differences
+            .iter()
+            .find(|difference| difference.artifact == "diagnostics")
+            .unwrap();
+        assert!(diagnostics
+            .detail
+            .contains("fake compiler failure: missing lowering pass"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compare_cli_with_fixture_compilers_writes_match_reports() {
+        let left = fake_compiler_fixture("match_42_a.sh");
+        let right = fake_compiler_fixture("match_42_b.sh");
+        let source = runtime_fixture("mixed_types.f90");
+        ensure_fixture_executable(&left);
+        ensure_fixture_executable(&right);
+
+        let root = std::env::temp_dir().join("bencch_compare_fixture_reports");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let json_report = root.join("compare.json");
+        let markdown_report = root.join("compare.md");
+
+        let args = vec![
+            "compare".to_string(),
+            left.display().to_string(),
+            right.display().to_string(),
+            "--program".to_string(),
+            source.display().to_string(),
+            "--artifact".to_string(),
+            "asm,obj".to_string(),
+            "--json-report".to_string(),
+            json_report.display().to_string(),
+            "--markdown-report".to_string(),
+            markdown_report.display().to_string(),
+        ];
+
+        let exit = run_cli_named("bencch", &args);
+        assert_eq!(exit, 0);
+
+        let json = fs::read_to_string(&json_report).unwrap();
+        assert!(json.contains("\"status\": \"match\""));
+        assert!(json.contains("\"difference_count\": 0"));
+
+        let markdown = fs::read_to_string(&markdown_report).unwrap();
+        assert!(markdown.contains("status: match"));
+        assert!(markdown.contains("difference_count: 0"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -7302,7 +7497,10 @@ end
             ),
         };
 
-        assert_eq!(config.compiler, CompilerSpec::Named(NamedCompiler::Armfortas));
+        assert_eq!(
+            config.compiler,
+            CompilerSpec::Named(NamedCompiler::Armfortas)
+        );
         assert_eq!(config.program, PathBuf::from("/tmp/demo.f90"));
         assert!(config.artifacts.contains(&ArtifactKey::Asm));
         assert!(config
@@ -7865,8 +8063,14 @@ end
 
         let compare_markdown = render_compare_markdown(&compare);
         assert!(compare_markdown.contains("# bencch compare report"));
+        assert!(compare_markdown.contains("status: diff"));
+        assert!(compare_markdown.contains("difference_count: 1"));
         assert!(compare_markdown.contains("backend_mode: `external-driver`"));
         assert!(compare_markdown.contains("### `asm`"));
+
+        let compare_json = render_compare_json(&compare);
+        assert!(compare_json.contains("\"status\": \"diff\""));
+        assert!(compare_json.contains("\"difference_count\": 1"));
     }
 
     #[test]
@@ -8012,6 +8216,14 @@ end
         assert!(detail.contains("first differing line: 2"));
         assert!(detail.contains("left: beta"));
         assert!(detail.contains("right: gamma"));
+    }
+
+    #[test]
+    fn consistency_diff_reports_first_extra_line() {
+        let detail = describe_text_difference("alpha\nbeta\n", "", "left", "right");
+        assert!(detail.contains("snapshot length differs"));
+        assert!(detail.contains("first extra line: 1"));
+        assert!(detail.contains("left: alpha"));
     }
 
     #[test]
