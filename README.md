@@ -131,9 +131,9 @@ cargo run -p afs-tests --bin bencch -- run --suite differential
 
 Reports are written under `reports/`.
 
-`compare` now prints a short summary block with status, basis, difference count,
-changed artifacts, and the backend used on each side before any per-artifact
-diffs.
+`compare` now prints a short summary block with status, divergence
+classification, basis, difference count, changed artifacts, and the backend
+used on each side before any per-artifact diffs.
 
 Environment overrides work too:
 

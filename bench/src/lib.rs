@@ -1693,6 +1693,42 @@ fn compare_status(result: &ComparisonResult) -> &'static str {
     }
 }
 
+fn compare_classification(result: &ComparisonResult) -> &'static str {
+    if result.differences.is_empty() {
+        return "match";
+    }
+
+    let mut has_compile = false;
+    let mut has_diagnostics = false;
+    let mut has_runtime = false;
+    let mut has_artifact = false;
+
+    for difference in &result.differences {
+        match difference.artifact.as_str() {
+            "compile-exit-code" => has_compile = true,
+            "diagnostics" => has_diagnostics = true,
+            "runtime" => has_runtime = true,
+            _ => has_artifact = true,
+        }
+    }
+
+    if has_compile {
+        if has_runtime || has_artifact {
+            "mixed divergence"
+        } else {
+            "compile divergence"
+        }
+    } else if has_runtime && !has_diagnostics && !has_artifact {
+        "runtime divergence"
+    } else if has_artifact && !has_runtime && !has_diagnostics {
+        "artifact divergence"
+    } else if has_diagnostics && !has_runtime && !has_artifact {
+        "diagnostics divergence"
+    } else {
+        "mixed divergence"
+    }
+}
+
 fn compare_changed_artifacts(result: &ComparisonResult) -> Vec<String> {
     result
         .differences
@@ -1710,6 +1746,7 @@ fn render_compare_text(result: &ComparisonResult) -> String {
         format!("  program: {}", result.left.program.display()),
         format!("  opt: {}", result.left.opt_level.as_str()),
         format!("  status: {}", compare_status(result)),
+        format!("  classification: {}", compare_classification(result)),
         format!("  basis: {}", result.basis),
         format!("  difference_count: {}", result.differences.len()),
         format!(
@@ -1819,8 +1856,9 @@ fn render_introspection_text(observation: &CompilerObservation) -> String {
 fn render_compare_json(result: &ComparisonResult) -> String {
     let changed_artifacts = compare_changed_artifacts(result);
     format!(
-        "{{\n  \"status\": \"{}\",\n  \"difference_count\": {},\n  \"changed_artifacts\": {},\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
+        "{{\n  \"status\": \"{}\",\n  \"classification\": \"{}\",\n  \"difference_count\": {},\n  \"changed_artifacts\": {},\n  \"basis\": \"{}\",\n  \"left\": {},\n  \"right\": {},\n  \"differences\": {}\n}}\n",
         compare_status(result),
+        compare_classification(result),
         result.differences.len(),
         json_string_array(&changed_artifacts),
         json_escape(&result.basis),
@@ -1836,6 +1874,7 @@ fn render_compare_markdown(result: &ComparisonResult) -> String {
         "# bencch compare report".to_string(),
         String::new(),
         format!("status: {}", compare_status(result)),
+        format!("classification: {}", compare_classification(result)),
         format!(
             "compilers: `{}` vs `{}`",
             result.left.compiler.display_name(),
@@ -6970,6 +7009,21 @@ mod tests {
             None
         }
     }
+
+    #[cfg(unix)]
+    fn stable_runtime_compare_corpus() -> Vec<PathBuf> {
+        [
+            "if_else.f90",
+            "mixed_types.f90",
+            "select_case.f90",
+            "function_call.f90",
+            "real_function.f90",
+            "where_construct.f90",
+        ]
+        .into_iter()
+        .map(runtime_fixture)
+        .collect()
+    }
     use crate::compiler::test_support::{
         verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType, Module,
         Position, Span, Terminator, ValueId,
@@ -7164,6 +7218,7 @@ mod tests {
             .any(|difference| difference.artifact == "asm"));
         let rendered = render_compare_text(&result);
         assert!(rendered.contains("status: diff"));
+        assert!(rendered.contains("classification: mixed divergence"));
         assert!(rendered.contains("difference_count: 2"));
     }
 
@@ -7189,6 +7244,7 @@ mod tests {
 
         let result = run_compare(&config).unwrap();
         assert_eq!(compare_status(&result), "diff");
+        assert_eq!(compare_classification(&result), "compile divergence");
         assert!(result
             .differences
             .iter()
@@ -7237,11 +7293,13 @@ mod tests {
 
         let json = fs::read_to_string(&json_report).unwrap();
         assert!(json.contains("\"status\": \"match\""));
+        assert!(json.contains("\"classification\": \"match\""));
         assert!(json.contains("\"difference_count\": 0"));
         assert!(json.contains("\"changed_artifacts\": []"));
 
         let markdown = fs::read_to_string(&markdown_report).unwrap();
         assert!(markdown.contains("status: match"));
+        assert!(markdown.contains("classification: match"));
         assert!(markdown.contains("difference_count: 0"));
         assert!(markdown.contains("changed_artifacts: none"));
 
@@ -7250,32 +7308,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn compare_named_real_compilers_match_on_runtime_fixture() {
+    fn compare_named_real_compilers_match_on_runtime_corpus() {
         if !command_is_available("gfortran") || !command_is_available("flang-new") {
             return;
         }
 
-        let config = CompareConfig {
-            left: CompilerSpec::Named(NamedCompiler::Gfortran),
-            right: CompilerSpec::Named(NamedCompiler::FlangNew),
-            program: runtime_fixture("if_else.f90"),
-            opt_level: OptLevel::O0,
-            artifacts: BTreeSet::new(),
-            json_report: None,
-            markdown_report: None,
-            tools: ToolchainConfig::from_env(),
-        };
+        for program in stable_runtime_compare_corpus() {
+            let config = CompareConfig {
+                left: CompilerSpec::Named(NamedCompiler::Gfortran),
+                right: CompilerSpec::Named(NamedCompiler::FlangNew),
+                program,
+                opt_level: OptLevel::O0,
+                artifacts: BTreeSet::new(),
+                json_report: None,
+                markdown_report: None,
+                tools: ToolchainConfig::from_env(),
+            };
 
-        let result = run_compare(&config).unwrap();
-        assert_eq!(compare_status(&result), "match");
-        assert!(result.differences.is_empty());
-        assert_eq!(result.left.provenance.adapter_kind, "named");
-        assert_eq!(result.right.provenance.adapter_kind, "named");
+            let result = run_compare(&config).unwrap();
+            assert_eq!(compare_status(&result), "match");
+            assert_eq!(compare_classification(&result), "match");
+            assert!(result.differences.is_empty());
+            assert_eq!(result.left.provenance.adapter_kind, "named");
+            assert_eq!(result.right.provenance.adapter_kind, "named");
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn compare_armfortas_and_gfortran_match_on_runtime_fixture_when_available() {
+    fn compare_armfortas_and_gfortran_match_on_runtime_corpus_when_available() {
         if !command_is_available("gfortran") {
             return;
         }
@@ -7286,21 +7347,24 @@ mod tests {
         let mut tools = ToolchainConfig::from_env();
         tools.armfortas = ArmfortasCliAdapter::External(armfortas_bin.display().to_string());
 
-        let config = CompareConfig {
-            left: CompilerSpec::Named(NamedCompiler::Armfortas),
-            right: CompilerSpec::Named(NamedCompiler::Gfortran),
-            program: runtime_fixture("if_else.f90"),
-            opt_level: OptLevel::O0,
-            artifacts: BTreeSet::new(),
-            json_report: None,
-            markdown_report: None,
-            tools,
-        };
+        for program in stable_runtime_compare_corpus() {
+            let config = CompareConfig {
+                left: CompilerSpec::Named(NamedCompiler::Armfortas),
+                right: CompilerSpec::Named(NamedCompiler::Gfortran),
+                program,
+                opt_level: OptLevel::O0,
+                artifacts: BTreeSet::new(),
+                json_report: None,
+                markdown_report: None,
+                tools: tools.clone(),
+            };
 
-        let result = run_compare(&config).unwrap();
-        assert_eq!(compare_status(&result), "match");
-        assert!(result.differences.is_empty());
-        assert_eq!(result.left.provenance.backend_mode, "cli-observable");
+            let result = run_compare(&config).unwrap();
+            assert_eq!(compare_status(&result), "match");
+            assert_eq!(compare_classification(&result), "match");
+            assert!(result.differences.is_empty());
+            assert_eq!(result.left.provenance.backend_mode, "cli-observable");
+        }
     }
 
     #[test]
@@ -8179,6 +8243,7 @@ end
         let compare_markdown = render_compare_markdown(&compare);
         assert!(compare_markdown.contains("# bencch compare report"));
         assert!(compare_markdown.contains("status: diff"));
+        assert!(compare_markdown.contains("classification: artifact divergence"));
         assert!(compare_markdown.contains("difference_count: 1"));
         assert!(compare_markdown.contains("changed_artifacts: asm"));
         assert!(compare_markdown.contains("backend_mode: `external-driver`"));
@@ -8186,6 +8251,7 @@ end
 
         let compare_json = render_compare_json(&compare);
         assert!(compare_json.contains("\"status\": \"diff\""));
+        assert!(compare_json.contains("\"classification\": \"artifact divergence\""));
         assert!(compare_json.contains("\"difference_count\": 1"));
         assert!(compare_json.contains("\"changed_artifacts\": [\"asm\"]"));
     }
