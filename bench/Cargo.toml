@@ -2,11 +2,15 @@
 name = "afs-tests"
 version = "0.1.0"
 edition = "2021"
-description = "Structured compiler bench runner for ARMFORTAS"
+description = "Structured generic compiler bench runner"
 
 [[bin]]
 name = "afs-tests"
 path = "src/main.rs"
+
+[[bin]]
+name = "bencch"
+path = "src/bin/bencch.rs"
 
 [dependencies]
 bencch-core = { path = "../bench-core" }
