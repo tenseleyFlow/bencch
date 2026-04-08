@@ -63,6 +63,12 @@ Compare named compilers with an explicit armfortas binary:
 cargo run -p afs-tests --bin bencch -- compare armfortas gfortran --program fixtures/runtime/if_else.f90 --armfortas-bin ../target/debug/armfortas
 ```
 
+The same compare surface works across opt levels too:
+
+```bash
+cargo run -p afs-tests --bin bencch -- compare armfortas gfortran --opt O2 --program fixtures/runtime/mixed_types.f90 --armfortas-bin ../target/debug/armfortas
+```
+
 Compare with an extra artifact diff:
 
 ```bash

@@ -7024,6 +7024,10 @@ mod tests {
         .map(runtime_fixture)
         .collect()
     }
+
+    fn stable_runtime_compare_opt_levels() -> Vec<OptLevel> {
+        vec![OptLevel::O0, OptLevel::O1, OptLevel::O2]
+    }
     use crate::compiler::test_support::{
         verify_module, BlockParam, FloatWidth, Function, Inst, InstKind, IntWidth, IrType, Module,
         Position, Span, Terminator, ValueId,
@@ -7313,24 +7317,28 @@ mod tests {
             return;
         }
 
-        for program in stable_runtime_compare_corpus() {
-            let config = CompareConfig {
-                left: CompilerSpec::Named(NamedCompiler::Gfortran),
-                right: CompilerSpec::Named(NamedCompiler::FlangNew),
-                program,
-                opt_level: OptLevel::O0,
-                artifacts: BTreeSet::new(),
-                json_report: None,
-                markdown_report: None,
-                tools: ToolchainConfig::from_env(),
-            };
+        for opt_level in stable_runtime_compare_opt_levels() {
+            for program in stable_runtime_compare_corpus() {
+                let config = CompareConfig {
+                    left: CompilerSpec::Named(NamedCompiler::Gfortran),
+                    right: CompilerSpec::Named(NamedCompiler::FlangNew),
+                    program,
+                    opt_level,
+                    artifacts: BTreeSet::new(),
+                    json_report: None,
+                    markdown_report: None,
+                    tools: ToolchainConfig::from_env(),
+                };
 
-            let result = run_compare(&config).unwrap();
-            assert_eq!(compare_status(&result), "match");
-            assert_eq!(compare_classification(&result), "match");
-            assert!(result.differences.is_empty());
-            assert_eq!(result.left.provenance.adapter_kind, "named");
-            assert_eq!(result.right.provenance.adapter_kind, "named");
+                let result = run_compare(&config).unwrap();
+                assert_eq!(compare_status(&result), "match");
+                assert_eq!(compare_classification(&result), "match");
+                assert!(result.differences.is_empty());
+                assert_eq!(result.left.provenance.adapter_kind, "named");
+                assert_eq!(result.right.provenance.adapter_kind, "named");
+                assert_eq!(result.left.opt_level, opt_level);
+                assert_eq!(result.right.opt_level, opt_level);
+            }
         }
     }
 
@@ -7347,23 +7355,27 @@ mod tests {
         let mut tools = ToolchainConfig::from_env();
         tools.armfortas = ArmfortasCliAdapter::External(armfortas_bin.display().to_string());
 
-        for program in stable_runtime_compare_corpus() {
-            let config = CompareConfig {
-                left: CompilerSpec::Named(NamedCompiler::Armfortas),
-                right: CompilerSpec::Named(NamedCompiler::Gfortran),
-                program,
-                opt_level: OptLevel::O0,
-                artifacts: BTreeSet::new(),
-                json_report: None,
-                markdown_report: None,
-                tools: tools.clone(),
-            };
+        for opt_level in stable_runtime_compare_opt_levels() {
+            for program in stable_runtime_compare_corpus() {
+                let config = CompareConfig {
+                    left: CompilerSpec::Named(NamedCompiler::Armfortas),
+                    right: CompilerSpec::Named(NamedCompiler::Gfortran),
+                    program,
+                    opt_level,
+                    artifacts: BTreeSet::new(),
+                    json_report: None,
+                    markdown_report: None,
+                    tools: tools.clone(),
+                };
 
-            let result = run_compare(&config).unwrap();
-            assert_eq!(compare_status(&result), "match");
-            assert_eq!(compare_classification(&result), "match");
-            assert!(result.differences.is_empty());
-            assert_eq!(result.left.provenance.backend_mode, "cli-observable");
+                let result = run_compare(&config).unwrap();
+                assert_eq!(compare_status(&result), "match");
+                assert_eq!(compare_classification(&result), "match");
+                assert!(result.differences.is_empty());
+                assert_eq!(result.left.provenance.backend_mode, "cli-observable");
+                assert_eq!(result.left.opt_level, opt_level);
+                assert_eq!(result.right.opt_level, opt_level);
+            }
         }
     }
 
