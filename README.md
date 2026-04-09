@@ -233,6 +233,22 @@ expect run.exit_code equals 0
 end
 ```
 
+Suite-v2 can also drive the generic compare engine:
+
+```text
+suite "v2/generic-compare"
+
+case "fake_compilers_diverge"
+source "../../fixtures/runtime/if_else.f90"
+compare "../../fixtures/fake_compilers/match_42_a.sh" "../../fixtures/fake_compilers/runtime_41.sh" => asm
+expect compare.status equals "diff"
+expect compare.classification equals "mixed divergence"
+expect compare.changed_artifacts contains "asm"
+expect compare.changed_artifacts contains "runtime"
+expect compare.difference_count equals 2
+end
+```
+
 Graph cases use `entry` plus ordered `file` lines:
 
 ```text
@@ -257,6 +273,7 @@ Common things the runner understands:
 
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
 - generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
+- generic compare cases like `compare gfortran flang-new => asm`
 - opt matrices like `opts => O0, O1, O2`
 - references like `differential => gfortran, flang-new`
 - expected failures like `xfail "reason"`
