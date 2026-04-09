@@ -36,3 +36,7 @@ Sprint 10 adds `fixtures/fake_compilers/` for stable compare-mode coverage.
 Those scripts let `bencch compare` exercise compile failures, runtime
 divergence, and artifact differences without depending on whichever real
 toolchains happen to be installed on a machine.
+
+Sprint 11 adds `fixtures/invalid/` for bench-owned bad-source probes. Those
+fixtures let `bencch introspect` exercise compiler failure reporting and
+partial capture without depending on temp-file setup inside tests.
