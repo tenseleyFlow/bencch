@@ -2107,6 +2107,56 @@ fn render_flat_artifacts_json(observation: &CompilerObservation) -> String {
     render_named_artifact_map_json(&entries)
 }
 
+fn render_artifact_summary_json(value: &ArtifactValue) -> String {
+    match value {
+        ArtifactValue::Text(text) => format!(
+            "{{\"kind\":\"text\",\"summary\":\"{}\",\"line_count\":{},\"char_count\":{}}}",
+            json_escape(&artifact_value_summary(value)),
+            text_line_count(text),
+            text.len()
+        ),
+        ArtifactValue::Int(number) => format!(
+            "{{\"kind\":\"int\",\"summary\":\"{}\",\"value\":{}}}",
+            json_escape(&artifact_value_summary(value)),
+            number
+        ),
+        ArtifactValue::Run(run) => format!(
+            "{{\"kind\":\"runtime\",\"summary\":\"{}\",\"exit_code\":{},\"stdout_lines\":{},\"stderr_lines\":{}}}",
+            json_escape(&artifact_value_summary(value)),
+            run.exit_code,
+            text_line_count(&run.stdout),
+            text_line_count(&run.stderr)
+        ),
+        ArtifactValue::Path(path) => match fs::metadata(path) {
+            Ok(metadata) => format!(
+                "{{\"kind\":\"path\",\"summary\":\"{}\",\"byte_count\":{}}}",
+                json_escape(&artifact_value_summary(value)),
+                metadata.len()
+            ),
+            Err(_) => format!(
+                "{{\"kind\":\"path\",\"summary\":\"{}\",\"byte_count\":null}}",
+                json_escape(&artifact_value_summary(value))
+            ),
+        },
+    }
+}
+
+fn render_artifact_summaries_json(observation: &CompilerObservation) -> String {
+    let mut rendered = String::from("{");
+    for (index, (artifact, value)) in observation.artifacts.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&format!(
+            "\"{}\": {}",
+            json_escape(artifact.as_str()),
+            render_artifact_summary_json(value)
+        ));
+    }
+    rendered.push('}');
+    rendered
+}
+
 fn render_adapter_extra_summary_json(
     extras: &BTreeMap<String, Vec<(String, &ArtifactValue)>>,
 ) -> String {
@@ -2379,7 +2429,7 @@ fn render_introspection_json(observed: &ObservedProgram) -> String {
     let missing_artifacts = missing_introspection_artifact_names(observed);
     let diagnostic_excerpt = diagnostic_excerpt(observation);
     format!(
-        "{{\n  \"status\": \"{}\",\n  \"compiler\": \"{}\",\n  \"program\": \"{}\",\n  \"opt\": \"{}\",\n  \"compile_exit_code\": {},\n  \"failure\": {{\n    \"stage\": {},\n    \"diagnostic_excerpt\": {}\n  }},\n  \"artifact_summary\": {{\n    \"artifact_count\": {},\n    \"requested_artifacts\": {},\n    \"captured_artifacts\": {},\n    \"missing_artifacts\": {},\n    \"generic_artifacts\": {},\n    \"adapter_extras\": {}\n  }},\n  \"provenance\": {{\n    \"compiler_identity\": \"{}\",\n    \"adapter_kind\": \"{}\",\n    \"backend_mode\": \"{}\",\n    \"backend_detail\": \"{}\",\n    \"artifacts_captured\": {},\n    \"comparison_basis\": {},\n    \"failure_stage\": {}\n  }},\n  \"generic_artifacts\": {},\n  \"adapter_extras\": {},\n  \"artifacts\": {}\n}}\n",
+        "{{\n  \"status\": \"{}\",\n  \"compiler\": \"{}\",\n  \"program\": \"{}\",\n  \"opt\": \"{}\",\n  \"compile_exit_code\": {},\n  \"failure\": {{\n    \"stage\": {},\n    \"diagnostic_excerpt\": {}\n  }},\n  \"artifact_summary\": {{\n    \"artifact_count\": {},\n    \"requested_artifacts\": {},\n    \"captured_artifacts\": {},\n    \"missing_artifacts\": {},\n    \"generic_artifacts\": {},\n    \"adapter_extras\": {}\n  }},\n  \"provenance\": {{\n    \"compiler_identity\": \"{}\",\n    \"adapter_kind\": \"{}\",\n    \"backend_mode\": \"{}\",\n    \"backend_detail\": \"{}\",\n    \"artifacts_captured\": {},\n    \"comparison_basis\": {},\n    \"failure_stage\": {}\n  }},\n  \"artifact_summaries\": {},\n  \"generic_artifacts\": {},\n  \"adapter_extras\": {},\n  \"artifacts\": {}\n}}\n",
         json_escape(introspection_status(observation)),
         json_escape(&observation.compiler.display_name()),
         json_escape(&observation.program.display().to_string()),
@@ -2412,6 +2462,7 @@ fn render_introspection_json(observed: &ObservedProgram) -> String {
             Some(stage) => format!("\"{}\"", json_escape(stage)),
             None => "null".to_string(),
         },
+        render_artifact_summaries_json(observation),
         render_named_artifact_map_json(&generic_artifacts),
         render_namespaced_artifacts_json(&adapter_extras),
         render_flat_artifacts_json(observation)
@@ -9226,6 +9277,9 @@ end
             "\"requested_artifacts\": [\"asm\", \"armfortas.ir\", \"armfortas.tokens\"]"
         ));
         assert!(introspection_json.contains("\"missing_artifacts\": [\"armfortas.tokens\"]"));
+        assert!(introspection_json.contains("\"artifact_summaries\":"));
+        assert!(introspection_json.contains("\"asm\": {\"kind\":\"text\""));
+        assert!(introspection_json.contains("\"line_count\":1"));
         assert!(introspection_json.contains("\"generic_artifacts\": [\"asm\"]"));
         assert!(introspection_json.contains("\"adapter_extras\": {\"armfortas\": [\"ir\"]}"));
         assert!(introspection_json.contains("\"backend_mode\": \"linked\""));
@@ -9305,6 +9359,9 @@ end
         assert!(json.contains("\"stage\": \"sema\""));
         assert!(json.contains("\"diagnostic_excerpt\": \"undefined symbol: missing_value\""));
         assert!(json.contains("\"failure_stage\": \"sema\""));
+        assert!(json.contains("\"diagnostics\": {\"kind\":\"text\""));
+        assert!(json.contains("\"summary\":\"text, 2 lines, "));
+        assert!(json.contains("\"line_count\":2"));
 
         let markdown = render_introspection_markdown(&observed, full_introspection_render_config());
         assert!(markdown.contains("status: compile failed"));
