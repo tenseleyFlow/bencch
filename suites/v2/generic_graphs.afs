@@ -1,0 +1,24 @@
+suite "v2/generic-graphs"
+
+case "module_chain_frontend"
+entry "../../fixtures/modules/module_chain/main.f90"
+file "../../fixtures/modules/module_chain/math_seed.f90"
+file "../../fixtures/modules/module_chain/math_values.f90"
+file "../../fixtures/modules/module_chain/main.f90"
+compiler armfortas => armfortas.ast, armfortas.sema
+expect armfortas.ast contains "name: \"math_seed\""
+expect armfortas.ast contains "module: \"math_values\""
+expect armfortas.sema contains "local_name: \"doubled\""
+expect armfortas.sema contains "original_name: \"doubled\""
+end
+
+case "module_chain_ir_values"
+entry "../../fixtures/modules/module_chain/main.f90"
+file "../../fixtures/modules/module_chain/math_seed.f90"
+file "../../fixtures/modules/module_chain/math_values.f90"
+file "../../fixtures/modules/module_chain/main.f90"
+compiler armfortas => armfortas.ir
+expect armfortas.ir not-contains "global @math_seed::seed: i32 = zeroinit"
+expect armfortas.ir not-contains "global @math_values::doubled: i32 = zeroinit"
+xfail "Imported module values currently lower as zeroinit in multi-file graphs."
+end
