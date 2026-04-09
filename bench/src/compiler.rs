@@ -330,7 +330,24 @@ impl CaptureBackend for CliObservableCaptureBackend {
 }
 
 pub fn linked_adapter_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    linked_adapter_root_from(
+        option_env!("BENCCH_LINKED_ARMFORTAS_ROOT"),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+}
+
+fn linked_adapter_root_from(configured_root: Option<&str>, manifest_dir: &Path) -> PathBuf {
+    match configured_root {
+        Some(root) => {
+            let root = Path::new(root);
+            if root.is_absolute() {
+                root.to_path_buf()
+            } else {
+                manifest_dir.join(root)
+            }
+        }
+        None => manifest_dir.join("../.."),
+    }
 }
 
 fn linked_compile_output(
@@ -615,4 +632,24 @@ pub mod test_support {
     pub use armfortas::ir::types::{FloatWidth, IntWidth, IrType};
     pub use armfortas::ir::verify::verify_module;
     pub use armfortas::lexer::{Position, Span};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linked_adapter_root_from;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn linked_adapter_root_prefers_configured_absolute_root() {
+        let manifest_dir = Path::new("/tmp/generated/bench");
+        let resolved = linked_adapter_root_from(Some("/tmp/armfortas-root"), manifest_dir);
+        assert_eq!(resolved, PathBuf::from("/tmp/armfortas-root"));
+    }
+
+    #[test]
+    fn linked_adapter_root_falls_back_to_embedded_layout() {
+        let manifest_dir = Path::new("/tmp/bencch/bench");
+        let resolved = linked_adapter_root_from(None, manifest_dir);
+        assert_eq!(resolved, PathBuf::from("/tmp/bencch/bench/../.."));
+    }
 }

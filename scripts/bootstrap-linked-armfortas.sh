@@ -65,6 +65,7 @@ name = "afs-tests"
 version = "0.1.0"
 edition = "2021"
 description = "Structured generic compiler bench runner"
+build = "../../bench/build.rs"
 
 [lib]
 path = "../../bench/src/lib.rs"
