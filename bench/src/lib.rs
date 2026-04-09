@@ -440,6 +440,7 @@ struct ExecutionArtifacts {
     requested: BTreeSet<Stage>,
     armfortas: Option<CaptureResult>,
     armfortas_failure: Option<CaptureFailure>,
+    armfortas_observation: Option<ObservedProgram>,
     references: Vec<ReferenceResult>,
     consistency_issues: Vec<ConsistencyIssue>,
 }
@@ -4067,6 +4068,7 @@ fn execute_case_cell(
         requested,
         armfortas: None,
         armfortas_failure: None,
+        armfortas_observation: None,
         references,
         consistency_issues: Vec::new(),
     };
@@ -4097,6 +4099,7 @@ fn execute_case_cell(
                     !artifacts.references.is_empty(),
                     &config.tools,
                 );
+                artifacts.armfortas_observation = Some(observed.clone());
                 let mut execution = evaluate_observation_expectations(case, &observed);
                 if execution.is_ok() && !artifacts.references.is_empty() {
                     let requested = default_differential_artifacts();
@@ -9059,7 +9062,9 @@ fn observed_program_for_armfortas_bundle(
     prepared: &PreparedInput,
     artifacts: &ExecutionArtifacts,
 ) -> Option<ObservedProgram> {
-    if let Some(result) = &artifacts.armfortas {
+    if let Some(observed) = &artifacts.armfortas_observation {
+        Some(observed.clone())
+    } else if let Some(result) = &artifacts.armfortas {
         Some(observed_program_from_armfortas_capture(
             &prepared.compiler_source,
             result.opt_level,
@@ -11485,6 +11490,37 @@ end
                 detail: "compiler failed".into(),
                 stages,
             }),
+            armfortas_observation: Some(ObservedProgram {
+                observation: CompilerObservation {
+                    compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+                    program: source.clone(),
+                    opt_level: OptLevel::O0,
+                    compile_exit_code: 1,
+                    artifacts: BTreeMap::from([
+                        (
+                            ArtifactKey::Diagnostics,
+                            ArtifactValue::Text("cached observation failure".into()),
+                        ),
+                        (
+                            ArtifactKey::Extra("armfortas.ast".into()),
+                            ArtifactValue::Text("program hello".into()),
+                        ),
+                    ]),
+                    provenance: ObservationProvenance {
+                        compiler_identity: "armfortas".into(),
+                        adapter_kind: "named".into(),
+                        backend_mode: "linked".into(),
+                        backend_detail: "linked armfortas::testing capture adapter".into(),
+                        artifacts_captured: vec!["diagnostics".into(), "armfortas.ast".into()],
+                        comparison_basis: None,
+                        failure_stage: Some("sema".into()),
+                    },
+                },
+                requested_artifacts: BTreeSet::from([
+                    ArtifactKey::Diagnostics,
+                    ArtifactKey::Extra("armfortas.ast".into()),
+                ]),
+            }),
             references: vec![ReferenceResult {
                 compiler: ReferenceCompiler::Gfortran,
                 compile_command: "gfortran hello.f90 -o hello".into(),
@@ -11608,8 +11644,9 @@ end
         assert!(observation.contains("Introspect"));
         assert!(observation.contains("compiler: armfortas"));
         assert!(observation.contains("failure_stage: sema"));
-        assert!(observation.contains("generic_artifacts: diagnostics, runtime"));
-        assert!(observation.contains("adapter_extras: armfortas(ir)"));
+        assert!(observation.contains("generic_artifacts: diagnostics"));
+        assert!(observation.contains("adapter_extras: armfortas(ast)"));
+        assert!(observation.contains("cached observation failure"));
         let reference_observation = fs::read_to_string(
             bundle
                 .join("references")
@@ -11762,6 +11799,7 @@ end
             requested: BTreeSet::from([Stage::Run]),
             armfortas: Some(run_only_result("42\n", "", 0)),
             armfortas_failure: None,
+            armfortas_observation: None,
             references: Vec::new(),
             consistency_issues: Vec::new(),
         };
@@ -11778,6 +11816,54 @@ end
 
         let _ = fs::remove_dir_all(bundle);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn armfortas_bundle_observation_prefers_cached_observation() {
+        let prepared = PreparedInput {
+            compiler_source: PathBuf::from("demo.f90"),
+            generated_source: None,
+            temp_root: None,
+        };
+        let artifacts = ExecutionArtifacts {
+            requested: BTreeSet::from([Stage::Run]),
+            armfortas: Some(run_only_result("42\n", "", 0)),
+            armfortas_failure: None,
+            armfortas_observation: Some(ObservedProgram {
+                observation: CompilerObservation {
+                    compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+                    program: PathBuf::from("demo.f90"),
+                    opt_level: OptLevel::O0,
+                    compile_exit_code: 0,
+                    artifacts: BTreeMap::from([(
+                        ArtifactKey::Extra("armfortas.sema".into()),
+                        ArtifactValue::Text("ok".into()),
+                    )]),
+                    provenance: ObservationProvenance {
+                        compiler_identity: "armfortas".into(),
+                        adapter_kind: "named".into(),
+                        backend_mode: "linked".into(),
+                        backend_detail: "linked armfortas::testing capture adapter".into(),
+                        artifacts_captured: vec!["armfortas.sema".into()],
+                        comparison_basis: None,
+                        failure_stage: None,
+                    },
+                },
+                requested_artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.sema".into())]),
+            }),
+            references: Vec::new(),
+            consistency_issues: Vec::new(),
+        };
+
+        let observed = observed_program_for_armfortas_bundle(&prepared, &artifacts).unwrap();
+        assert!(observed
+            .observation
+            .artifacts
+            .contains_key(&ArtifactKey::Extra("armfortas.sema".into())));
+        assert!(!observed
+            .observation
+            .artifacts
+            .contains_key(&ArtifactKey::Runtime));
     }
 
     #[test]
@@ -12495,6 +12581,7 @@ end
             requested: BTreeSet::from([Stage::Tokens, Stage::Run]),
             armfortas: None,
             armfortas_failure: None,
+            armfortas_observation: None,
             references: Vec::new(),
             consistency_issues: Vec::new(),
         };
@@ -12529,6 +12616,7 @@ end
             requested: BTreeSet::from([Stage::Run]),
             armfortas: None,
             armfortas_failure: None,
+            armfortas_observation: None,
             references: Vec::new(),
             consistency_issues: Vec::new(),
         };
@@ -12573,6 +12661,7 @@ end
             requested: BTreeSet::from([Stage::Run]),
             armfortas: None,
             armfortas_failure: Some(failure.clone()),
+            armfortas_observation: None,
             references: Vec::new(),
             consistency_issues: Vec::new(),
         };
@@ -12613,6 +12702,7 @@ end
             requested: BTreeSet::from([Stage::Asm, Stage::Obj, Stage::Run]),
             armfortas: None,
             armfortas_failure: Some(failure.clone()),
+            armfortas_observation: None,
             references: Vec::new(),
             consistency_issues: Vec::new(),
         };
