@@ -8922,13 +8922,19 @@ fn write_failure_bundle(
         let refs_root = bundle_root.join("references");
         fs::create_dir_all(&refs_root)
             .map_err(|e| format!("cannot create references bundle dir: {}", e))?;
+        let reference_observations = reference_observations_for_bundle(
+            &prepared.compiler_source,
+            outcome.opt_level,
+            artifacts,
+        );
+        write_reference_summary_bundle(&refs_root, &artifacts.references, &reference_observations)?;
         for (index, reference) in artifacts.references.iter().enumerate() {
             write_reference_bundle(
                 &refs_root,
                 &prepared.compiler_source,
                 outcome.opt_level,
                 reference,
-                artifacts.reference_observations.get(index),
+                reference_observations.get(index),
             )?;
         }
     }
@@ -9143,6 +9149,87 @@ fn bundle_artifacts_for_stages(stages: &BTreeMap<Stage, CapturedStage>) -> BTree
         }
     }
     requested
+}
+
+fn reference_observations_for_bundle(
+    program: &Path,
+    opt_level: OptLevel,
+    artifacts: &ExecutionArtifacts,
+) -> Vec<ObservedProgram> {
+    if artifacts.reference_observations.len() == artifacts.references.len() {
+        artifacts.reference_observations.clone()
+    } else {
+        artifacts
+            .references
+            .iter()
+            .map(|reference| {
+                observed_program_from_reference_result(
+                    program,
+                    opt_level,
+                    default_differential_artifacts(),
+                    reference,
+                )
+            })
+            .collect()
+    }
+}
+
+fn write_reference_summary_bundle(
+    refs_root: &Path,
+    references: &[ReferenceResult],
+    observations: &[ObservedProgram],
+) -> Result<(), String> {
+    let summary = render_reference_bundle_summary(references, observations);
+    fs::write(refs_root.join("summary.txt"), summary)
+        .map_err(|e| format!("cannot write reference summary bundle: {}", e))
+}
+
+fn render_reference_bundle_summary(
+    references: &[ReferenceResult],
+    observations: &[ObservedProgram],
+) -> String {
+    let mut lines = vec![
+        format!("reference_count: {}", references.len()),
+        format!(
+            "compilers: {}",
+            if references.is_empty() {
+                "none".to_string()
+            } else {
+                references
+                    .iter()
+                    .map(|reference| reference.compiler.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+    ];
+
+    for (reference, observed) in references.iter().zip(observations.iter()) {
+        let observation = &observed.observation;
+        lines.push(String::new());
+        lines.push(format!("compiler: {}", reference.compiler.as_str()));
+        lines.push(format!("status: {}", introspection_status(observation)));
+        lines.push(format!(
+            "compile_exit_code: {}",
+            observation.compile_exit_code
+        ));
+        lines.push(format!("command: {}", reference.compile_command));
+        lines.push(format!(
+            "generic_artifacts: {}",
+            join_or_none_from_strings(
+                &observation_generic_artifacts(observation)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>()
+            )
+        ));
+        lines.push(format!(
+            "adapter_extras: {}",
+            format_adapter_extra_summary(&observation_adapter_extras(observation))
+        ));
+    }
+
+    lines.join("\n") + "\n"
 }
 
 fn write_reference_bundle(
@@ -11672,6 +11759,7 @@ end
             .join("gfortran")
             .join("observation.md")
             .exists());
+        assert!(bundle.join("references").join("summary.txt").exists());
         assert!(bundle
             .join("references")
             .join("gfortran")
@@ -11713,6 +11801,16 @@ end
         assert!(reference_observation.contains("requested_artifacts: asm"));
         assert!(reference_observation.contains("generic_artifacts: asm"));
         assert!(reference_observation.contains("cached reference observation"));
+        let reference_summary =
+            fs::read_to_string(bundle.join("references").join("summary.txt")).unwrap();
+        assert!(reference_summary.contains("reference_count: 1"));
+        assert!(reference_summary.contains("compilers: gfortran"));
+        assert!(reference_summary.contains("compiler: gfortran"));
+        assert!(reference_summary.contains("status: compile ok"));
+        assert!(reference_summary.contains("compile_exit_code: 0"));
+        assert!(reference_summary.contains("command: gfortran hello.f90 -o hello"));
+        assert!(reference_summary.contains("generic_artifacts: asm"));
+        assert!(reference_summary.contains("adapter_extras: none"));
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
         assert!(consistency_summary.contains("issue_count: 2"));
