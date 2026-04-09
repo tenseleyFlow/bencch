@@ -262,6 +262,24 @@ expect compare.difference_count equals 0
 end
 ```
 
+Suite-v2 unhappy paths can use the same generic engine too:
+
+```text
+suite "v2/generic-failures"
+
+case "fake_compiler_expected_diagnostic"
+source "../../fixtures/invalid/fake_compile_fail_expected.f90"
+compiler "../../fixtures/fake_compilers/compile_fail.sh" => diagnostics
+expect-fail comments
+end
+
+case "armfortas_parse_error"
+source "../../fixtures/invalid/parse_error.f90"
+compiler armfortas => diagnostics
+expect-fail parser contains "expected entity name"
+end
+```
+
 Graph cases use `entry` plus ordered `file` lines:
 
 ```text
