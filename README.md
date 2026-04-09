@@ -99,6 +99,12 @@ Introspect the full linked armfortas stage surface:
 cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/mixed_types.f90 --all
 ```
 
+Introspect a named external compiler on the generic surface:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect gfortran fixtures/runtime/if_else.f90 --artifact asm,obj,runtime
+```
+
 Run against an explicit compiler binary:
 
 ```bash
@@ -149,7 +155,8 @@ used on each side before any per-artifact diffs.
 
 `introspect` now groups portable outputs like `asm`, `obj`, and `runtime`
 separately from adapter extras like `armfortas.ir` and `armfortas.tokens` in
-text, JSON, and Markdown output.
+text, JSON, and Markdown output, and it now reports requested, captured, and
+missing artifacts at the top of the report.
 
 Environment overrides work too:
 
