@@ -4837,79 +4837,6 @@ fn evaluate_compare_expectations(case: &CaseSpec, result: &ComparisonResult) -> 
     Ok(())
 }
 
-fn evaluate_failure_expectations(case: &CaseSpec, failure: &CaptureFailure) -> Result<(), String> {
-    let mut saw_failure_expectation = false;
-    for expectation in &case.expectations {
-        match expectation {
-            Expectation::FailContains { stage, needle } => {
-                saw_failure_expectation = true;
-                if failure.stage != *stage {
-                    return Err(format!(
-                        "expected failure stage {} but armfortas failed in {}\n{}",
-                        stage.as_str(),
-                        failure.stage.as_str(),
-                        failure.detail
-                    ));
-                }
-                if !failure.detail.contains(needle) {
-                    return Err(format!(
-                        "expected failure detail at {} to contain {:?}\nactual:\n{}",
-                        stage.as_str(),
-                        needle,
-                        failure.detail
-                    ));
-                }
-            }
-            Expectation::FailEquals { stage, value } => {
-                saw_failure_expectation = true;
-                if failure.stage != *stage {
-                    return Err(format!(
-                        "expected failure stage {} but armfortas failed in {}\n{}",
-                        stage.as_str(),
-                        failure.stage.as_str(),
-                        failure.detail
-                    ));
-                }
-                if failure.detail.trim_end() != value {
-                    return Err(format!(
-                        "expected failure detail at {} to equal {:?}\nactual:\n{}",
-                        stage.as_str(),
-                        value,
-                        failure.detail
-                    ));
-                }
-            }
-            Expectation::FailCommentPatterns(patterns) => {
-                saw_failure_expectation = true;
-                for needle in patterns {
-                    if !failure.detail.contains(needle) {
-                        return Err(format!(
-                            "expected failure detail to contain source comment {:?}\nactual:\n{}",
-                            needle, failure.detail
-                        ));
-                    }
-                }
-            }
-            Expectation::CheckComments(_)
-            | Expectation::Contains { .. }
-            | Expectation::NotContains { .. }
-            | Expectation::Equals { .. }
-            | Expectation::IntEquals { .. }
-            | Expectation::FailSourceComments => {}
-        }
-    }
-
-    if !saw_failure_expectation {
-        return Err(format!(
-            "armfortas failed in {} but the case did not declare an expect-fail rule\n{}",
-            failure.stage.as_str(),
-            failure.detail
-        ));
-    }
-
-    Ok(())
-}
-
 fn evaluate_observation_failure_expectations(
     case: &CaseSpec,
     observation: &CompilerObservation,
@@ -4996,17 +4923,17 @@ fn evaluate_failed_armfortas(
     artifacts: &ExecutionArtifacts,
     failure: &CaptureFailure,
 ) -> Result<(), String> {
+    let partial = failure.partial_result();
+    let observed = observed_program_from_armfortas_capture(
+        &case.source,
+        failure.opt_level,
+        expected_artifacts_for_legacy_case(case),
+        &partial,
+        Some(failure),
+    );
     if has_failure_expectation(case) {
-        evaluate_failure_expectations(case, failure)
+        evaluate_observation_failure_expectations(case, &observed.observation)
     } else {
-        let partial = failure.partial_result();
-        let observed = observed_program_from_armfortas_capture(
-            &case.source,
-            failure.opt_level,
-            expected_artifacts_for_legacy_case(case),
-            &partial,
-            Some(failure),
-        );
         match evaluate_observation_expectations(case, &observed) {
             Ok(()) => Err(compose_armfortas_failure_detail(artifacts)),
             Err(detail) if is_missing_stage_detail(&detail) => {
@@ -11687,6 +11614,40 @@ end
             stage: FailureStage::Parser,
             detail: "expected 'then'".into(),
             stages: BTreeMap::from([(Stage::Tokens, CapturedStage::Text("if\n".into()))]),
+        };
+
+        assert!(evaluate_failed_armfortas(&case, &artifacts, &failure).is_ok());
+    }
+
+    #[test]
+    fn legacy_capture_failures_use_observation_failure_semantics() {
+        let case = CaseSpec {
+            name: "hidden_use_only".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::FailCommentPatterns(vec!["hidden".into()])],
+            status_rules: Vec::new(),
+        };
+        let artifacts = ExecutionArtifacts {
+            requested: BTreeSet::from([Stage::Run]),
+            armfortas: None,
+            armfortas_failure: None,
+            references: Vec::new(),
+            consistency_issues: Vec::new(),
+        };
+        let failure = CaptureFailure {
+            input: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            stage: FailureStage::Sema,
+            detail: "demo.f90:4:3: semantic error: hidden".into(),
+            stages: BTreeMap::new(),
         };
 
         assert!(evaluate_failed_armfortas(&case, &artifacts, &failure).is_ok());
