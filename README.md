@@ -218,6 +218,21 @@ expect run.exit_code equals 0
 end
 ```
 
+The new suite-v2 generic surface can target any compiler spec the same way
+`bencch introspect` does:
+
+```text
+suite "v2/generic-introspect"
+
+case "fake_compiler_runtime"
+source "../../fixtures/runtime/if_else.f90"
+compiler "../../fixtures/fake_compilers/match_42_a.sh" => asm, obj, runtime
+expect asm contains ".globl _main"
+expect run.stdout contains "42"
+expect run.exit_code equals 0
+end
+```
+
 Graph cases use `entry` plus ordered `file` lines:
 
 ```text
@@ -241,6 +256,7 @@ the failure bundle.
 Common things the runner understands:
 
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
+- generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
 - opt matrices like `opts => O0, O1, O2`
 - references like `differential => gfortran, flang-new`
 - expected failures like `xfail "reason"`
