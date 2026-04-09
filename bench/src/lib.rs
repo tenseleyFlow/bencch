@@ -4120,7 +4120,23 @@ fn execute_case_cell(
                 }
                 if execution.is_ok() && !case.consistency_checks.is_empty() {
                     artifacts.consistency_issues =
-                        run_consistency_checks(case, &prepared, opt_level, result, &config.tools);
+                        if legacy_case_uses_generic_consistency_checks(case) {
+                            run_generic_consistency_checks(
+                                &CompilerSpec::Named(NamedCompiler::Armfortas),
+                                case,
+                                &prepared.compiler_source,
+                                opt_level,
+                                &config.tools,
+                            )
+                        } else {
+                            run_consistency_checks(
+                                case,
+                                &prepared,
+                                opt_level,
+                                result,
+                                &config.tools,
+                            )
+                        };
                     if !artifacts.consistency_issues.is_empty() {
                         execution = Err(format_consistency_issues(&artifacts.consistency_issues));
                     }
@@ -5375,6 +5391,15 @@ fn expected_artifacts_for_legacy_case(case: &CaseSpec) -> BTreeSet<ArtifactKey> 
         }
     }
     requested
+}
+
+fn legacy_case_uses_generic_consistency_checks(case: &CaseSpec) -> bool {
+    !case.consistency_checks.is_empty()
+        && case
+            .consistency_checks
+            .iter()
+            .copied()
+            .all(|check| check.supports_generic_introspect())
 }
 
 fn stage_to_artifact_key(stage: Stage) -> ArtifactKey {
@@ -9702,6 +9727,40 @@ mod tests {
             primary_backend_kind_for_case(&case, &asm_only_request, &external_tools),
             PrimaryCaptureBackendKind::Observable
         );
+    }
+
+    #[test]
+    fn legacy_cli_consistency_cases_use_generic_observation_path() {
+        let cli_only_case = CaseSpec {
+            name: "cli-consistency".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: vec![
+                ConsistencyCheck::CliAsmReproducible,
+                ConsistencyCheck::CliRunReproducible,
+            ],
+            expectations: vec![Expectation::Contains {
+                target: Target::RunStdout,
+                needle: "42".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        assert!(legacy_case_uses_generic_consistency_checks(&cli_only_case));
+
+        let mixed_case = CaseSpec {
+            consistency_checks: vec![
+                ConsistencyCheck::CliRunReproducible,
+                ConsistencyCheck::CaptureRunReproducible,
+            ],
+            ..cli_only_case.clone()
+        };
+        assert!(!legacy_case_uses_generic_consistency_checks(&mixed_case));
     }
 
     #[cfg(unix)]
