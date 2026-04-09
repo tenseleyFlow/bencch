@@ -1035,16 +1035,7 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                     }
                     "--artifact" => {
                         let value = queue.pop_front().ok_or("--artifact requires a value")?;
-                        let parsed = ArtifactKey::parse_list(value)?;
-                        for artifact in parsed {
-                            if matches!(artifact, ArtifactKey::Extra(_)) {
-                                return Err(format!(
-                                    "compare only supports generic artifacts today; got '{}'",
-                                    artifact.as_str()
-                                ));
-                            }
-                            config.artifacts.insert(artifact);
-                        }
+                        config.artifacts.extend(ArtifactKey::parse_list(value)?);
                     }
                     "--json-report" => {
                         let value = queue.pop_front().ok_or("--json-report requires a value")?;
@@ -1238,6 +1229,7 @@ fn default_introspection_artifacts(
 
 fn run_compare(config: &CompareConfig) -> Result<ComparisonResult, String> {
     let requested = default_compare_artifacts(&config.artifacts);
+    preflight_compare_request(config, &requested)?;
     let left = observe_compiler(
         &config.left,
         &config.program,
@@ -1253,6 +1245,53 @@ fn run_compare(config: &CompareConfig) -> Result<ComparisonResult, String> {
         &config.tools,
     )?;
     Ok(compare_observations(left, right, &requested))
+}
+
+fn capability_request_issue(
+    spec: &CompilerSpec,
+    requested: &BTreeSet<ArtifactKey>,
+    tools: &ToolchainConfig,
+) -> Option<String> {
+    let capabilities = compiler_capabilities(spec, tools);
+    let unavailable = capabilities.unavailable_requests(requested);
+    let unsupported = capabilities.unsupported_requests(requested);
+    if unavailable.is_empty() && unsupported.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![format!("{}:", spec.display_name())];
+    for (artifact, reason) in unavailable {
+        lines.push(format!("  unavailable {}: {}", artifact, reason));
+    }
+    if !unsupported.is_empty() {
+        lines.push(format!(
+            "  unsupported in this adapter: {}",
+            unsupported.join(", ")
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
+fn preflight_compare_request(
+    config: &CompareConfig,
+    requested: &BTreeSet<ArtifactKey>,
+) -> Result<(), String> {
+    let mut issues = Vec::new();
+    if let Some(issue) = capability_request_issue(&config.left, requested, &config.tools) {
+        issues.push(format!("left {}\n{}", config.left.display_name(), issue));
+    }
+    if let Some(issue) = capability_request_issue(&config.right, requested, &config.tools) {
+        issues.push(format!("right {}\n{}", config.right.display_name(), issue));
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "compare request is not supported for the selected compiler surfaces\n{}",
+            issues.join("\n")
+        ))
+    }
 }
 
 fn run_introspect(config: &IntrospectConfig) -> Result<ObservedProgram, String> {
@@ -1874,7 +1913,9 @@ fn compare_observations(
                 ArtifactKey::Executable => {
                     compare_artifact_path(&left, &right, artifact, &mut differences)
                 }
-                ArtifactKey::Extra(_) => {}
+                ArtifactKey::Extra(name) => {
+                    compare_artifact_text(&left, &right, artifact, name, &mut differences)
+                }
             }
         }
     }
@@ -3582,17 +3623,6 @@ impl CaseBuilder {
         };
 
         let generic_compare = if let Some((left, right)) = self.generic_compare {
-            if self
-                .generic_compare_artifacts
-                .iter()
-                .any(|artifact| !artifact.is_generic())
-            {
-                return Err(format!(
-                    "{}: case '{}' compare suite-v2 cases only support generic artifacts today",
-                    suite_path.display(),
-                    self.name
-                ));
-            }
             let mut artifacts = self.generic_compare_artifacts;
             if artifacts.is_empty() {
                 return Err(format!(
@@ -4650,12 +4680,14 @@ fn execute_generic_compare_case_cell(
         json_report: None,
         markdown_report: None,
         tools: config.tools.clone(),
-    })?;
+    });
 
     let execution = if has_failure_expectation(case) {
         Err("suite-v2 compare cases do not support expect-fail rules".to_string())
+    } else if let Ok(result) = &result {
+        evaluate_compare_expectations(case, result)
     } else {
-        evaluate_compare_expectations(case, &result)
+        Err(result.unwrap_err())
     };
 
     let mut outcome = match (effective_status, execution) {
@@ -10567,6 +10599,25 @@ mod tests {
     }
 
     #[test]
+    fn compare_rejects_capability_mismatch_for_namespaced_artifacts() {
+        let config = CompareConfig {
+            left: CompilerSpec::Named(NamedCompiler::Armfortas),
+            right: CompilerSpec::Named(NamedCompiler::Gfortran),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.ir".into())]),
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let err = run_compare(&config).unwrap_err();
+        assert!(err.contains("compare request is not supported"));
+        assert!(err.contains("right gfortran"));
+        assert!(err.contains("armfortas.ir"));
+    }
+
+    #[test]
     fn compare_executable_artifact_uses_file_contents_not_paths() {
         let root = std::env::temp_dir().join("bencch_compare_executable_paths");
         let _ = fs::remove_dir_all(&root);
@@ -11340,6 +11391,57 @@ mod tests {
     }
 
     #[test]
+    fn execute_generic_compare_suite_case_reports_capability_mismatch() {
+        let suite = SuiteSpec {
+            name: "v2/generic-compare".into(),
+            path: PathBuf::from("suite.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "armfortas-ir-vs-gfortran".into(),
+            source: runtime_fixture("if_else.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: None,
+            generic_compare: Some(GenericCompareCase {
+                left: CompilerSpec::Named(NamedCompiler::Armfortas),
+                right: CompilerSpec::Named(NamedCompiler::Gfortran),
+                artifacts: BTreeSet::from([
+                    ArtifactKey::Diagnostics,
+                    ArtifactKey::Runtime,
+                    ArtifactKey::Extra("armfortas.ir".into()),
+                ]),
+            }),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Equals {
+                target: Target::CompareStatus,
+                value: "match".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let outcome = execute_case_cell(&suite, &case, OptLevel::O0, &config).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Fail);
+        assert!(outcome.detail.contains("compare request is not supported"));
+        assert!(outcome.detail.contains("armfortas.ir"));
+    }
+
+    #[test]
     fn parses_suite_and_case() {
         let root = std::env::temp_dir().join("afs_tests_parser_spec.afs");
         fs::write(
@@ -11499,6 +11601,36 @@ end
             case.opt_levels,
             vec![OptLevel::O0, OptLevel::O1, OptLevel::O2]
         );
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parses_generic_compare_case_with_namespaced_artifact() {
+        let root = std::env::temp_dir().join("bencch_generic_compare_namespaced_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "v2/generic-compare"
+
+case "armfortas-ir"
+source "../../fixtures/runtime/if_else.f90"
+compare armfortas armfortas => armfortas.ir
+expect compare.status equals "match"
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root).unwrap();
+        let case = &suite.cases[0];
+        let generic = case.generic_compare.as_ref().unwrap();
+        assert_eq!(generic.left, CompilerSpec::Named(NamedCompiler::Armfortas));
+        assert_eq!(generic.right, CompilerSpec::Named(NamedCompiler::Armfortas));
+        assert!(generic
+            .artifacts
+            .contains(&ArtifactKey::Extra("armfortas.ir".into())));
+        assert!(generic.artifacts.contains(&ArtifactKey::Diagnostics));
+        assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
+
         let _ = fs::remove_file(&root);
     }
 
@@ -11720,7 +11852,7 @@ end
             "--opt".to_string(),
             "O2".to_string(),
             "--artifact".to_string(),
-            "asm,obj".to_string(),
+            "asm,obj,armfortas.ir".to_string(),
             "--json-report".to_string(),
             "/tmp/compare.json".to_string(),
             "--markdown-report".to_string(),
@@ -11745,6 +11877,9 @@ end
         assert_eq!(config.opt_level, OptLevel::O2);
         assert!(config.artifacts.contains(&ArtifactKey::Asm));
         assert!(config.artifacts.contains(&ArtifactKey::Obj));
+        assert!(config
+            .artifacts
+            .contains(&ArtifactKey::Extra("armfortas.ir".into())));
         assert_eq!(
             config.json_report.as_deref(),
             Some(Path::new("/tmp/compare.json"))
