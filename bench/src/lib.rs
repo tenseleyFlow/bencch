@@ -1663,26 +1663,133 @@ fn compare_artifact_path(
     artifact: &ArtifactKey,
     differences: &mut Vec<ArtifactDifference>,
 ) {
-    let left_value = match left.artifacts.get(artifact) {
-        Some(ArtifactValue::Path(path)) => Some(path.display().to_string()),
+    let left_path = match left.artifacts.get(artifact) {
+        Some(ArtifactValue::Path(path)) => Some(path),
         _ => None,
     };
-    let right_value = match right.artifacts.get(artifact) {
-        Some(ArtifactValue::Path(path)) => Some(path.display().to_string()),
+    let right_path = match right.artifacts.get(artifact) {
+        Some(ArtifactValue::Path(path)) => Some(path),
         _ => None,
     };
-    if left_value != right_value {
-        differences.push(ArtifactDifference {
-            artifact: artifact.as_str().to_string(),
-            detail: format!(
-                "{}: {:?}\n{}: {:?}",
-                left.compiler.display_name(),
-                left_value,
-                right.compiler.display_name(),
-                right_value
-            ),
-        });
+
+    match (left_path, right_path) {
+        (Some(left_path), Some(right_path)) => {
+            let left_bytes = fs::read(left_path);
+            let right_bytes = fs::read(right_path);
+            match (left_bytes, right_bytes) {
+                (Ok(left_bytes), Ok(right_bytes)) => {
+                    if left_bytes != right_bytes {
+                        differences.push(ArtifactDifference {
+                            artifact: artifact.as_str().to_string(),
+                            detail: describe_binary_difference(
+                                &left_bytes,
+                                &right_bytes,
+                                &left.compiler.display_name(),
+                                &right.compiler.display_name(),
+                                left_path,
+                                right_path,
+                            ),
+                        });
+                    }
+                }
+                (Err(left_err), Err(right_err)) => {
+                    differences.push(ArtifactDifference {
+                        artifact: artifact.as_str().to_string(),
+                        detail: format!(
+                            "{}: unable to read '{}': {}\n{}: unable to read '{}': {}",
+                            left.compiler.display_name(),
+                            left_path.display(),
+                            left_err,
+                            right.compiler.display_name(),
+                            right_path.display(),
+                            right_err
+                        ),
+                    });
+                }
+                (Err(left_err), Ok(_)) => {
+                    differences.push(ArtifactDifference {
+                        artifact: artifact.as_str().to_string(),
+                        detail: format!(
+                            "{}: unable to read '{}': {}\n{}: readable '{}'",
+                            left.compiler.display_name(),
+                            left_path.display(),
+                            left_err,
+                            right.compiler.display_name(),
+                            right_path.display()
+                        ),
+                    });
+                }
+                (Ok(_), Err(right_err)) => {
+                    differences.push(ArtifactDifference {
+                        artifact: artifact.as_str().to_string(),
+                        detail: format!(
+                            "{}: readable '{}'\n{}: unable to read '{}': {}",
+                            left.compiler.display_name(),
+                            left_path.display(),
+                            right.compiler.display_name(),
+                            right_path.display(),
+                            right_err
+                        ),
+                    });
+                }
+            }
+        }
+        _ => {
+            let left_value = left_path.map(|path| path.display().to_string());
+            let right_value = right_path.map(|path| path.display().to_string());
+            if left_value != right_value {
+                differences.push(ArtifactDifference {
+                    artifact: artifact.as_str().to_string(),
+                    detail: format!(
+                        "{}: {:?}\n{}: {:?}",
+                        left.compiler.display_name(),
+                        left_value,
+                        right.compiler.display_name(),
+                        right_value
+                    ),
+                });
+            }
+        }
     }
+}
+
+fn describe_binary_difference(
+    left: &[u8],
+    right: &[u8],
+    left_label: &str,
+    right_label: &str,
+    left_path: &Path,
+    right_path: &Path,
+) -> String {
+    let shared = left.len().min(right.len());
+    for index in 0..shared {
+        if left[index] != right[index] {
+            return format!(
+                "first differing byte: {}\n{}: {} bytes ({})\n{}: 0x{:02x}\n{}: {} bytes ({})\n{}: 0x{:02x}",
+                index,
+                left_label,
+                left.len(),
+                left_path.display(),
+                left_label,
+                left[index],
+                right_label,
+                right.len(),
+                right_path.display(),
+                right_label,
+                right[index]
+            );
+        }
+    }
+
+    format!(
+        "binary length differs\n{}: {} bytes ({})\n{}: {} bytes ({})",
+        left_label,
+        left.len(),
+        left_path.display(),
+        right_label,
+        right.len(),
+        right_path.display()
+    )
 }
 
 fn compare_status(result: &ComparisonResult) -> &'static str {
@@ -7267,6 +7374,120 @@ mod tests {
         assert!(diagnostics
             .detail
             .contains("fake compiler failure: missing lowering pass"));
+    }
+
+    #[test]
+    fn compare_executable_artifact_uses_file_contents_not_paths() {
+        let root = std::env::temp_dir().join("bencch_compare_executable_paths");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let left_exe = root.join("left.out");
+        let right_exe = root.join("right.out");
+        fs::write(&left_exe, b"same executable bytes").unwrap();
+        fs::write(&right_exe, b"same executable bytes").unwrap();
+
+        let requested = BTreeSet::from([ArtifactKey::Executable]);
+        let left = CompilerObservation {
+            compiler: CompilerSpec::Binary(PathBuf::from("/tmp/left-compiler")),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 0,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Executable,
+                ArtifactValue::Path(left_exe.clone()),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "left".into(),
+                adapter_kind: "explicit-path".into(),
+                backend_mode: "external-driver".into(),
+                backend_detail: "left detail".into(),
+                artifacts_captured: vec!["executable".into()],
+                comparison_basis: None,
+            },
+        };
+        let right = CompilerObservation {
+            compiler: CompilerSpec::Binary(PathBuf::from("/tmp/right-compiler")),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 0,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Executable,
+                ArtifactValue::Path(right_exe.clone()),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "right".into(),
+                adapter_kind: "explicit-path".into(),
+                backend_mode: "external-driver".into(),
+                backend_detail: "right detail".into(),
+                artifacts_captured: vec!["executable".into()],
+                comparison_basis: None,
+            },
+        };
+
+        let result = compare_observations(left, right, &requested);
+        assert!(result.differences.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compare_executable_artifact_reports_binary_difference() {
+        let root = std::env::temp_dir().join("bencch_compare_executable_bytes");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let left_exe = root.join("left.out");
+        let right_exe = root.join("right.out");
+        fs::write(&left_exe, b"abc").unwrap();
+        fs::write(&right_exe, b"axc").unwrap();
+
+        let requested = BTreeSet::from([ArtifactKey::Executable]);
+        let left = CompilerObservation {
+            compiler: CompilerSpec::Binary(PathBuf::from("/tmp/left-compiler")),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 0,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Executable,
+                ArtifactValue::Path(left_exe.clone()),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "left".into(),
+                adapter_kind: "explicit-path".into(),
+                backend_mode: "external-driver".into(),
+                backend_detail: "left detail".into(),
+                artifacts_captured: vec!["executable".into()],
+                comparison_basis: None,
+            },
+        };
+        let right = CompilerObservation {
+            compiler: CompilerSpec::Binary(PathBuf::from("/tmp/right-compiler")),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 0,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Executable,
+                ArtifactValue::Path(right_exe.clone()),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "right".into(),
+                adapter_kind: "explicit-path".into(),
+                backend_mode: "external-driver".into(),
+                backend_detail: "right detail".into(),
+                artifacts_captured: vec!["executable".into()],
+                comparison_basis: None,
+            },
+        };
+
+        let result = compare_observations(left, right, &requested);
+        assert_eq!(result.differences.len(), 1);
+        assert_eq!(result.differences[0].artifact, "executable");
+        assert!(result.differences[0]
+            .detail
+            .contains("first differing byte: 1"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
