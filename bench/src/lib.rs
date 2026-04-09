@@ -8149,6 +8149,7 @@ fn write_failure_bundle(
         )
         .map_err(|e| format!("cannot write armfortas error bundle: {}", e))?;
     }
+    write_armfortas_observation_bundle(&armfortas_root, prepared, artifacts)?;
 
     if !artifacts.references.is_empty() {
         let refs_root = bundle_root.join("references");
@@ -8278,6 +8279,95 @@ fn write_capture_result(root: &Path, result: &CaptureResult) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+fn write_armfortas_observation_bundle(
+    armfortas_root: &Path,
+    prepared: &PreparedInput,
+    artifacts: &ExecutionArtifacts,
+) -> Result<(), String> {
+    let observed = match observed_program_for_armfortas_bundle(prepared, artifacts) {
+        Some(observed) => observed,
+        None => return Ok(()),
+    };
+    let render_config = IntrospectionRenderConfig {
+        summary_only: false,
+        max_artifact_lines: None,
+    };
+    fs::write(
+        armfortas_root.join("observation.txt"),
+        render_introspection_text(&observed, render_config),
+    )
+    .map_err(|e| format!("cannot write armfortas observation text bundle: {}", e))?;
+    fs::write(
+        armfortas_root.join("observation.json"),
+        render_introspection_json(&observed),
+    )
+    .map_err(|e| format!("cannot write armfortas observation json bundle: {}", e))?;
+    fs::write(
+        armfortas_root.join("observation.md"),
+        render_introspection_markdown(&observed, render_config),
+    )
+    .map_err(|e| format!("cannot write armfortas observation markdown bundle: {}", e))?;
+    Ok(())
+}
+
+fn observed_program_for_armfortas_bundle(
+    prepared: &PreparedInput,
+    artifacts: &ExecutionArtifacts,
+) -> Option<ObservedProgram> {
+    if let Some(result) = &artifacts.armfortas {
+        Some(observed_program_from_armfortas_capture(
+            &prepared.compiler_source,
+            result.opt_level,
+            bundle_artifacts_for_capture_result(result),
+            result,
+            None,
+        ))
+    } else if let Some(failure) = &artifacts.armfortas_failure {
+        let partial = failure.partial_result();
+        Some(observed_program_from_armfortas_capture(
+            &prepared.compiler_source,
+            failure.opt_level,
+            bundle_artifacts_for_capture_failure(failure),
+            &partial,
+            Some(failure),
+        ))
+    } else {
+        None
+    }
+}
+
+fn bundle_artifacts_for_capture_result(result: &CaptureResult) -> BTreeSet<ArtifactKey> {
+    bundle_artifacts_for_stages(&result.stages)
+}
+
+fn bundle_artifacts_for_capture_failure(failure: &CaptureFailure) -> BTreeSet<ArtifactKey> {
+    let mut requested = bundle_artifacts_for_stages(&failure.stages);
+    requested.insert(ArtifactKey::Diagnostics);
+    requested
+}
+
+fn bundle_artifacts_for_stages(stages: &BTreeMap<Stage, CapturedStage>) -> BTreeSet<ArtifactKey> {
+    let mut requested = BTreeSet::new();
+    for (stage, captured) in stages {
+        match (stage, captured) {
+            (Stage::Asm, CapturedStage::Text(_)) => {
+                requested.insert(ArtifactKey::Asm);
+            }
+            (Stage::Obj, CapturedStage::Text(_)) => {
+                requested.insert(ArtifactKey::Obj);
+            }
+            (Stage::Run, CapturedStage::Run(_)) => {
+                requested.insert(ArtifactKey::Runtime);
+            }
+            (stage, CapturedStage::Text(_)) => {
+                requested.insert(ArtifactKey::Extra(format!("armfortas.{}", stage.as_str())));
+            }
+            _ => {}
+        }
+    }
+    requested
 }
 
 fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<(), String> {
@@ -10259,6 +10349,9 @@ end
         assert!(bundle.join("source.f90").exists());
         assert!(bundle.join("armfortas").join("ir.txt").exists());
         assert!(bundle.join("armfortas").join("metadata.txt").exists());
+        assert!(bundle.join("armfortas").join("observation.txt").exists());
+        assert!(bundle.join("armfortas").join("observation.json").exists());
+        assert!(bundle.join("armfortas").join("observation.md").exists());
         assert!(bundle.join("armfortas").join("run.stdout.txt").exists());
         assert!(bundle.join("armfortas").join("error.txt").exists());
         assert!(bundle
@@ -10281,6 +10374,13 @@ end
             .contains("primary_backend_detail: linked armfortas::testing capture adapter"));
         assert!(armfortas_metadata.contains("captured_stages: ir, run"));
         assert!(armfortas_metadata.contains("error_stage: sema"));
+        let observation =
+            fs::read_to_string(bundle.join("armfortas").join("observation.txt")).unwrap();
+        assert!(observation.contains("Introspect"));
+        assert!(observation.contains("compiler: armfortas"));
+        assert!(observation.contains("failure_stage: sema"));
+        assert!(observation.contains("generic_artifacts: diagnostics, runtime"));
+        assert!(observation.contains("adapter_extras: armfortas(ir)"));
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
         assert!(consistency_summary.contains("issue_count: 2"));
