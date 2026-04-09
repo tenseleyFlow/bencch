@@ -1,0 +1,32 @@
+name: Standalone Bootstrap
+
+on:
+  push:
+    branches:
+      - trunk
+      - "codex/**"
+  pull_request:
+
+jobs:
+  bootstrap-linked-armfortas:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out bencch
+        uses: actions/checkout@v4
+
+      - name: Check out armfortas
+        uses: actions/checkout@v4
+        with:
+          repository: FortranGoingOnForty/armfortas
+          path: external-armfortas
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate linked bootstrap workspace
+        run: scripts/bootstrap-linked-armfortas.sh external-armfortas
+
+      - name: Verify bootstrap doctor
+        run: cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- doctor

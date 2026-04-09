@@ -14,22 +14,23 @@ This repo holds:
 
 `bencch` now has its own workspace manifest and public CLI.
 
-Today it is still wired to a surrounding `armfortas` checkout for linked
-capture. CLI-side compiler and tool paths are overridable now; linked capture
-still comes from the surrounding workspace. That linked compiler surface is
-currently isolated in `bench/src/compiler.rs`, and the bench-owned
-compiler-facing types now live in `bench-core/`. `bencch doctor` reports
-named-adapter resolution, generic external-driver posture, and the linked
-capture boundary. CLI-observable cases using `asm`, `obj`, and `run` can
-already use an external `armfortas` binary as the primary execution path;
-richer stage capture is still linked.
+CLI-side compiler and tool paths are overridable. Rich linked `armfortas`
+capture still needs an `armfortas` checkout, but Sprint 13 now gives that a
+real bootstrap path instead of assuming `bencch` is embedded as a submodule.
+
+Embedded usage still works:
 
 ```bash
 cargo run -p afs-tests --bin bencch -- list
 cargo run -p afs-tests --bin bencch -- run --suite frontend
 ```
 
-Standalone compiler adapters are not finished yet.
+Standalone linked usage now works through a generated local workspace:
+
+```bash
+scripts/bootstrap-linked-armfortas.sh /path/to/armfortas
+cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- doctor
+```
 
 ## Usage
 
@@ -49,6 +50,18 @@ Inspect the current embedded/standalone posture:
 
 ```bash
 cargo run -p afs-tests --bin bencch -- doctor
+```
+
+Generate a local linked workspace against an external `armfortas` checkout:
+
+```bash
+scripts/bootstrap-linked-armfortas.sh /path/to/armfortas
+```
+
+Then run `bencch` through that generated workspace:
+
+```bash
+cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- list
 ```
 
 Compare two compilers on one program:
