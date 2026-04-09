@@ -96,6 +96,12 @@ struct StatusRule {
     reason: String,
 }
 
+#[derive(Debug, Clone)]
+enum PendingStatusRule {
+    Explicit(StatusRule),
+    XfailSourceComments,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusKind {
     Xfail,
@@ -210,6 +216,8 @@ enum Expectation {
     IntEquals { target: Target, value: i32 },
     FailContains { stage: FailureStage, needle: String },
     FailEquals { stage: FailureStage, value: String },
+    FailSourceComments,
+    FailCommentPatterns(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -3082,7 +3090,7 @@ struct CaseBuilder {
     reference_compilers: Vec<ReferenceCompiler>,
     consistency_checks: Vec<ConsistencyCheck>,
     expectations: Vec<Expectation>,
-    status_rules: Vec<StatusRule>,
+    status_rules: Vec<PendingStatusRule>,
 }
 
 impl CaseBuilder {
@@ -3179,6 +3187,28 @@ impl CaseBuilder {
             ));
         }
 
+        let needs_source_comment_resolution = self
+            .expectations
+            .iter()
+            .any(|expectation| matches!(expectation, Expectation::FailSourceComments))
+            || self
+                .status_rules
+                .iter()
+                .any(|rule| matches!(rule, PendingStatusRule::XfailSourceComments));
+        let source_text = if needs_source_comment_resolution {
+            Some(fs::read_to_string(&source).map_err(|e| {
+                format!(
+                    "{}: case '{}': cannot read source '{}' for comment-based directives: {}",
+                    suite_path.display(),
+                    self.name,
+                    source.display(),
+                    e
+                )
+            })?)
+        } else {
+            None
+        };
+
         let generic_introspect = if let Some(compiler) = self.generic_compiler {
             if self.generic_artifacts.is_empty() {
                 return Err(format!(
@@ -3235,6 +3265,20 @@ impl CaseBuilder {
         } else {
             self.opt_levels
         };
+        let expectations = resolve_source_comment_expectations(
+            self.expectations,
+            source_text.as_deref(),
+            suite_path,
+            &self.name,
+            &source,
+        )?;
+        let status_rules = resolve_source_comment_status_rules(
+            self.status_rules,
+            source_text.as_deref(),
+            suite_path,
+            &self.name,
+            &source,
+        )?;
 
         Ok(CaseSpec {
             name: self.name,
@@ -3247,8 +3291,8 @@ impl CaseBuilder {
             repeat_count: self.repeat_count,
             reference_compilers: self.reference_compilers,
             consistency_checks: self.consistency_checks,
-            expectations: self.expectations,
-            status_rules: self.status_rules,
+            expectations,
+            status_rules,
         })
     }
 }
@@ -3566,6 +3610,10 @@ fn parse_failure_expectation(
     path: &Path,
     line_no: usize,
 ) -> Result<Expectation, String> {
+    if rest.trim().eq_ignore_ascii_case("comments") {
+        return Ok(Expectation::FailSourceComments);
+    }
+
     if let Some((target, value)) = rest.split_once(" contains ") {
         return Ok(Expectation::FailContains {
             stage: parse_failure_stage(target.trim(), path, line_no)?,
@@ -3593,14 +3641,17 @@ fn parse_status_rule(
     rest: &str,
     path: &Path,
     line_no: usize,
-) -> Result<StatusRule, String> {
+) -> Result<PendingStatusRule, String> {
     let rest = rest.trim();
+    if kind == StatusKind::Xfail && rest.eq_ignore_ascii_case("comments") {
+        return Ok(PendingStatusRule::XfailSourceComments);
+    }
     if rest.starts_with('"') {
-        return Ok(StatusRule {
+        return Ok(PendingStatusRule::Explicit(StatusRule {
             kind,
             selector: OptSelector::All,
             reason: parse_quoted(rest, path, line_no)?,
-        });
+        }));
     }
 
     let conditional = rest.strip_prefix("when ").ok_or_else(|| {
@@ -3618,11 +3669,86 @@ fn parse_status_rule(
         )
     })?;
 
-    Ok(StatusRule {
+    Ok(PendingStatusRule::Explicit(StatusRule {
         kind,
         selector: parse_opt_selector(selector.trim(), path, line_no)?,
         reason: parse_quoted(reason.trim(), path, line_no)?,
-    })
+    }))
+}
+
+fn resolve_source_comment_expectations(
+    expectations: Vec<Expectation>,
+    source_text: Option<&str>,
+    suite_path: &Path,
+    case_name: &str,
+    source_path: &Path,
+) -> Result<Vec<Expectation>, String> {
+    let mut resolved = Vec::with_capacity(expectations.len());
+    for expectation in expectations {
+        match expectation {
+            Expectation::FailSourceComments => {
+                let source_text = source_text.ok_or_else(|| {
+                    format!(
+                        "{}: case '{}': source comments were required but '{}' was not loaded",
+                        suite_path.display(),
+                        case_name,
+                        source_path.display()
+                    )
+                })?;
+                let patterns = extract_error_expected_patterns(source_text);
+                if patterns.is_empty() {
+                    return Err(format!(
+                        "{}: case '{}' requests expect-fail comments but '{}' has no ! ERROR_EXPECTED: lines",
+                        suite_path.display(),
+                        case_name,
+                        source_path.display()
+                    ));
+                }
+                resolved.push(Expectation::FailCommentPatterns(patterns));
+            }
+            other => resolved.push(other),
+        }
+    }
+    Ok(resolved)
+}
+
+fn resolve_source_comment_status_rules(
+    status_rules: Vec<PendingStatusRule>,
+    source_text: Option<&str>,
+    suite_path: &Path,
+    case_name: &str,
+    source_path: &Path,
+) -> Result<Vec<StatusRule>, String> {
+    let mut resolved = Vec::with_capacity(status_rules.len());
+    for rule in status_rules {
+        match rule {
+            PendingStatusRule::Explicit(rule) => resolved.push(rule),
+            PendingStatusRule::XfailSourceComments => {
+                let source_text = source_text.ok_or_else(|| {
+                    format!(
+                        "{}: case '{}': source comments were required but '{}' was not loaded",
+                        suite_path.display(),
+                        case_name,
+                        source_path.display()
+                    )
+                })?;
+                let reason = extract_xfail_reason(source_text).ok_or_else(|| {
+                    format!(
+                        "{}: case '{}' requests xfail comments but '{}' has no ! XFAIL: lines",
+                        suite_path.display(),
+                        case_name,
+                        source_path.display()
+                    )
+                })?;
+                resolved.push(StatusRule {
+                    kind: StatusKind::Xfail,
+                    selector: OptSelector::All,
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 fn parse_opt_selector(raw: &str, path: &Path, line_no: usize) -> Result<OptSelector, String> {
@@ -4524,7 +4650,10 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
                 requested.insert(Stage::Run);
             }
         },
-        Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+        Expectation::FailContains { .. }
+        | Expectation::FailEquals { .. }
+        | Expectation::FailSourceComments
+        | Expectation::FailCommentPatterns(_) => {}
     }
 }
 
@@ -4640,7 +4769,10 @@ fn evaluate_observation_expectations(
                     ));
                 }
             }
-            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+            Expectation::FailContains { .. }
+            | Expectation::FailEquals { .. }
+            | Expectation::FailSourceComments
+            | Expectation::FailCommentPatterns(_) => {}
         }
     }
     Ok(())
@@ -4696,7 +4828,10 @@ fn evaluate_compare_expectations(case: &CaseSpec, result: &ComparisonResult) -> 
                     ));
                 }
             }
-            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+            Expectation::FailContains { .. }
+            | Expectation::FailEquals { .. }
+            | Expectation::FailSourceComments
+            | Expectation::FailCommentPatterns(_) => {}
         }
     }
     Ok(())
@@ -4744,11 +4879,23 @@ fn evaluate_failure_expectations(case: &CaseSpec, failure: &CaptureFailure) -> R
                     ));
                 }
             }
+            Expectation::FailCommentPatterns(patterns) => {
+                saw_failure_expectation = true;
+                for needle in patterns {
+                    if !failure.detail.contains(needle) {
+                        return Err(format!(
+                            "expected failure detail to contain source comment {:?}\nactual:\n{}",
+                            needle, failure.detail
+                        ));
+                    }
+                }
+            }
             Expectation::CheckComments(_)
             | Expectation::Contains { .. }
             | Expectation::NotContains { .. }
             | Expectation::Equals { .. }
-            | Expectation::IntEquals { .. } => {}
+            | Expectation::IntEquals { .. }
+            | Expectation::FailSourceComments => {}
         }
     }
 
@@ -4813,11 +4960,23 @@ fn evaluate_observation_failure_expectations(
                     ));
                 }
             }
+            Expectation::FailCommentPatterns(patterns) => {
+                saw_failure_expectation = true;
+                for needle in patterns {
+                    if !diagnostics.contains(needle) {
+                        return Err(format!(
+                            "expected failure detail to contain source comment {:?}\nactual:\n{}",
+                            needle, diagnostics
+                        ));
+                    }
+                }
+            }
             Expectation::CheckComments(_)
             | Expectation::Contains { .. }
             | Expectation::NotContains { .. }
             | Expectation::Equals { .. }
-            | Expectation::IntEquals { .. } => {}
+            | Expectation::IntEquals { .. }
+            | Expectation::FailSourceComments => {}
         }
     }
 
@@ -4862,7 +5021,10 @@ fn has_failure_expectation(case: &CaseSpec) -> bool {
     case.expectations.iter().any(|expectation| {
         matches!(
             expectation,
-            Expectation::FailContains { .. } | Expectation::FailEquals { .. }
+            Expectation::FailContains { .. }
+                | Expectation::FailEquals { .. }
+                | Expectation::FailSourceComments
+                | Expectation::FailCommentPatterns(_)
         )
     })
 }
@@ -4876,6 +5038,11 @@ fn expected_failure_description(case: &CaseSpec) -> String {
             }
             Expectation::FailEquals { stage, value } => {
                 items.push(format!("{} equals {:?}", stage.as_str(), value));
+            }
+            Expectation::FailCommentPatterns(patterns) => {
+                for needle in patterns {
+                    items.push(format!("comments contain {:?}", needle));
+                }
             }
             _ => {}
         }
@@ -5177,7 +5344,10 @@ fn expected_artifacts_for_legacy_case(case: &CaseSpec) -> BTreeSet<ArtifactKey> 
                 | Target::CompareDifferenceCount
                 | Target::CompareBasis => {}
             },
-            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+            Expectation::FailContains { .. }
+            | Expectation::FailEquals { .. }
+            | Expectation::FailSourceComments
+            | Expectation::FailCommentPatterns(_) => {}
         }
     }
     requested
@@ -8760,6 +8930,25 @@ fn extract_checks(source: &str) -> Vec<Check> {
         .collect()
 }
 
+fn extract_xfail_reason(source: &str) -> Option<String> {
+    source.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("! XFAIL:")
+            .map(|rest| rest.trim().to_string())
+    })
+}
+
+fn extract_error_expected_patterns(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("! ERROR_EXPECTED:")
+                .map(|rest| rest.trim().to_string())
+        })
+        .collect()
+}
+
 fn extract_ir_checks(source: &str) -> Vec<Check> {
     source
         .lines()
@@ -10190,6 +10379,84 @@ end
         assert_eq!(suite.cases.len(), 1);
         assert!(has_failure_expectation(&suite.cases[0]));
         let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parses_failure_expectation_from_source_comments() {
+        let root = std::env::temp_dir().join("afs_tests_failure_comment_spec");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("fixtures")).unwrap();
+        fs::create_dir_all(root.join("suites")).unwrap();
+
+        let source = root.join("fixtures/error_expected.f90");
+        fs::write(
+            &source,
+            "! ERROR_EXPECTED: hidden\nprogram error_expected\n  print *, hidden\nend program\n",
+        )
+        .unwrap();
+
+        let suite_path = root.join("suites/spec.afs");
+        fs::write(
+            &suite_path,
+            r#"suite "v2/comment-failure"
+
+case "error_expected_comments"
+source "../fixtures/error_expected.f90"
+compiler armfortas => diagnostics
+expect-fail comments
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&suite_path).unwrap();
+        match &suite.cases[0].expectations[0] {
+            Expectation::FailCommentPatterns(patterns) => {
+                assert_eq!(patterns, &vec!["hidden".to_string()]);
+            }
+            other => panic!("expected source-comment failure expectation, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_xfail_comments_from_source() {
+        let root = std::env::temp_dir().join("afs_tests_xfail_comment_spec");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("fixtures")).unwrap();
+        fs::create_dir_all(root.join("suites")).unwrap();
+
+        let source = root.join("fixtures/xfail_case.f90");
+        fs::write(
+            &source,
+            "! XFAIL: audit BLOCKING-1 (demo)\nprogram xfail_case\nend program\n",
+        )
+        .unwrap();
+
+        let suite_path = root.join("suites/spec.afs");
+        fs::write(
+            &suite_path,
+            r#"suite "v2/comment-xfail"
+
+case "xfail_comments"
+source "../fixtures/xfail_case.f90"
+compiler armfortas => runtime
+xfail comments
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&suite_path).unwrap();
+        match status_for_opt(&suite.cases[0], OptLevel::O0) {
+            EffectiveStatus::Xfail(reason) => {
+                assert_eq!(reason, "audit BLOCKING-1 (demo)");
+            }
+            other => panic!("expected xfail status, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
