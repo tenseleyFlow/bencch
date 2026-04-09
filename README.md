@@ -251,16 +251,16 @@ end
 Graph cases use `entry` plus ordered `file` lines:
 
 ```text
-suite "modules/runtime-graphs"
+suite "v2/generic-graphs"
 
-case "module_chain_runtime"
+case "module_chain_frontend"
 entry "../../fixtures/modules/module_chain/main.f90"
 file "../../fixtures/modules/module_chain/math_seed.f90"
 file "../../fixtures/modules/module_chain/math_values.f90"
 file "../../fixtures/modules/module_chain/main.f90"
-opts => O0, O1, O2
-armfortas => run
-expect run.stdout check-comments
+compiler armfortas => armfortas.ast, armfortas.sema
+expect armfortas.ast contains "name: \"math_seed\""
+expect armfortas.sema contains "local_name: \"doubled\""
 end
 ```
 
@@ -273,6 +273,7 @@ Common things the runner understands:
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
 - generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
 - generic compare cases like `compare gfortran flang-new => asm`, including opt matrices
+- suite-v2 graph cases with `entry` plus ordered `file` lines
 - opt matrices like `opts => O0, O1, O2`
 - references like `differential => gfortran, flang-new`
 - expected failures like `xfail "reason"`
