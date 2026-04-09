@@ -33,3 +33,27 @@ jobs:
           cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- doctor > doctor.txt
           grep "armfortas_capture_root: .*external-armfortas" doctor.txt
           grep "armfortas_capture_status: linked via Cargo to .*external-armfortas" doctor.txt
+
+  bootstrap-standalone-external:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out bencch
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate external-only workspace
+        run: scripts/bootstrap-standalone-external.sh
+
+      - name: Verify external-only doctor
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- doctor > doctor.txt
+          grep "armfortas_capture_mode: unavailable" doctor.txt
+          grep "linked capture is unavailable in this build" doctor.txt
+
+      - name: Verify external-only compare
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- compare fixtures/fake_compilers/match_42_a.sh fixtures/fake_compilers/match_42_b.sh --program fixtures/runtime/if_else.f90 > compare.txt
+          grep "status: MATCH" compare.txt

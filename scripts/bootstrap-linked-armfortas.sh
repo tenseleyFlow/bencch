@@ -67,6 +67,10 @@ edition = "2021"
 description = "Structured generic compiler bench runner"
 build = "../../bench/build.rs"
 
+[features]
+default = ["linked-armfortas"]
+linked-armfortas = []
+
 [lib]
 path = "../../bench/src/lib.rs"
 

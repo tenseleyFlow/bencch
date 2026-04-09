@@ -1,5 +1,6 @@
 .docs/
 .bencch-local/
+.bencch-external/
 reports/
 target/
 afs_*.dat

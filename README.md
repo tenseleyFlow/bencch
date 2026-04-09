@@ -35,6 +35,16 @@ cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- 
 That generated path keeps linked capture working and makes `doctor` report the
 actual linked `armfortas` checkout instead of assuming `bencch` is embedded.
 
+Standalone external-only usage now works through a second generated workspace:
+
+```bash
+scripts/bootstrap-standalone-external.sh
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- doctor
+```
+
+That mode drops linked capture entirely and keeps the generic external-driver
+surface available for `compare`, `introspect`, and external-facing `run` work.
+
 ## Usage
 
 List suites:
