@@ -234,6 +234,37 @@ expect run.exit_code equals 0
 end
 ```
 
+Generic compiler cases can also lean on references and CLI-style
+reproducibility checks:
+
+```text
+suite "v2/generic-differential"
+
+case "gfortran_runtime_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compiler gfortran => runtime
+differential => flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+```
+
+```text
+suite "v2/generic-consistency"
+
+case "fake_compiler_runtime_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+repeat => 3
+compiler "../../fixtures/fake_compilers/match_42_a.sh" => asm, runtime
+consistency => cli_asm_reproducible, cli_run_reproducible
+expect asm contains ".globl _main"
+expect run.stdout contains "42"
+expect run.exit_code equals 0
+end
+```
+
 For mem2reg-branch compatibility, `check-comments` on `armfortas.ir` understands
 inline `! IR_CHECK:` and `! IR_NOT:` annotations, while `run.stdout
 check-comments` keeps using the usual `! CHECK:` lines.
@@ -334,7 +365,7 @@ Common things the runner understands:
 
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
 - generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
-- suite-v2 generic compiler cases can also use opt matrices
+- suite-v2 generic compiler cases can also use opt matrices, `differential => ...`, and CLI-style reproducibility checks
 - `check-comments` on `armfortas.ir` / `ir` uses `! IR_CHECK:` and `! IR_NOT:`
 - `expect-fail comments` uses inline `! ERROR_EXPECTED:` source comments
 - `xfail comments` uses the first inline `! XFAIL:` source comment
