@@ -69,6 +69,22 @@ jobs:
           cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-introspect --case fake_compiler_runtime --all > run.txt
           grep "PASS   v2/generic-introspect::fake_compiler_runtime\\[O0\\]" run.txt
 
+      - name: Verify external-only generic compare suite run
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-compare --case fake_compilers_match_matrix --all > compare-suite.txt
+          grep "PASS   v2/generic-compare::fake_compilers_match_matrix\\[O0\\]" compare-suite.txt
+          grep "PASS   v2/generic-compare::fake_compilers_match_matrix\\[O1\\]" compare-suite.txt
+          grep "PASS   v2/generic-compare::fake_compilers_match_matrix\\[O2\\]" compare-suite.txt
+
+      - name: Verify external-only generic failure suites
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-failures --case fake_compiler_expected_diagnostic --all > failure-suite.txt
+          grep "PASS   v2/generic-failures::fake_compiler_expected_diagnostic\\[O0\\]" failure-suite.txt
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-failure-matrix --case fake_compiler_expected_diagnostic_matrix --all > failure-matrix.txt
+          grep "PASS   v2/generic-failure-matrix::fake_compiler_expected_diagnostic_matrix\\[O0\\]" failure-matrix.txt
+          grep "PASS   v2/generic-failure-matrix::fake_compiler_expected_diagnostic_matrix\\[O1\\]" failure-matrix.txt
+          grep "PASS   v2/generic-failure-matrix::fake_compiler_expected_diagnostic_matrix\\[O2\\]" failure-matrix.txt
+
       - name: Verify linked-only suite guidance
         run: |
           if cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite frontend --case stage_walk --all > legacy.txt 2>&1; then

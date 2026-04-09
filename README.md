@@ -57,6 +57,18 @@ Example external-only authored suite run:
 cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-introspect --case fake_compiler_runtime --all
 ```
 
+Example external-only authored compare matrix:
+
+```bash
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-compare --case fake_compilers_match_matrix --all
+```
+
+Example external-only authored failure matrix:
+
+```bash
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-failure-matrix --case fake_compiler_expected_diagnostic_matrix --all
+```
+
 Legacy rich-stage suites still need linked capture. In an external-only build,
 they now fail early with a direct message telling you to use
 `scripts/bootstrap-linked-armfortas.sh`.
