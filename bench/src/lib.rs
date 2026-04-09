@@ -852,6 +852,10 @@ pub fn run_cli_named(program_name: &str, args: &[String]) -> i32 {
         },
         Ok(CommandKind::Doctor(config)) => {
             println!("{}", render_doctor_report(&config));
+            if let Err(err) = write_doctor_reports(&config) {
+                eprintln!("{}: {}", program_name, err);
+                return 1;
+            }
             0
         }
         Ok(CommandKind::Help) => {
@@ -878,6 +882,8 @@ enum CommandKind {
 #[derive(Debug, Clone)]
 struct DoctorConfig {
     tools: ToolchainConfig,
+    json_report: Option<PathBuf>,
+    markdown_report: Option<PathBuf>,
 }
 
 fn parse_tool_override_arg(
@@ -1129,6 +1135,8 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
         "doctor" => {
             let mut config = DoctorConfig {
                 tools: ToolchainConfig::from_env(),
+                json_report: None,
+                markdown_report: None,
             };
             let mut queue: VecDeque<&String> = args[1..].iter().collect();
             while let Some(arg) = queue.pop_front() {
@@ -1136,6 +1144,16 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                     continue;
                 }
                 match arg.as_str() {
+                    "--json-report" => {
+                        let value = queue.pop_front().ok_or("--json-report requires a value")?;
+                        config.json_report = Some(PathBuf::from(value));
+                    }
+                    "--markdown-report" => {
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--markdown-report requires a value")?;
+                        config.markdown_report = Some(PathBuf::from(value));
+                    }
                     "--help" | "-h" => return Ok(CommandKind::Help),
                     other => return Err(format!("unknown doctor option: {}", other)),
                 }
@@ -1168,7 +1186,7 @@ fn print_usage(program_name: &str) {
         program_name
     );
     eprintln!(
-        "  {} doctor [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]",
+        "  {} doctor [--json-report <path>] [--markdown-report <path>] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]",
         program_name
     );
     eprintln!();
@@ -3060,7 +3078,7 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-fn render_doctor_report(config: &DoctorConfig) -> String {
+fn doctor_report_fields(config: &DoctorConfig) -> Vec<(String, String)> {
     let workspace_root = workspace_root();
     let suite_root = default_suite_root();
     let report_root = default_report_root();
@@ -3071,33 +3089,35 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
     let capture_root = armfortas.capture_root();
     let capture_manifest = capture_root.as_ref().map(|root| root.join("Cargo.toml"));
 
-    let mut lines = vec![
-        "Doctor".to_string(),
-        format!("  workspace_root: {}", display_path(&workspace_root)),
-        format!("  suite_root: {}", display_path(&suite_root)),
-        format!("  report_root: {}", display_path(&report_root)),
-        format!("  armfortas_cli_adapter: {}", armfortas.cli_description()),
-        format!(
-            "  armfortas_capture_adapter: {}",
-            armfortas.capture_description()
+    let mut fields = vec![
+        ("workspace_root".to_string(), display_path(&workspace_root)),
+        ("suite_root".to_string(), display_path(&suite_root)),
+        ("report_root".to_string(), display_path(&report_root)),
+        (
+            "armfortas_cli_adapter".to_string(),
+            armfortas.cli_description().to_string(),
         ),
-        format!(
-            "  primary_backend_full: {}",
-            armfortas.capture_description()
+        (
+            "armfortas_capture_adapter".to_string(),
+            armfortas.capture_description().to_string(),
         ),
-        format!(
-            "  primary_backend_observable: {}",
-            observable_backend.description()
+        (
+            "primary_backend_full".to_string(),
+            armfortas.capture_description().to_string(),
         ),
-        format!(
-            "  armfortas_capture_root: {}",
+        (
+            "primary_backend_observable".to_string(),
+            observable_backend.description().to_string(),
+        ),
+        (
+            "armfortas_capture_root".to_string(),
             capture_root
                 .as_ref()
                 .map(|root| display_path(root))
-                .unwrap_or_else(|| "unavailable".to_string())
+                .unwrap_or_else(|| "unavailable".to_string()),
         ),
-        format!(
-            "  armfortas_capture_manifest: {}",
+        (
+            "armfortas_capture_manifest".to_string(),
             capture_manifest
                 .as_ref()
                 .map(|manifest| {
@@ -3107,152 +3127,230 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
                         "missing".to_string()
                     }
                 })
-                .unwrap_or_else(|| "unavailable".to_string())
+                .unwrap_or_else(|| "unavailable".to_string()),
+        ),
+        (
+            "armfortas_cli_mode".to_string(),
+            armfortas.cli_mode_name().to_string(),
         ),
     ];
-
-    lines.push(format!(
-        "  armfortas_cli_mode: {}",
-        armfortas.cli_mode_name()
-    ));
     match armfortas.cli() {
         ArmfortasCliAdapter::Linked => {
-            lines.push(format!(
-                "  armfortas_cli_status: {}",
+            fields.push((
+                "armfortas_cli_status".to_string(),
                 capture_root
                     .as_ref()
                     .map(|root| format!("linked via Cargo to {}", display_path(root)))
                     .unwrap_or_else(|| {
                         "linked adapter requested but unavailable in this build".to_string()
-                    })
+                    }),
             ));
         }
         ArmfortasCliAdapter::External(binary) => {
-            lines.push(format!(
-                "  armfortas_cli_status: {}",
-                tool_probe_status(binary, false)
+            fields.push((
+                "armfortas_cli_status".to_string(),
+                tool_probe_status(binary, false),
             ));
         }
     }
-    lines.push(format!(
-        "  armfortas_capture_mode: {}",
-        armfortas.capture_mode_name()
+    fields.push((
+        "armfortas_capture_mode".to_string(),
+        armfortas.capture_mode_name().to_string(),
     ));
-    lines.push(format!(
-        "  armfortas_capture_status: {}",
+    fields.push((
+        "armfortas_capture_status".to_string(),
         capture_root
             .as_ref()
             .map(|root| format!("linked via Cargo to {}", display_path(root)))
             .unwrap_or_else(|| {
                 "unavailable in this build; use scripts/bootstrap-linked-armfortas.sh".to_string()
-            })
+            }),
     ));
-    lines.push(
-        "  primary_backend_selection: observable backend is selected for asm/obj/run-only cells when the armfortas CLI is external and the case does not require expect-fail or capture-consistency semantics; otherwise full backend"
-            .to_string(),
-    );
-    lines.push(format!(
-        "  named_compiler.armfortas: cli={} capture={}",
-        armfortas.cli_mode_name(),
-        armfortas.capture_mode_name()
+    fields.push((
+        "primary_backend_selection".to_string(),
+        "observable backend is selected for asm/obj/run-only cells when the armfortas CLI is external and the case does not require expect-fail or capture-consistency semantics; otherwise full backend".to_string(),
+    ));
+    fields.push((
+        "named_compiler.armfortas".to_string(),
+        format!(
+            "cli={} capture={}",
+            armfortas.cli_mode_name(),
+            armfortas.capture_mode_name()
+        ),
     ));
     let armfortas_capabilities = compiler_capabilities(
         &CompilerSpec::Named(NamedCompiler::Armfortas),
         &config.tools,
     );
-    lines.push(format!(
-        "  named_compiler.armfortas.generic_artifacts: {}",
-        format_artifact_name_list(&armfortas_capabilities.generic_artifacts())
+    fields.push((
+        "named_compiler.armfortas.generic_artifacts".to_string(),
+        format_artifact_name_list(&armfortas_capabilities.generic_artifacts()),
     ));
-    lines.push(format!(
-        "  named_compiler.armfortas.adapter_extras: {}",
-        capability_extra_summary(&armfortas_capabilities.adapter_extras())
+    fields.push((
+        "named_compiler.armfortas.adapter_extras".to_string(),
+        capability_extra_summary(&armfortas_capabilities.adapter_extras()),
     ));
-    lines.push(format!(
-        "  named_compiler.armfortas.unavailable_artifacts: {}",
-        capability_unavailable_summary(&armfortas_capabilities)
+    fields.push((
+        "named_compiler.armfortas.unavailable_artifacts".to_string(),
+        capability_unavailable_summary(&armfortas_capabilities),
     ));
-    lines.push(format!(
-        "  named_compiler.gfortran: {}",
-        tool_probe_status(&config.tools.gfortran, false)
+    fields.push((
+        "named_compiler.gfortran".to_string(),
+        tool_probe_status(&config.tools.gfortran, false),
     ));
     let gfortran_capabilities =
         compiler_capabilities(&CompilerSpec::Named(NamedCompiler::Gfortran), &config.tools);
-    lines.push(format!(
-        "  named_compiler.gfortran.generic_artifacts: {}",
-        format_artifact_name_list(&gfortran_capabilities.generic_artifacts())
+    fields.push((
+        "named_compiler.gfortran.generic_artifacts".to_string(),
+        format_artifact_name_list(&gfortran_capabilities.generic_artifacts()),
     ));
-    lines.push(format!(
-        "  named_compiler.gfortran.adapter_extras: {}",
-        capability_extra_summary(&gfortran_capabilities.adapter_extras())
+    fields.push((
+        "named_compiler.gfortran.adapter_extras".to_string(),
+        capability_extra_summary(&gfortran_capabilities.adapter_extras()),
     ));
-    lines.push(format!(
-        "  named_compiler.flang-new: {}",
-        tool_probe_status(&config.tools.flang_new, false)
+    fields.push((
+        "named_compiler.flang-new".to_string(),
+        tool_probe_status(&config.tools.flang_new, false),
     ));
     let flang_capabilities =
         compiler_capabilities(&CompilerSpec::Named(NamedCompiler::FlangNew), &config.tools);
-    lines.push(format!(
-        "  named_compiler.flang-new.generic_artifacts: {}",
-        format_artifact_name_list(&flang_capabilities.generic_artifacts())
+    fields.push((
+        "named_compiler.flang-new.generic_artifacts".to_string(),
+        format_artifact_name_list(&flang_capabilities.generic_artifacts()),
     ));
-    lines.push(format!(
-        "  named_compiler.flang-new.adapter_extras: {}",
-        capability_extra_summary(&flang_capabilities.adapter_extras())
+    fields.push((
+        "named_compiler.flang-new.adapter_extras".to_string(),
+        capability_extra_summary(&flang_capabilities.adapter_extras()),
     ));
-    lines.push(
-        "  explicit_compiler_path: any filesystem path passed to compare/introspect uses the generic external-driver adapter"
+    fields.push((
+        "explicit_compiler_path".to_string(),
+        "any filesystem path passed to compare/introspect uses the generic external-driver adapter"
             .to_string(),
-    );
+    ));
     let explicit_capabilities = compiler_capabilities(
         &CompilerSpec::Binary(PathBuf::from("/path/to/compiler")),
         &config.tools,
     );
-    lines.push(format!(
-        "  explicit_compiler_path.generic_artifacts: {}",
-        format_artifact_name_list(&explicit_capabilities.generic_artifacts())
+    fields.push((
+        "explicit_compiler_path.generic_artifacts".to_string(),
+        format_artifact_name_list(&explicit_capabilities.generic_artifacts()),
     ));
-    lines.push(format!(
-        "  explicit_compiler_path.adapter_extras: {}",
-        capability_extra_summary(&explicit_capabilities.adapter_extras())
+    fields.push((
+        "explicit_compiler_path.adapter_extras".to_string(),
+        capability_extra_summary(&explicit_capabilities.adapter_extras()),
     ));
-    lines.push(format!(
-        "  gfortran: {}",
-        tool_probe_status(&config.tools.gfortran, false)
+    fields.push((
+        "gfortran".to_string(),
+        tool_probe_status(&config.tools.gfortran, false),
     ));
-    lines.push(format!(
-        "  flang-new: {}",
-        tool_probe_status(&config.tools.flang_new, false)
+    fields.push((
+        "flang-new".to_string(),
+        tool_probe_status(&config.tools.flang_new, false),
     ));
-    lines.push(format!(
-        "  as: {}",
-        tool_probe_status(&config.tools.system_as, false)
+    fields.push((
+        "as".to_string(),
+        tool_probe_status(&config.tools.system_as, false),
     ));
-    lines.push(format!(
-        "  otool: {}",
-        tool_probe_status(&config.tools.otool, false)
+    fields.push((
+        "otool".to_string(),
+        tool_probe_status(&config.tools.otool, false),
     ));
-    lines.push(format!(
-        "  nm: {}",
-        tool_probe_status(&config.tools.nm, false)
+    fields.push(("nm".to_string(), tool_probe_status(&config.tools.nm, false)));
+    fields.push((
+        "note".to_string(),
+        if capture_root.is_some() {
+            "linked capture still depends on the surrounding armfortas checkout".to_string()
+        } else {
+            "linked capture is unavailable in this build; external compiler compare/introspect surfaces still work".to_string()
+        },
     ));
-    lines.push(if capture_root.is_some() {
-        "  note: linked capture still depends on the surrounding armfortas checkout".to_string()
-    } else {
-        "  note: linked capture is unavailable in this build; external compiler compare/introspect surfaces still work".to_string()
-    });
-    lines.push(if capture_root.is_some() {
-        "  linked_mode_surface: rich armfortas stages, legacy frontend/module suites, capture consistency".to_string()
-    } else {
-        "  external_only_surface: compare, introspect, generic suite-v2, observable-only run cells".to_string()
-    });
-    lines.push(if capture_root.is_some() {
-        "  external_only_limits: none in this build".to_string()
-    } else {
-        "  linked_only_surface: armfortas.* extras, legacy frontend/module suites, capture consistency".to_string()
-    });
+    fields.push((
+        if capture_root.is_some() {
+            "linked_mode_surface".to_string()
+        } else {
+            "external_only_surface".to_string()
+        },
+        if capture_root.is_some() {
+            "rich armfortas stages, legacy frontend/module suites, capture consistency".to_string()
+        } else {
+            "compare, introspect, generic suite-v2, observable-only run cells".to_string()
+        },
+    ));
+    fields.push((
+        if capture_root.is_some() {
+            "external_only_limits".to_string()
+        } else {
+            "linked_only_surface".to_string()
+        },
+        if capture_root.is_some() {
+            "none in this build".to_string()
+        } else {
+            "armfortas.* extras, legacy frontend/module suites, capture consistency".to_string()
+        },
+    ));
 
+    fields
+}
+
+fn render_doctor_report(config: &DoctorConfig) -> String {
+    let mut lines = vec!["Doctor".to_string()];
+    for (field, value) in doctor_report_fields(config) {
+        lines.push(format!("  {}: {}", field, value));
+    }
     lines.join("\n")
+}
+
+fn render_doctor_json(config: &DoctorConfig) -> String {
+    let fields = doctor_report_fields(config);
+    let mut lines = vec![
+        "{".to_string(),
+        "  \"command\": \"doctor\",".to_string(),
+        "  \"fields\": {".to_string(),
+    ];
+    for (index, (field, value)) in fields.iter().enumerate() {
+        lines.push(format!(
+            "    \"{}\": \"{}\"{}",
+            json_escape(field),
+            json_escape(value),
+            if index + 1 == fields.len() { "" } else { "," }
+        ));
+    }
+    lines.push("  }".to_string());
+    lines.push("}".to_string());
+    lines.join("\n") + "\n"
+}
+
+fn render_doctor_markdown(config: &DoctorConfig) -> String {
+    let mut lines = vec![
+        "# bencch doctor report".to_string(),
+        String::new(),
+        "| field | value |".to_string(),
+        "| --- | --- |".to_string(),
+    ];
+    for (field, value) in doctor_report_fields(config) {
+        lines.push(format!(
+            "| `{}` | {} |",
+            field,
+            doctor_markdown_cell(&value)
+        ));
+    }
+    lines.join("\n") + "\n"
+}
+
+fn write_doctor_reports(config: &DoctorConfig) -> Result<(), String> {
+    if let Some(path) = &config.json_report {
+        write_report(path, &render_doctor_json(config), "json report")?;
+        println!("json report: {}", path.display());
+    }
+    if let Some(path) = &config.markdown_report {
+        write_report(path, &render_doctor_markdown(config), "markdown report")?;
+        println!("markdown report: {}", path.display());
+    }
+    Ok(())
+}
+
+fn doctor_markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', "<br>")
 }
 
 fn tool_probe_status(configured: &str, already_resolved_path: bool) -> String {
@@ -11895,6 +11993,10 @@ end
     fn parse_cli_collects_doctor_tool_overrides() {
         let args = vec![
             "doctor".to_string(),
+            "--json-report".to_string(),
+            "/tmp/doctor.json".to_string(),
+            "--markdown-report".to_string(),
+            "/tmp/doctor.md".to_string(),
             "--armfortas-bin".to_string(),
             "/tmp/armfortas".to_string(),
             "--gfortran-bin".to_string(),
@@ -11927,6 +12029,14 @@ end
         assert_eq!(config.tools.system_as, "/tmp/as");
         assert_eq!(config.tools.otool, "/tmp/otool");
         assert_eq!(config.tools.nm, "/tmp/nm");
+        assert_eq!(
+            config.json_report.as_deref(),
+            Some(Path::new("/tmp/doctor.json"))
+        );
+        assert_eq!(
+            config.markdown_report.as_deref(),
+            Some(Path::new("/tmp/doctor.md"))
+        );
     }
 
     #[test]
@@ -13142,6 +13252,8 @@ end
                 otool: "/tmp/does-not-exist-otool".into(),
                 nm: "/tmp/does-not-exist-nm".into(),
             },
+            json_report: None,
+            markdown_report: None,
         };
 
         let rendered = render_doctor_report(&config);
@@ -13192,6 +13304,37 @@ end
             gfortran_bin.display()
         )));
         assert!(rendered.contains("configured=/tmp/does-not-exist-flang resolved=missing"));
+        let rendered_json = render_doctor_json(&config);
+        let rendered_markdown = render_doctor_markdown(&config);
+        assert!(rendered_json.contains("\"command\": \"doctor\""));
+        assert!(rendered_json.contains("\"named_compiler.armfortas.adapter_extras\""));
+        assert!(rendered_markdown.contains("# bencch doctor report"));
+        assert!(rendered_markdown.contains("| `named_compiler.armfortas` |"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_doctor_reports_emits_files() {
+        let root = std::env::temp_dir().join("afs_tests_doctor_report_output");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let json_path = root.join("doctor.json");
+        let markdown_path = root.join("doctor.md");
+        let config = DoctorConfig {
+            tools: ToolchainConfig::from_env(),
+            json_report: Some(json_path.clone()),
+            markdown_report: Some(markdown_path.clone()),
+        };
+
+        write_doctor_reports(&config).unwrap();
+
+        let json = fs::read_to_string(&json_path).unwrap();
+        let markdown = fs::read_to_string(&markdown_path).unwrap();
+        assert!(json.contains("\"command\": \"doctor\""));
+        assert!(json.contains("\"workspace_root\""));
+        assert!(markdown.contains("# bencch doctor report"));
+        assert!(markdown.contains("| `workspace_root` |"));
 
         let _ = fs::remove_dir_all(&root);
     }
