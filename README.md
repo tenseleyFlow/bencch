@@ -1,6 +1,6 @@
 # bencch
 
-Compiler bench for `armfortas`.
+Structured compiler runner and reporting bench for `armfortas`.
 
 This repo holds:
 
@@ -11,6 +11,19 @@ This repo holds:
 - `reports/` — failure and consistency bundles
 
 ## Current Setup
+
+`bencch` is no longer aiming to be the primary product story for a generic
+compiler bench. Its role is clearer now:
+
+- the root armfortas harness is the fast armfortas-first runner and the default
+  home for new source-directed testing ideas
+- `bencch` is the structured matrix/reporting/differential runner around that
+  same testing language
+
+Source comments in shared fixtures are the canonical leaf-assertion language.
+`bencch` should consume those directives where supported and explain
+unsupported directives clearly, rather than inventing a separate assertion
+dialect.
 
 Today `bencch` is wired to a surrounding `armfortas` checkout. The practical way
 to use it is from the `armfortas` workspace root. CLI-side compiler and tool
@@ -125,8 +138,20 @@ Common things the runner understands:
 - per-opt status like `xfail when O1, O2 because "reason"`
 - consistency checks like `cli_obj_vs_system_as` and `capture_run_reproducible`
 
+The suite DSL is for orchestration:
+
+- opts
+- compilers and references
+- graph composition
+- capability policy
+- reporting and bundles
+
+Leaf assertions should come from shared source directives whenever possible.
+
 ## Notes
 
 - `.docs/` is local and gitignored.
-- The runner is currently strongest on stage capture, differential behavior,
-  and consistency work around reproducibility and cross-path mismatches.
+- The runner is currently strongest on matrices, differential behavior,
+  capability-aware execution, reports, bundles, and graph orchestration.
+- The shared-language reset and follow-through testing roadmap live in the
+  parent `armfortas` repo under `.docs/testing/`.
