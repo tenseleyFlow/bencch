@@ -59,6 +59,16 @@ jobs:
           grep "backend_mode: external-driver" introspect.txt
           grep "requested_artifacts: asm, runtime" introspect.txt
 
+      - name: Verify external-only linked-only introspect guidance
+        run: |
+          if cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/if_else.f90 --artifact armfortas.ir > linked-only-introspect.txt 2>&1; then
+            echo "expected linked-only armfortas introspect to fail in external-only build" >&2
+            exit 1
+          fi
+          grep "backend_mode: unavailable" linked-only-introspect.txt
+          grep "failure_stage: none" linked-only-introspect.txt
+          grep "requested armfortas.ir" linked-only-introspect.txt
+
       - name: Verify external-only compare
         run: |
           cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- compare fixtures/fake_compilers/match_42_a.sh fixtures/fake_compilers/match_42_b.sh --program fixtures/runtime/if_else.f90 > compare.txt

@@ -1094,6 +1094,16 @@ fn run_introspect(config: &IntrospectConfig) -> Result<ObservedProgram, String> 
     })
 }
 
+fn requested_linked_armfortas_artifacts(requested: &BTreeSet<ArtifactKey>) -> Vec<String> {
+    requested
+        .iter()
+        .filter_map(|artifact| match artifact {
+            ArtifactKey::Extra(name) if name.starts_with("armfortas.") => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn observe_compiler(
     spec: &CompilerSpec,
     program: &Path,
@@ -1143,6 +1153,33 @@ fn observe_armfortas(
     tools: &ToolchainConfig,
 ) -> Result<CompilerObservation, String> {
     let stages = armfortas_requested_stages(requested)?;
+    let linked_only_artifacts = requested_linked_armfortas_artifacts(requested);
+    let linked_backend = tools.armfortas_adapters();
+    if !linked_only_artifacts.is_empty() && linked_backend.capture_mode_name() == "unavailable" {
+        let detail = format!(
+            "linked armfortas capture is unavailable in this build; requested {}; use scripts/bootstrap-linked-armfortas.sh or request only asm/obj/run from an external armfortas binary",
+            linked_only_artifacts.join(", ")
+        );
+        return Ok(CompilerObservation {
+            compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+            program: program.to_path_buf(),
+            opt_level,
+            compile_exit_code: 1,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Diagnostics,
+                ArtifactValue::Text(detail.clone()),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "armfortas".into(),
+                adapter_kind: "named".into(),
+                backend_mode: linked_backend.capture_mode_name().into(),
+                backend_detail: linked_backend.capture_description().into(),
+                artifacts_captured: vec!["diagnostics".into()],
+                comparison_basis: None,
+                failure_stage: None,
+            },
+        });
+    }
     let cli_observable_only = requested.iter().all(|artifact| {
         matches!(
             artifact,
@@ -1169,7 +1206,7 @@ fn observe_armfortas(
         };
         (mode, detail, backend.capture(&request))
     } else {
-        let backend = tools.armfortas_adapters();
+        let backend = linked_backend;
         let detail = backend.capture_description().to_string();
         let mode = backend.capture_mode_name().to_string();
         let request = CaptureRequest {
@@ -5485,6 +5522,18 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
 }
 
 fn compose_observation_failure_detail(observation: &CompilerObservation) -> String {
+    if observation.provenance.backend_mode == "unavailable" {
+        let mut detail = format!(
+            "{} unavailable for requested artifacts in this build",
+            observation.compiler.display_name()
+        );
+        if let Some(diagnostics) = observation_diagnostics_text(observation) {
+            detail.push('\n');
+            detail.push_str(diagnostics);
+        }
+        return detail;
+    }
+
     let mut detail = String::new();
     detail.push_str(&format!("{} failed", observation.compiler.display_name()));
     if let Some(stage) = &observation.provenance.failure_stage {
@@ -10740,6 +10789,35 @@ mod tests {
         let rendered = render_introspection_text(&observed, full_introspection_render_config());
         assert!(rendered.contains("status: compile failed"));
         assert!(rendered.contains("failure_stage: none"));
+    }
+
+    #[test]
+    fn compose_observation_failure_detail_uses_unavailable_wording() {
+        let observation = CompilerObservation {
+            compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 1,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Diagnostics,
+                ArtifactValue::Text(
+                    "linked armfortas capture is unavailable in this build".into(),
+                ),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "armfortas".into(),
+                adapter_kind: "named".into(),
+                backend_mode: "unavailable".into(),
+                backend_detail: "unavailable without linked-armfortas feature".into(),
+                artifacts_captured: vec!["diagnostics".into()],
+                comparison_basis: None,
+                failure_stage: None,
+            },
+        };
+
+        let detail = compose_observation_failure_detail(&observation);
+        assert!(detail.contains("armfortas unavailable for requested artifacts in this build"));
+        assert!(!detail.contains("failed in"));
     }
 
     #[cfg(unix)]
