@@ -105,6 +105,9 @@ Inspect the current embedded/standalone posture:
 cargo run -p afs-tests --bin bencch -- doctor
 ```
 
+`doctor` now also lists the generic artifacts and namespaced adapter extras
+that each named compiler surface can provide in the current build.
+
 Generate a local linked workspace against an external `armfortas` checkout:
 
 ```bash
@@ -182,6 +185,10 @@ Introspect a named external compiler on the generic surface:
 ```bash
 cargo run -p afs-tests --bin bencch -- introspect gfortran fixtures/runtime/if_else.f90 --artifact asm,obj,runtime
 ```
+
+If you request artifacts that a compiler surface cannot provide, `bencch`
+fails early with a capability message instead of pretending the compiler
+failed mid-pipeline.
 
 Introspect an explicit compiler path on that same generic surface:
 
