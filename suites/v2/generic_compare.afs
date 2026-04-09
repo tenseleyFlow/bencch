@@ -1,0 +1,20 @@
+suite "v2/generic-compare"
+
+case "fake_compilers_match"
+source "../../fixtures/runtime/if_else.f90"
+compare "../../fixtures/fake_compilers/match_42_a.sh" "../../fixtures/fake_compilers/match_42_b.sh" => asm
+expect compare.status equals "match"
+expect compare.classification equals "match"
+expect compare.difference_count equals 0
+expect compare.changed_artifacts equals "none"
+end
+
+case "fake_compilers_diverge"
+source "../../fixtures/runtime/if_else.f90"
+compare "../../fixtures/fake_compilers/match_42_a.sh" "../../fixtures/fake_compilers/runtime_41.sh" => asm
+expect compare.status equals "diff"
+expect compare.classification equals "mixed divergence"
+expect compare.changed_artifacts contains "asm"
+expect compare.changed_artifacts contains "runtime"
+expect compare.difference_count equals 2
+end
