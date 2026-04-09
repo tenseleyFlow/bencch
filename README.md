@@ -93,6 +93,12 @@ List suites:
 cargo run -p afs-tests --bin bencch -- list
 ```
 
+List suites with case-level capability discovery:
+
+```bash
+cargo run -p afs-tests --bin bencch -- list --suite v2/generic --verbose
+```
+
 Run one suite family:
 
 ```bash
@@ -113,6 +119,9 @@ Write the same `doctor` snapshot to JSON and Markdown:
 ```bash
 cargo run -p afs-tests --bin bencch -- doctor --json-report reports/doctor.json --markdown-report reports/doctor.md
 ```
+
+The JSON report now includes structured sections for workspace, named compiler
+surfaces, tools, and mode, while keeping the flat field map too.
 
 Generate a local linked workspace against an external `armfortas` checkout:
 
