@@ -336,9 +336,7 @@ impl ArtifactKey {
             .split(',')
             .map(str::trim)
             .filter(|part| !part.is_empty())
-            .map(|part| {
-                Self::parse(part).ok_or_else(|| format!("unknown artifact '{}'", part))
-            })
+            .map(|part| Self::parse(part).ok_or_else(|| format!("unknown artifact '{}'", part)))
             .collect()
     }
 
@@ -353,6 +351,17 @@ impl ArtifactKey {
             Self::Executable => "executable",
             Self::Runtime => "runtime",
             Self::Extra(name) => name.as_str(),
+        }
+    }
+
+    pub fn is_generic(&self) -> bool {
+        !matches!(self, Self::Extra(_))
+    }
+
+    pub fn extra_parts(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Extra(name) => name.split_once('.'),
+            _ => None,
         }
     }
 }
@@ -430,5 +439,19 @@ mod tests {
         assert!(parsed.contains(&ArtifactKey::Asm));
         assert!(parsed.contains(&ArtifactKey::Obj));
         assert!(parsed.contains(&ArtifactKey::Extra("armfortas.ir".into())));
+    }
+
+    #[test]
+    fn artifact_key_reports_namespace_parts() {
+        let generic = ArtifactKey::Asm;
+        assert!(generic.is_generic());
+        assert_eq!(generic.extra_parts(), None);
+
+        let extra = ArtifactKey::Extra("armfortas.ir".into());
+        assert!(!extra.is_generic());
+        assert_eq!(extra.extra_parts(), Some(("armfortas", "ir")));
+
+        let malformed = ArtifactKey::Extra("odd".into());
+        assert_eq!(malformed.extra_parts(), None);
     }
 }
