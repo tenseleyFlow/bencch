@@ -33,6 +33,7 @@ struct CaseSpec {
     source: PathBuf,
     graph_files: Vec<PathBuf>,
     requested: BTreeSet<Stage>,
+    generic_introspect: Option<GenericIntrospectCase>,
     opt_levels: Vec<OptLevel>,
     repeat_count: usize,
     reference_compilers: Vec<ReferenceCompiler>,
@@ -46,6 +47,10 @@ impl CaseSpec {
         !self.graph_files.is_empty()
     }
 
+    fn is_generic_introspect(&self) -> bool {
+        self.generic_introspect.is_some()
+    }
+
     fn source_label(&self) -> String {
         if self.is_graph() {
             format!(
@@ -57,6 +62,12 @@ impl CaseSpec {
             self.source.display().to_string()
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct GenericIntrospectCase {
+    compiler: CompilerSpec,
+    artifacts: BTreeSet<ArtifactKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,9 +200,10 @@ enum Expectation {
     FailEquals { stage: FailureStage, value: String },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Target {
     Stage(Stage),
+    Artifact(ArtifactKey),
     RunStdout,
     RunStderr,
     RunExitCode,
@@ -2977,6 +2989,10 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
             builder
                 .graph_files
                 .push(resolve_suite_relative_path(rest, path, line_no)?);
+        } else if let Some(rest) = line.strip_prefix("compiler ") {
+            let (compiler, artifacts) = parse_compiler_artifact_declaration(rest, path, line_no)?;
+            builder.generic_compiler = Some(compiler);
+            builder.generic_artifacts = artifacts;
         } else if let Some(rest) = line.strip_prefix("armfortas =>") {
             builder.requested = parse_stage_list(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("repeat =>") {
@@ -3036,6 +3052,8 @@ struct CaseBuilder {
     graph_entry: Option<PathBuf>,
     graph_files: Vec<PathBuf>,
     requested: BTreeSet<Stage>,
+    generic_compiler: Option<CompilerSpec>,
+    generic_artifacts: BTreeSet<ArtifactKey>,
     opt_levels: Vec<OptLevel>,
     repeat_count: usize,
     reference_compilers: Vec<ReferenceCompiler>,
@@ -3052,6 +3070,8 @@ impl CaseBuilder {
             graph_entry: None,
             graph_files: Vec::new(),
             requested: BTreeSet::new(),
+            generic_compiler: None,
+            generic_artifacts: BTreeSet::new(),
             opt_levels: Vec::new(),
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -3062,6 +3082,14 @@ impl CaseBuilder {
     }
 
     fn build(self, suite_path: &Path) -> Result<CaseSpec, String> {
+        if self.generic_compiler.is_some() && !self.requested.is_empty() {
+            return Err(format!(
+                "{}: case '{}' mixes generic compiler syntax with legacy 'armfortas => ...' stages",
+                suite_path.display(),
+                self.name
+            ));
+        }
+
         if self.source.is_some() && (self.graph_entry.is_some() || !self.graph_files.is_empty()) {
             return Err(format!(
                 "{}: case '{}' mixes source with graph entry/file declarations",
@@ -3106,8 +3134,34 @@ impl CaseBuilder {
             ));
         };
 
+        if self.generic_compiler.is_some()
+            && (!self.reference_compilers.is_empty() || !self.consistency_checks.is_empty())
+        {
+            return Err(format!(
+                "{}: case '{}' uses generic compiler syntax with differential/consistency rules; that suite-v2 surface is not supported yet",
+                suite_path.display(),
+                self.name
+            ));
+        }
+
+        let generic_introspect = if let Some(compiler) = self.generic_compiler {
+            if self.generic_artifacts.is_empty() {
+                return Err(format!(
+                    "{}: case '{}' generic compiler artifact list is empty",
+                    suite_path.display(),
+                    self.name
+                ));
+            }
+            Some(GenericIntrospectCase {
+                compiler,
+                artifacts: self.generic_artifacts,
+            })
+        } else {
+            None
+        };
+
         let mut requested = self.requested;
-        if requested.is_empty() {
+        if requested.is_empty() && generic_introspect.is_none() {
             requested.insert(Stage::Run);
         }
 
@@ -3122,6 +3176,7 @@ impl CaseBuilder {
             source,
             graph_files,
             requested,
+            generic_introspect,
             opt_levels,
             repeat_count: self.repeat_count,
             reference_compilers: self.reference_compilers,
@@ -3159,6 +3214,57 @@ fn parse_stage_list(rest: &str, path: &Path, line_no: usize) -> Result<BTreeSet<
         ));
     }
     Ok(stages)
+}
+
+fn parse_compiler_artifact_declaration(
+    rest: &str,
+    path: &Path,
+    line_no: usize,
+) -> Result<(CompilerSpec, BTreeSet<ArtifactKey>), String> {
+    let (compiler_raw, artifact_raw) = rest.split_once("=>").ok_or_else(|| {
+        format!(
+            "{}:{}: compiler declaration must use 'compiler <spec> => <artifacts>'",
+            path.display(),
+            line_no
+        )
+    })?;
+    let compiler = parse_compiler_spec_token(compiler_raw.trim(), path, line_no)?;
+    let artifacts = ArtifactKey::parse_list(artifact_raw.trim()).map_err(|err| {
+        format!("{}:{}: {}", path.display(), line_no, err)
+    })?;
+    if artifacts.is_empty() {
+        return Err(format!(
+            "{}:{}: generic compiler artifact list is empty",
+            path.display(),
+            line_no
+        ));
+    }
+    Ok((compiler, artifacts))
+}
+
+fn parse_compiler_spec_token(raw: &str, path: &Path, line_no: usize) -> Result<CompilerSpec, String> {
+    let token = if raw.starts_with('"') {
+        parse_quoted(raw, path, line_no)?
+    } else {
+        raw.trim().to_string()
+    };
+    if token.is_empty() {
+        return Err(format!(
+            "{}:{}: compiler declaration is missing a compiler spec",
+            path.display(),
+            line_no
+        ));
+    }
+    if let Some(named) = NamedCompiler::parse(&token) {
+        return Ok(CompilerSpec::Named(named));
+    }
+    let parsed = PathBuf::from(&token);
+    let resolved = if parsed.is_absolute() {
+        parsed
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(parsed)
+    };
+    Ok(CompilerSpec::Binary(resolved))
 }
 
 fn parse_opt_levels(rest: &str, path: &Path, line_no: usize) -> Result<Vec<OptLevel>, String> {
@@ -3398,6 +3504,9 @@ fn parse_target(raw: &str, path: &Path, line_no: usize) -> Result<Target, String
         "run.stderr" => Ok(Target::RunStderr),
         "run.exit_code" => Ok(Target::RunExitCode),
         _ => {
+            if let Some(artifact) = ArtifactKey::parse(raw) {
+                return Ok(Target::Artifact(artifact));
+            }
             let stage = Stage::parse(raw).ok_or_else(|| {
                 format!(
                     "{}:{}: unsupported expectation target '{}'",
@@ -3576,6 +3685,10 @@ fn execute_case_cell(
     opt_level: OptLevel,
     config: &RunConfig,
 ) -> Result<Outcome, String> {
+    if case.is_generic_introspect() {
+        return execute_generic_introspect_case_cell(suite, case, opt_level, config);
+    }
+
     let effective_status = status_for_opt(case, opt_level);
     if let EffectiveStatus::Future(reason) = &effective_status {
         if !config.include_future {
@@ -3797,6 +3910,149 @@ fn execute_case_cell(
     Ok(outcome)
 }
 
+fn execute_generic_introspect_case_cell(
+    suite: &SuiteSpec,
+    case: &CaseSpec,
+    opt_level: OptLevel,
+    config: &RunConfig,
+) -> Result<Outcome, String> {
+    let effective_status = status_for_opt(case, opt_level);
+    if let EffectiveStatus::Future(reason) = &effective_status {
+        if !config.include_future {
+            return Ok(Outcome {
+                suite: suite.name.clone(),
+                case: case.name.clone(),
+                opt_level,
+                kind: OutcomeKind::Future,
+                detail: reason.clone(),
+                bundle: None,
+                primary_backend: None,
+                consistency_observations: Vec::new(),
+            });
+        }
+    }
+
+    let generic = case
+        .generic_introspect
+        .as_ref()
+        .ok_or_else(|| "missing generic introspection case configuration".to_string())?;
+    let prepared = prepare_case_input(case, suite, opt_level)?;
+
+    if config.verbose {
+        let artifacts = generic
+            .artifacts
+            .iter()
+            .map(ArtifactKey::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  source: {}", case.source_label());
+        if case.is_graph() {
+            for file in &case.graph_files {
+                println!("  file: {}", file.display());
+            }
+            println!("  compiled_as: {}", prepared.compiler_source.display());
+        }
+        println!("  compiler: {}", generic.compiler.display_name());
+        println!("  opt: {}", opt_level.as_str());
+        println!("  artifacts: {}", artifacts);
+    }
+
+    let observed = run_introspect(&IntrospectConfig {
+        compiler: generic.compiler.clone(),
+        program: prepared.compiler_source.clone(),
+        opt_level,
+        artifacts: generic.artifacts.clone(),
+        json_report: None,
+        markdown_report: None,
+        all_artifacts: false,
+        summary_only: false,
+        max_artifact_lines: None,
+        tools: config.tools.clone(),
+    })?;
+
+    let execution = if observed.observation.compile_exit_code == 0 {
+        if has_failure_expectation(case) {
+            Err(format!(
+                "expected {} to fail ({}) but compilation succeeded",
+                generic.compiler.display_name(),
+                expected_failure_description(case)
+            ))
+        } else {
+            evaluate_observation_expectations(case, &observed)
+        }
+    } else if has_failure_expectation(case) {
+        evaluate_observation_failure_expectations(case, &observed.observation)
+    } else {
+        Err(compose_observation_failure_detail(&observed.observation))
+    };
+
+    let mut outcome = match (effective_status, execution) {
+        (EffectiveStatus::Normal, Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Pass,
+            detail: String::new(),
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Normal, Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Fail,
+            detail,
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xpass,
+            detail: reason,
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xfail,
+            detail: format!("{}\n{}", reason, detail),
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Future(reason), Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xpass,
+            detail: reason,
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Future,
+            detail: format!("{}\n{}", reason, detail),
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+    };
+
+    outcome.detail = outcome.detail.trim().to_string();
+    Ok(outcome)
+}
+
 fn prepare_case_input(
     case: &CaseSpec,
     suite: &SuiteSpec,
@@ -3952,6 +4208,7 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
             Target::Stage(stage) => {
                 requested.insert(*stage);
             }
+            Target::Artifact(artifact) => ensure_artifact_stage(artifact, requested),
             Target::RunStdout | Target::RunStderr | Target::RunExitCode => {
                 requested.insert(Stage::Run);
             }
@@ -3963,6 +4220,35 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
 fn ensure_consistency_stage(check: ConsistencyCheck, requested: &mut BTreeSet<Stage>) {
     if let Some(stage) = check.required_stage() {
         requested.insert(stage);
+    }
+}
+
+fn ensure_artifact_stage(artifact: &ArtifactKey, requested: &mut BTreeSet<Stage>) {
+    match artifact {
+        ArtifactKey::Asm => {
+            requested.insert(Stage::Asm);
+        }
+        ArtifactKey::Obj => {
+            requested.insert(Stage::Obj);
+        }
+        ArtifactKey::Runtime | ArtifactKey::Stdout | ArtifactKey::Stderr | ArtifactKey::ExitCode => {
+            requested.insert(Stage::Run);
+        }
+        ArtifactKey::Extra(name) => {
+            if let Some(stage) = armfortas_extra_stage(name) {
+                requested.insert(stage);
+            }
+        }
+        ArtifactKey::Diagnostics | ArtifactKey::Executable => {}
+    }
+}
+
+fn armfortas_extra_stage(name: &str) -> Option<Stage> {
+    let (namespace, suffix) = name.split_once('.')?;
+    if namespace.eq_ignore_ascii_case("armfortas") {
+        Stage::parse(suffix)
+    } else {
+        None
     }
 }
 
@@ -3988,7 +4274,7 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 if !text.contains(needle) {
                     return Err(format!(
                         "expected {} to contain {:?}\nactual:\n{}",
-                        target_name(*target),
+                        target_name(target),
                         needle,
                         text
                     ));
@@ -3999,7 +4285,7 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 if text.contains(needle) {
                     return Err(format!(
                         "expected {} to not contain {:?}\nactual:\n{}",
-                        target_name(*target),
+                        target_name(target),
                         needle,
                         text
                     ));
@@ -4010,7 +4296,7 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 if text.trim_end() != value {
                     return Err(format!(
                         "expected {} to equal {:?}\nactual:\n{}",
-                        target_name(*target),
+                        target_name(target),
                         value,
                         text
                     ));
@@ -4021,7 +4307,74 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 if actual != *value {
                     return Err(format!(
                         "expected {} to equal {}\nactual: {}",
-                        target_name(*target),
+                        target_name(target),
+                        value,
+                        actual
+                    ));
+                }
+            }
+            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_observation_expectations(case: &CaseSpec, observed: &ObservedProgram) -> Result<(), String> {
+    for expectation in &case.expectations {
+        match expectation {
+            Expectation::CheckComments(target) => {
+                let text = observation_target_text(&observed.observation, target)?;
+                let source = fs::read_to_string(&case.source)
+                    .map_err(|e| format!("cannot read '{}': {}", case.source.display(), e))?;
+                let checks = extract_checks(&source);
+                if checks.is_empty() {
+                    return Err(format!(
+                        "case '{}' requested check-comments but '{}' has no ! CHECK: lines",
+                        case.name,
+                        case.source.display()
+                    ));
+                }
+                match_checks(&checks, text, &case.name)?;
+            }
+            Expectation::Contains { target, needle } => {
+                let text = observation_target_text(&observed.observation, target)?;
+                if !text.contains(needle) {
+                    return Err(format!(
+                        "expected {} to contain {:?}\nactual:\n{}",
+                        target_name(target),
+                        needle,
+                        text
+                    ));
+                }
+            }
+            Expectation::NotContains { target, needle } => {
+                let text = observation_target_text(&observed.observation, target)?;
+                if text.contains(needle) {
+                    return Err(format!(
+                        "expected {} to not contain {:?}\nactual:\n{}",
+                        target_name(target),
+                        needle,
+                        text
+                    ));
+                }
+            }
+            Expectation::Equals { target, value } => {
+                let text = observation_target_text(&observed.observation, target)?;
+                if text.trim_end() != value {
+                    return Err(format!(
+                        "expected {} to equal {:?}\nactual:\n{}",
+                        target_name(target),
+                        value,
+                        text
+                    ));
+                }
+            }
+            Expectation::IntEquals { target, value } => {
+                let actual = observation_target_int(&observed.observation, target)?;
+                if actual != *value {
+                    return Err(format!(
+                        "expected {} to equal {}\nactual: {}",
+                        target_name(target),
                         value,
                         actual
                     ));
@@ -4094,6 +4447,79 @@ fn evaluate_failure_expectations(case: &CaseSpec, failure: &CaptureFailure) -> R
     Ok(())
 }
 
+fn evaluate_observation_failure_expectations(
+    case: &CaseSpec,
+    observation: &CompilerObservation,
+) -> Result<(), String> {
+    let mut saw_failure_expectation = false;
+    let diagnostics = observation_diagnostics_text(observation).unwrap_or_default();
+    for expectation in &case.expectations {
+        match expectation {
+            Expectation::FailContains { stage, needle } => {
+                saw_failure_expectation = true;
+                let actual_stage = observation_failure_stage(observation);
+                if actual_stage != Some(*stage) {
+                    let actual = actual_stage
+                        .map(|stage| stage.as_str())
+                        .unwrap_or("none");
+                    return Err(format!(
+                        "expected failure stage {} but compiler failed in {}\n{}",
+                        stage.as_str(),
+                        actual,
+                        diagnostics
+                    ));
+                }
+                if !diagnostics.contains(needle) {
+                    return Err(format!(
+                        "expected failure detail at {} to contain {:?}\nactual:\n{}",
+                        stage.as_str(),
+                        needle,
+                        diagnostics
+                    ));
+                }
+            }
+            Expectation::FailEquals { stage, value } => {
+                saw_failure_expectation = true;
+                let actual_stage = observation_failure_stage(observation);
+                if actual_stage != Some(*stage) {
+                    let actual = actual_stage
+                        .map(|stage| stage.as_str())
+                        .unwrap_or("none");
+                    return Err(format!(
+                        "expected failure stage {} but compiler failed in {}\n{}",
+                        stage.as_str(),
+                        actual,
+                        diagnostics
+                    ));
+                }
+                if diagnostics.trim_end() != value {
+                    return Err(format!(
+                        "expected failure detail at {} to equal {:?}\nactual:\n{}",
+                        stage.as_str(),
+                        value,
+                        diagnostics
+                    ));
+                }
+            }
+            Expectation::CheckComments(_)
+            | Expectation::Contains { .. }
+            | Expectation::NotContains { .. }
+            | Expectation::Equals { .. }
+            | Expectation::IntEquals { .. } => {}
+        }
+    }
+
+    if !saw_failure_expectation {
+        return Err(format!(
+            "{} failed but the case did not declare an expect-fail rule\n{}",
+            observation.compiler.display_name(),
+            diagnostics
+        ));
+    }
+
+    Ok(())
+}
+
 fn evaluate_failed_armfortas(
     case: &CaseSpec,
     artifacts: &ExecutionArtifacts,
@@ -4155,6 +4581,7 @@ fn target_text<'a>(result: &'a CaptureResult, target: &Target) -> Result<&'a str
             }
             None => Err(format!("missing captured stage '{}'", stage.as_str())),
         },
+        Target::Artifact(artifact) => capture_artifact_text(result, artifact),
         Target::RunStdout => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
             Some(run) => Ok(&run.stdout),
             None => Err("missing captured run stage".into()),
@@ -4175,20 +4602,173 @@ fn target_int(result: &CaptureResult, target: &Target) -> Result<i32, String> {
             Some(run) => Ok(run.exit_code),
             None => Err("missing captured run stage".into()),
         },
+        Target::Artifact(ArtifactKey::ExitCode) => {
+            match result.get(Stage::Run).and_then(CapturedStage::as_run) {
+                Some(run) => Ok(run.exit_code),
+                None => Err("missing captured run stage".into()),
+            }
+        }
         _ => Err(format!(
             "{} is textual; use a string matcher instead",
-            target_name(*target)
+            target_name(target)
         )),
     }
 }
 
-fn target_name(target: Target) -> &'static str {
+fn target_name(target: &Target) -> String {
     match target {
-        Target::Stage(stage) => stage.as_str(),
-        Target::RunStdout => "run.stdout",
-        Target::RunStderr => "run.stderr",
-        Target::RunExitCode => "run.exit_code",
+        Target::Stage(stage) => stage.as_str().to_string(),
+        Target::Artifact(artifact) => artifact.as_str().to_string(),
+        Target::RunStdout => "run.stdout".to_string(),
+        Target::RunStderr => "run.stderr".to_string(),
+        Target::RunExitCode => "run.exit_code".to_string(),
     }
+}
+
+fn capture_artifact_text<'a>(
+    result: &'a CaptureResult,
+    artifact: &ArtifactKey,
+) -> Result<&'a str, String> {
+    match artifact {
+        ArtifactKey::Asm => match result.get(Stage::Asm) {
+            Some(CapturedStage::Text(text)) => Ok(text),
+            Some(CapturedStage::Run(_)) => Err("asm artifact is not textual".into()),
+            None => Err("missing captured stage 'asm'".into()),
+        },
+        ArtifactKey::Obj => match result.get(Stage::Obj) {
+            Some(CapturedStage::Text(text)) => Ok(text),
+            Some(CapturedStage::Run(_)) => Err("obj artifact is not textual".into()),
+            None => Err("missing captured stage 'obj'".into()),
+        },
+        ArtifactKey::Stdout => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
+            Some(run) => Ok(&run.stdout),
+            None => Err("missing captured run stage".into()),
+        },
+        ArtifactKey::Stderr => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
+            Some(run) => Ok(&run.stderr),
+            None => Err("missing captured run stage".into()),
+        },
+        ArtifactKey::Extra(name) => {
+            let stage = armfortas_extra_stage(name)
+                .ok_or_else(|| format!("legacy capture cannot provide generic extra '{}'", name))?;
+            match result.get(stage) {
+                Some(CapturedStage::Text(text)) => Ok(text),
+                Some(CapturedStage::Run(_)) => {
+                    Err(format!("artifact '{}' is not textual", artifact.as_str()))
+                }
+                None => Err(format!("missing captured stage '{}'", stage.as_str())),
+            }
+        }
+        ArtifactKey::Diagnostics => {
+            Err("legacy capture does not expose diagnostics on successful compilation".into())
+        }
+        ArtifactKey::Runtime => Err("runtime is structured; use run.stdout, run.stderr, or run.exit_code".into()),
+        ArtifactKey::ExitCode => {
+            Err("exit-code is numeric; use 'expect run.exit_code equals <int>'".into())
+        }
+        ArtifactKey::Executable => Err("executable is binary/path data, not text".into()),
+    }
+}
+
+fn observation_target_text<'a>(
+    observation: &'a CompilerObservation,
+    target: &Target,
+) -> Result<&'a str, String> {
+    match target {
+        Target::Stage(stage) => match stage {
+            Stage::Asm => observation_artifact_text(observation, &ArtifactKey::Asm),
+            Stage::Obj => observation_artifact_text(observation, &ArtifactKey::Obj),
+            Stage::Run => {
+                Err("run is structured; use run.stdout, run.stderr, or run.exit_code".into())
+            }
+            other => observation_artifact_text(
+                observation,
+                &ArtifactKey::Extra(format!("armfortas.{}", other.as_str())),
+            ),
+        },
+        Target::Artifact(artifact) => observation_artifact_text(observation, artifact),
+        Target::RunStdout => observation_run_stdout(observation),
+        Target::RunStderr => observation_run_stderr(observation),
+        Target::RunExitCode => {
+            Err("run.exit_code is numeric; use 'expect run.exit_code equals <int>'".into())
+        }
+    }
+}
+
+fn observation_target_int(observation: &CompilerObservation, target: &Target) -> Result<i32, String> {
+    match target {
+        Target::RunExitCode => observation_run_exit_code(observation),
+        Target::Artifact(ArtifactKey::ExitCode) => observation_run_exit_code(observation),
+        _ => Err(format!(
+            "{} is textual; use a string matcher instead",
+            target_name(target)
+        )),
+    }
+}
+
+fn observation_artifact_text<'a>(
+    observation: &'a CompilerObservation,
+    artifact: &ArtifactKey,
+) -> Result<&'a str, String> {
+    match observation.artifacts.get(artifact) {
+        Some(ArtifactValue::Text(text)) => Ok(text),
+        Some(ArtifactValue::Int(_)) => Err(format!(
+            "artifact '{}' is numeric; use an integer matcher instead",
+            artifact.as_str()
+        )),
+        Some(ArtifactValue::Run(_)) => Err(format!(
+            "artifact '{}' is structured runtime data; use run.stdout, run.stderr, or run.exit_code",
+            artifact.as_str()
+        )),
+        Some(ArtifactValue::Path(_)) => Err(format!(
+            "artifact '{}' is binary/path data, not text",
+            artifact.as_str()
+        )),
+        None => Err(format!("missing artifact '{}'", artifact.as_str())),
+    }
+}
+
+fn observation_run_stdout(observation: &CompilerObservation) -> Result<&str, String> {
+    if let Some(ArtifactValue::Run(run)) = observation.artifacts.get(&ArtifactKey::Runtime) {
+        Ok(&run.stdout)
+    } else {
+        observation_artifact_text(observation, &ArtifactKey::Stdout)
+    }
+}
+
+fn observation_run_stderr(observation: &CompilerObservation) -> Result<&str, String> {
+    if let Some(ArtifactValue::Run(run)) = observation.artifacts.get(&ArtifactKey::Runtime) {
+        Ok(&run.stderr)
+    } else {
+        observation_artifact_text(observation, &ArtifactKey::Stderr)
+    }
+}
+
+fn observation_run_exit_code(observation: &CompilerObservation) -> Result<i32, String> {
+    if let Some(ArtifactValue::Run(run)) = observation.artifacts.get(&ArtifactKey::Runtime) {
+        Ok(run.exit_code)
+    } else {
+        match observation.artifacts.get(&ArtifactKey::ExitCode) {
+            Some(ArtifactValue::Int(value)) => Ok(*value),
+            Some(_) => Err("artifact 'exit-code' is not numeric".into()),
+            None => Err("missing artifact 'exit-code'".into()),
+        }
+    }
+}
+
+fn observation_diagnostics_text(observation: &CompilerObservation) -> Option<&str> {
+    match observation.artifacts.get(&ArtifactKey::Diagnostics) {
+        Some(ArtifactValue::Text(text)) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn observation_failure_stage(observation: &CompilerObservation) -> Option<FailureStage> {
+    observation
+        .provenance
+        .failure_stage
+        .as_deref()
+        .and_then(FailureStage::parse)
 }
 
 fn compare_differential(
@@ -4275,6 +4855,22 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
         detail.push_str(&format_reference_summary(&artifacts.references));
     }
 
+    detail
+}
+
+fn compose_observation_failure_detail(observation: &CompilerObservation) -> String {
+    let mut detail = String::new();
+    detail.push_str(&format!(
+        "{} failed",
+        observation.compiler.display_name()
+    ));
+    if let Some(stage) = &observation.provenance.failure_stage {
+        detail.push_str(&format!(" in {}", stage));
+    }
+    if let Some(diagnostics) = observation_diagnostics_text(observation) {
+        detail.push('\n');
+        detail.push_str(diagnostics);
+    }
     detail
 }
 
@@ -7724,6 +8320,7 @@ mod tests {
             source: PathBuf::from("demo.f90"),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: vec![ReferenceCompiler::Gfortran],
@@ -7816,6 +8413,7 @@ mod tests {
             source: source.clone(),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm, Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
@@ -8407,6 +9005,65 @@ mod tests {
         assert!(rendered.contains("failure_stage: none"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn execute_generic_suite_case_uses_introspect_engine() {
+        let compiler = fake_compiler_fixture("match_42_a.sh");
+        ensure_fixture_executable(&compiler);
+
+        let suite = SuiteSpec {
+            name: "v2/generic-introspect".into(),
+            path: PathBuf::from("suite.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "fake-runtime".into(),
+            source: runtime_fixture("if_else.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: Some(GenericIntrospectCase {
+                compiler: CompilerSpec::Binary(compiler),
+                artifacts: BTreeSet::from([
+                    ArtifactKey::Asm,
+                    ArtifactKey::Obj,
+                    ArtifactKey::Runtime,
+                ]),
+            }),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![
+                Expectation::Contains {
+                    target: Target::Artifact(ArtifactKey::Asm),
+                    needle: ".globl _main".into(),
+                },
+                Expectation::Contains {
+                    target: Target::RunStdout,
+                    needle: "42".into(),
+                },
+            ],
+            status_rules: Vec::new(),
+        };
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let outcome = execute_case_cell(&suite, &case, OptLevel::O0, &config).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Pass);
+        assert!(outcome.detail.is_empty());
+        assert!(outcome.bundle.is_none());
+    }
+
     #[test]
     fn parses_suite_and_case() {
         let root = std::env::temp_dir().join("afs_tests_parser_spec.afs");
@@ -8430,14 +9087,46 @@ end
         assert_eq!(suite.cases.len(), 1);
         assert!(suite.cases[0].requested.contains(&Stage::Run));
         assert!(suite.cases[0].requested.contains(&Stage::Ir));
+        assert!(suite.cases[0].generic_introspect.is_none());
         assert!(matches!(
             suite.cases[0].expectations[2],
             Expectation::NotContains {
-                target: Target::Stage(Stage::Asm),
+                target: Target::Artifact(ArtifactKey::Asm),
                 ..
             }
         ));
         assert_eq!(suite.cases[0].opt_levels, vec![OptLevel::O0]);
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parses_generic_compiler_case() {
+        let root = std::env::temp_dir().join("bencch_generic_parser_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "v2/generic-introspect"
+
+case "fake-runtime"
+source "../../fixtures/runtime/if_else.f90"
+compiler gfortran => asm, obj, runtime
+expect asm contains ".globl _main"
+expect run.stdout contains "42"
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root).unwrap();
+        let case = &suite.cases[0];
+        let generic = case.generic_introspect.as_ref().unwrap();
+        assert_eq!(
+            generic.compiler,
+            CompilerSpec::Named(NamedCompiler::Gfortran)
+        );
+        assert!(generic.artifacts.contains(&ArtifactKey::Asm));
+        assert!(generic.artifacts.contains(&ArtifactKey::Obj));
+        assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
+        assert!(case.requested.is_empty());
         let _ = fs::remove_file(&root);
     }
 
@@ -8819,6 +9508,7 @@ end
             source: PathBuf::from("demo.f90"),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -8866,6 +9556,7 @@ end
             source: source.clone(),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Ir, Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: vec![ReferenceCompiler::Gfortran],
@@ -9054,6 +9745,7 @@ end
             source: main.clone(),
             graph_files: vec![module.clone(), main.clone()],
             requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -9104,6 +9796,7 @@ end
             source: main.clone(),
             graph_files: vec![module.clone(), main.clone()],
             requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -9834,6 +10527,7 @@ end
             source: PathBuf::from("demo.f90"),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Tokens, Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
@@ -9875,6 +10569,7 @@ end
             source: PathBuf::from("graph.f90"),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
@@ -9913,6 +10608,7 @@ end
             source: PathBuf::from("graph.f90"),
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm, Stage::Obj, Stage::Run]),
+            generic_introspect: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
