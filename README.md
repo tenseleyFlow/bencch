@@ -99,6 +99,18 @@ Introspect the full linked armfortas stage surface:
 cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/mixed_types.f90 --all
 ```
 
+Trim large introspection sections to a readable preview:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/if_else.f90 --all --max-artifact-lines 12
+```
+
+Keep only section summaries and omit artifact bodies:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/if_else.f90 --all --summary-only
+```
+
 Introspect a named external compiler on the generic surface:
 
 ```bash
@@ -164,7 +176,9 @@ separately from adapter extras like `armfortas.ir` and `armfortas.tokens` in
 text, JSON, and Markdown output, and it now reports requested, captured, and
 missing artifacts at the top of the report. Failure-side introspection also
 surfaces the failure stage when the adapter knows it, plus a short diagnostic
-excerpt before the full diagnostics block.
+excerpt before the full diagnostics block. For large captures, `--summary-only`
+and `--max-artifact-lines <n>` keep the text and Markdown surfaces readable
+without changing the full JSON record.
 
 Environment overrides work too:
 
