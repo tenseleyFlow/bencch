@@ -280,6 +280,21 @@ expect-fail parser contains "expected entity name"
 end
 ```
 
+And they can be matrixed the same way as the happy-path suites:
+
+```text
+suite "v2/generic-failure-matrix"
+
+case "fake_compilers_compile_divergence_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compare "../../fixtures/fake_compilers/compile_fail.sh" "../../fixtures/fake_compilers/match_42_a.sh" => diagnostics
+expect compare.status equals "diff"
+expect compare.classification equals "compile divergence"
+expect compare.difference_count equals 2
+end
+```
+
 Graph cases use `entry` plus ordered `file` lines:
 
 ```text
