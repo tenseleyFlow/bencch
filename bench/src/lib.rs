@@ -7,9 +7,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compiler::{
-    object_snapshot_text, ArmfortasAdapters, ArmfortasCliAdapter, CaptureBackend, CaptureFailure,
-    CaptureRequest, CaptureResult, CapturedStage, CliObservableCaptureBackend, EmitMode,
-    FailureStage, OptLevel, RunCapture, Stage,
+    linked_capture_available, object_snapshot_text, ArmfortasAdapters, ArmfortasCliAdapter,
+    CaptureBackend, CaptureFailure, CaptureRequest, CaptureResult, CapturedStage,
+    CliObservableCaptureBackend, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
 };
 use bencch_core::{
     ArtifactDifference, ArtifactKey, ArtifactValue, ComparisonResult, CompilerObservation,
@@ -283,7 +283,8 @@ impl ToolchainConfig {
         Self {
             armfortas: match std::env::var("BENCCH_ARMFORTAS_BIN") {
                 Ok(value) if !value.trim().is_empty() => ArmfortasCliAdapter::External(value),
-                _ => ArmfortasCliAdapter::Linked,
+                _ if linked_capture_available() => ArmfortasCliAdapter::Linked,
+                _ => ArmfortasCliAdapter::External("armfortas".into()),
             },
             gfortran: tool_override("BENCCH_GFORTRAN_BIN", "gfortran"),
             flang_new: tool_override("BENCCH_FLANG_BIN", "flang-new"),
@@ -2783,7 +2784,7 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         .tools
         .cli_observable_capture_backend(report_root.join(".tmp").join("doctor"));
     let capture_root = armfortas.capture_root();
-    let capture_manifest = capture_root.join("Cargo.toml");
+    let capture_manifest = capture_root.as_ref().map(|root| root.join("Cargo.toml"));
 
     let mut lines = vec![
         "Doctor".to_string(),
@@ -2803,14 +2804,25 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
             "  primary_backend_observable: {}",
             observable_backend.description()
         ),
-        format!("  armfortas_capture_root: {}", display_path(&capture_root)),
+        format!(
+            "  armfortas_capture_root: {}",
+            capture_root
+                .as_ref()
+                .map(|root| display_path(root))
+                .unwrap_or_else(|| "unavailable".to_string())
+        ),
         format!(
             "  armfortas_capture_manifest: {}",
-            if capture_manifest.exists() {
-                display_path(&capture_manifest)
-            } else {
-                "missing".to_string()
-            }
+            capture_manifest
+                .as_ref()
+                .map(|manifest| {
+                    if manifest.exists() {
+                        display_path(manifest)
+                    } else {
+                        "missing".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "unavailable".to_string())
         ),
     ];
 
@@ -2822,7 +2834,12 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         ArmfortasCliAdapter::Linked => {
             lines.push(format!(
                 "  armfortas_cli_status: {}",
-                format!("linked via Cargo to {}", display_path(&capture_root))
+                capture_root
+                    .as_ref()
+                    .map(|root| format!("linked via Cargo to {}", display_path(root)))
+                    .unwrap_or_else(|| {
+                        "linked adapter requested but unavailable in this build".to_string()
+                    })
             ));
         }
         ArmfortasCliAdapter::External(binary) => {
@@ -2837,8 +2854,13 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         armfortas.capture_mode_name()
     ));
     lines.push(format!(
-        "  armfortas_capture_status: linked via Cargo to {}",
-        display_path(&capture_root)
+        "  armfortas_capture_status: {}",
+        capture_root
+            .as_ref()
+            .map(|root| format!("linked via Cargo to {}", display_path(root)))
+            .unwrap_or_else(|| {
+                "unavailable in this build; use scripts/bootstrap-linked-armfortas.sh".to_string()
+            })
     ));
     lines.push(
         "  primary_backend_selection: observable backend is selected for asm/obj/run-only cells when the armfortas CLI is external and the case does not require expect-fail or capture-consistency semantics; otherwise full backend"
@@ -2881,9 +2903,11 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         "  nm: {}",
         tool_probe_status(&config.tools.nm, false)
     ));
-    lines.push(
-        "  note: linked capture still depends on the surrounding armfortas checkout".to_string(),
-    );
+    lines.push(if capture_root.is_some() {
+        "  note: linked capture still depends on the surrounding armfortas checkout".to_string()
+    } else {
+        "  note: linked capture is unavailable in this build; external compiler compare/introspect surfaces still work".to_string()
+    });
 
     lines.join("\n")
 }

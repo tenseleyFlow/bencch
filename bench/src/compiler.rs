@@ -1,7 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[cfg(feature = "linked-armfortas")]
+use std::collections::BTreeSet;
 
 pub use bencch_core::{
     CaptureBackend, CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage,
@@ -24,6 +27,7 @@ pub enum ArmfortasCliAdapter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmfortasCaptureAdapter {
     Linked,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +48,7 @@ impl ArmfortasAdapters {
     pub fn new(cli: ArmfortasCliAdapter) -> Self {
         Self {
             cli,
-            capture: ArmfortasCaptureAdapter::Linked,
+            capture: default_capture_adapter(),
         }
     }
 
@@ -76,24 +80,28 @@ impl ArmfortasAdapters {
     pub fn capture_command_name(&self) -> &'static str {
         match self.capture {
             ArmfortasCaptureAdapter::Linked => "armfortas::testing capture (linked)",
+            ArmfortasCaptureAdapter::Unavailable => "armfortas::testing capture (unavailable)",
         }
     }
 
     pub fn capture_mode_name(&self) -> &'static str {
         match self.capture {
             ArmfortasCaptureAdapter::Linked => "linked",
+            ArmfortasCaptureAdapter::Unavailable => "unavailable",
         }
     }
 
     pub fn capture_description(&self) -> &'static str {
         match self.capture {
             ArmfortasCaptureAdapter::Linked => "linked armfortas::testing capture adapter",
+            ArmfortasCaptureAdapter::Unavailable => "unavailable without linked-armfortas feature",
         }
     }
 
-    pub fn capture_root(&self) -> PathBuf {
+    pub fn capture_root(&self) -> Option<PathBuf> {
         match self.capture {
-            ArmfortasCaptureAdapter::Linked => linked_adapter_root(),
+            ArmfortasCaptureAdapter::Linked => Some(linked_adapter_root()),
+            ArmfortasCaptureAdapter::Unavailable => None,
         }
     }
 
@@ -136,6 +144,13 @@ impl CaptureBackend for ArmfortasAdapters {
     fn capture(&self, request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
         match self.capture {
             ArmfortasCaptureAdapter::Linked => linked_capture_from_path(request),
+            ArmfortasCaptureAdapter::Unavailable => Err(CaptureFailure {
+                input: request.input.clone(),
+                opt_level: request.opt_level,
+                stage: FailureStage::Ir,
+                detail: "linked armfortas capture is unavailable in this build; use scripts/bootstrap-linked-armfortas.sh or request only asm/obj/run from an external armfortas binary".into(),
+                stages: BTreeMap::new(),
+            }),
         }
     }
 }
@@ -336,6 +351,18 @@ pub fn linked_adapter_root() -> PathBuf {
     )
 }
 
+pub fn linked_capture_available() -> bool {
+    matches!(default_capture_adapter(), ArmfortasCaptureAdapter::Linked)
+}
+
+fn default_capture_adapter() -> ArmfortasCaptureAdapter {
+    if cfg!(feature = "linked-armfortas") {
+        ArmfortasCaptureAdapter::Linked
+    } else {
+        ArmfortasCaptureAdapter::Unavailable
+    }
+}
+
 fn linked_adapter_root_from(configured_root: Option<&str>, manifest_dir: &Path) -> PathBuf {
     match configured_root {
         Some(root) => {
@@ -350,6 +377,7 @@ fn linked_adapter_root_from(configured_root: Option<&str>, manifest_dir: &Path) 
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn linked_compile_output(
     input: &Path,
     opt_level: OptLevel,
@@ -367,6 +395,18 @@ fn linked_compile_output(
     };
 
     armfortas::driver::compile(&opts)
+}
+
+#[cfg(not(feature = "linked-armfortas"))]
+fn linked_compile_output(
+    _input: &Path,
+    _opt_level: OptLevel,
+    _mode: EmitMode,
+    _output: &Path,
+) -> Result<(), String> {
+    Err(
+        "linked armfortas driver is unavailable in this build; use scripts/bootstrap-linked-armfortas.sh or provide --armfortas-bin".into(),
+    )
 }
 
 fn external_compile_output(
@@ -397,6 +437,7 @@ fn external_compile_output(
     Ok(())
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn linked_capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
     let arm_request = armfortas::testing::CaptureRequest {
         input: request.input.clone(),
@@ -412,6 +453,17 @@ fn linked_capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, C
     armfortas::testing::capture_from_path(&arm_request)
         .map(into_bench_capture_result)
         .map_err(into_bench_capture_failure)
+}
+
+#[cfg(not(feature = "linked-armfortas"))]
+fn linked_capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
+    Err(CaptureFailure {
+        input: request.input.clone(),
+        opt_level: request.opt_level,
+        stage: FailureStage::Ir,
+        detail: "linked armfortas capture is unavailable in this build; use scripts/bootstrap-linked-armfortas.sh or request only asm/obj/run from an external armfortas binary".into(),
+        stages: BTreeMap::new(),
+    })
 }
 
 fn cleanup_dir(path: &Path) {
@@ -523,6 +575,7 @@ fn run_binary_capture(
     })
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn into_driver_opt_level(opt_level: OptLevel) -> armfortas::driver::OptLevel {
     match opt_level {
         OptLevel::O0 => armfortas::driver::OptLevel::O0,
@@ -533,6 +586,7 @@ fn into_driver_opt_level(opt_level: OptLevel) -> armfortas::driver::OptLevel {
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn from_driver_opt_level(opt_level: armfortas::driver::OptLevel) -> OptLevel {
     match opt_level {
         armfortas::driver::OptLevel::O0 => OptLevel::O0,
@@ -543,6 +597,7 @@ fn from_driver_opt_level(opt_level: armfortas::driver::OptLevel) -> OptLevel {
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn into_arm_stage(stage: Stage) -> armfortas::testing::Stage {
     match stage {
         Stage::Preprocess => armfortas::testing::Stage::Preprocess,
@@ -559,6 +614,7 @@ fn into_arm_stage(stage: Stage) -> armfortas::testing::Stage {
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn from_arm_stage(stage: armfortas::testing::Stage) -> Stage {
     match stage {
         armfortas::testing::Stage::Preprocess => Stage::Preprocess,
@@ -575,6 +631,7 @@ fn from_arm_stage(stage: armfortas::testing::Stage) -> Stage {
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn from_arm_failure_stage(stage: armfortas::testing::FailureStage) -> FailureStage {
     match stage {
         armfortas::testing::FailureStage::Preprocess => FailureStage::Preprocess,
@@ -587,6 +644,7 @@ fn from_arm_failure_stage(stage: armfortas::testing::FailureStage) -> FailureSta
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn from_arm_captured_stage(stage: armfortas::testing::CapturedStage) -> CapturedStage {
     match stage {
         armfortas::testing::CapturedStage::Text(text) => CapturedStage::Text(text),
@@ -598,6 +656,7 @@ fn from_arm_captured_stage(stage: armfortas::testing::CapturedStage) -> Captured
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn into_bench_capture_result(result: armfortas::testing::CaptureResult) -> CaptureResult {
     CaptureResult {
         input: result.input,
@@ -610,6 +669,7 @@ fn into_bench_capture_result(result: armfortas::testing::CaptureResult) -> Captu
     }
 }
 
+#[cfg(feature = "linked-armfortas")]
 fn into_bench_capture_failure(failure: armfortas::testing::CaptureFailure) -> CaptureFailure {
     CaptureFailure {
         input: failure.input,
@@ -624,7 +684,7 @@ fn into_bench_capture_failure(failure: armfortas::testing::CaptureFailure) -> Ca
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "linked-armfortas"))]
 pub mod test_support {
     pub use armfortas::ir::inst::{
         BlockParam, Function, Inst, InstKind, Module, Terminator, ValueId,

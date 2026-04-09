@@ -5,6 +5,10 @@ edition = "2021"
 description = "Structured generic compiler bench runner"
 build = "build.rs"
 
+[features]
+default = ["linked-armfortas"]
+linked-armfortas = []
+
 [[bin]]
 name = "afs-tests"
 path = "src/main.rs"
