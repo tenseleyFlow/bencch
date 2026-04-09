@@ -1,0 +1,26 @@
+suite "v2/generic-failure-matrix"
+
+case "fake_compiler_expected_diagnostic_matrix"
+source "../../fixtures/invalid/fake_compile_fail_expected.f90"
+opts => O0, O1, O2
+compiler "../../fixtures/fake_compilers/compile_fail.sh" => diagnostics
+expect-fail comments
+end
+
+case "armfortas_parse_error_matrix"
+source "../../fixtures/invalid/parse_error.f90"
+opts => O0, O1, O2
+compiler armfortas => diagnostics
+expect-fail parser contains "expected entity name"
+end
+
+case "fake_compilers_compile_divergence_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compare "../../fixtures/fake_compilers/compile_fail.sh" "../../fixtures/fake_compilers/match_42_a.sh" => diagnostics
+expect compare.status equals "diff"
+expect compare.classification equals "compile divergence"
+expect compare.changed_artifacts contains "compile-exit-code"
+expect compare.changed_artifacts contains "diagnostics"
+expect compare.difference_count equals 2
+end
