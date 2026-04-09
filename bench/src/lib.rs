@@ -1102,6 +1102,7 @@ fn observe_armfortas(
 
     let mut artifacts = BTreeMap::new();
     let mut compile_exit_code = 0;
+    let mut failure_stage = None;
     match capture {
         Ok(result) => {
             for (stage, captured) in &result.stages {
@@ -1131,6 +1132,7 @@ fn observe_armfortas(
         }
         Err(failure) => {
             compile_exit_code = 1;
+            failure_stage = Some(failure.stage.as_str().to_string());
             artifacts.insert(
                 ArtifactKey::Diagnostics,
                 ArtifactValue::Text(failure.detail.clone()),
@@ -1199,6 +1201,7 @@ fn observe_armfortas(
             backend_detail,
             artifacts_captured,
             comparison_basis: None,
+            failure_stage,
         },
     })
 }
@@ -1385,6 +1388,7 @@ fn observe_external_driver(
             backend_detail: format!("generic external driver adapter using {}", binary),
             artifacts_captured,
             comparison_basis: None,
+            failure_stage: None,
         },
     })
 }
@@ -1915,11 +1919,7 @@ fn write_introspection_reports(
     observed: &ObservedProgram,
 ) -> Result<(), String> {
     if let Some(path) = &config.json_report {
-        write_report(
-            path,
-            &render_introspection_json(observed),
-            "json report",
-        )?;
+        write_report(path, &render_introspection_json(observed), "json report")?;
         println!("json report: {}", path.display());
     }
     if let Some(path) = &config.markdown_report {
@@ -1939,6 +1939,25 @@ fn introspection_status(observation: &CompilerObservation) -> &'static str {
     } else {
         "compile failed"
     }
+}
+
+fn diagnostic_excerpt(observation: &CompilerObservation) -> Option<String> {
+    match observation.artifacts.get(&ArtifactKey::Diagnostics) {
+        Some(ArtifactValue::Text(text)) => text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.to_string()),
+        _ => None,
+    }
+}
+
+fn failure_stage_summary(observation: &CompilerObservation) -> &str {
+    observation
+        .provenance
+        .failure_stage
+        .as_deref()
+        .unwrap_or("none")
 }
 
 fn requested_introspection_artifact_names(observed: &ObservedProgram) -> Vec<String> {
@@ -2102,6 +2121,7 @@ fn render_introspection_text(observed: &ObservedProgram) -> String {
     let adapter_extras = observation_adapter_extras(observation);
     let requested_artifacts = requested_introspection_artifact_names(observed);
     let missing_artifacts = missing_introspection_artifact_names(observed);
+    let diagnostic_excerpt = diagnostic_excerpt(observation);
     let mut lines = vec![
         "Introspect".to_string(),
         format!("  status: {}", introspection_status(observation)),
@@ -2114,6 +2134,13 @@ fn render_introspection_text(observed: &ObservedProgram) -> String {
         format!(
             "  backend_detail: {}",
             observation.provenance.backend_detail
+        ),
+        format!("  failure_stage: {}", failure_stage_summary(observation)),
+        format!(
+            "  diagnostic_excerpt: {}",
+            diagnostic_excerpt
+                .clone()
+                .unwrap_or_else(|| "none".to_string())
         ),
         format!("  artifact_count: {}", observation.artifacts.len()),
         format!(
@@ -2236,13 +2263,22 @@ fn render_introspection_json(observed: &ObservedProgram) -> String {
     let adapter_extras = observation_adapter_extras(observation);
     let requested_artifacts = requested_introspection_artifact_names(observed);
     let missing_artifacts = missing_introspection_artifact_names(observed);
+    let diagnostic_excerpt = diagnostic_excerpt(observation);
     format!(
-        "{{\n  \"status\": \"{}\",\n  \"compiler\": \"{}\",\n  \"program\": \"{}\",\n  \"opt\": \"{}\",\n  \"compile_exit_code\": {},\n  \"artifact_summary\": {{\n    \"artifact_count\": {},\n    \"requested_artifacts\": {},\n    \"captured_artifacts\": {},\n    \"missing_artifacts\": {},\n    \"generic_artifacts\": {},\n    \"adapter_extras\": {}\n  }},\n  \"provenance\": {{\n    \"compiler_identity\": \"{}\",\n    \"adapter_kind\": \"{}\",\n    \"backend_mode\": \"{}\",\n    \"backend_detail\": \"{}\",\n    \"artifacts_captured\": {},\n    \"comparison_basis\": {}\n  }},\n  \"generic_artifacts\": {},\n  \"adapter_extras\": {},\n  \"artifacts\": {}\n}}\n",
+        "{{\n  \"status\": \"{}\",\n  \"compiler\": \"{}\",\n  \"program\": \"{}\",\n  \"opt\": \"{}\",\n  \"compile_exit_code\": {},\n  \"failure\": {{\n    \"stage\": {},\n    \"diagnostic_excerpt\": {}\n  }},\n  \"artifact_summary\": {{\n    \"artifact_count\": {},\n    \"requested_artifacts\": {},\n    \"captured_artifacts\": {},\n    \"missing_artifacts\": {},\n    \"generic_artifacts\": {},\n    \"adapter_extras\": {}\n  }},\n  \"provenance\": {{\n    \"compiler_identity\": \"{}\",\n    \"adapter_kind\": \"{}\",\n    \"backend_mode\": \"{}\",\n    \"backend_detail\": \"{}\",\n    \"artifacts_captured\": {},\n    \"comparison_basis\": {},\n    \"failure_stage\": {}\n  }},\n  \"generic_artifacts\": {},\n  \"adapter_extras\": {},\n  \"artifacts\": {}\n}}\n",
         json_escape(introspection_status(observation)),
         json_escape(&observation.compiler.display_name()),
         json_escape(&observation.program.display().to_string()),
         observation.opt_level.as_str(),
         observation.compile_exit_code,
+        match &observation.provenance.failure_stage {
+            Some(stage) => format!("\"{}\"", json_escape(stage)),
+            None => "null".to_string(),
+        },
+        match &diagnostic_excerpt {
+            Some(line) => format!("\"{}\"", json_escape(line)),
+            None => "null".to_string(),
+        },
         observation.artifacts.len(),
         json_string_array(&requested_artifacts),
         json_string_array(&observation.provenance.artifacts_captured),
@@ -2256,6 +2292,10 @@ fn render_introspection_json(observed: &ObservedProgram) -> String {
         json_string_array(&observation.provenance.artifacts_captured),
         match &observation.provenance.comparison_basis {
             Some(basis) => format!("\"{}\"", json_escape(basis)),
+            None => "null".to_string(),
+        },
+        match &observation.provenance.failure_stage {
+            Some(stage) => format!("\"{}\"", json_escape(stage)),
             None => "null".to_string(),
         },
         render_named_artifact_map_json(&generic_artifacts),
@@ -2274,6 +2314,7 @@ fn render_introspection_markdown(observed: &ObservedProgram) -> String {
     let adapter_extras = observation_adapter_extras(observation);
     let requested_artifacts = requested_introspection_artifact_names(observed);
     let missing_artifacts = missing_introspection_artifact_names(observed);
+    let diagnostic_excerpt = diagnostic_excerpt(observation);
     let mut lines = vec![
         "# bencch introspect report".to_string(),
         String::new(),
@@ -2285,6 +2326,13 @@ fn render_introspection_markdown(observed: &ObservedProgram) -> String {
         format!("adapter_kind: `{}`", observation.provenance.adapter_kind),
         format!("backend_mode: `{}`", observation.provenance.backend_mode),
         format!("backend_detail: {}", observation.provenance.backend_detail),
+        format!("failure_stage: `{}`", failure_stage_summary(observation)),
+        format!(
+            "diagnostic_excerpt: {}",
+            diagnostic_excerpt
+                .map(|line| format!("`{}`", line))
+                .unwrap_or_else(|| "none".to_string())
+        ),
         format!("artifact_count: {}", observation.artifacts.len()),
         format!(
             "requested_artifacts: {}",
@@ -2398,6 +2446,10 @@ fn render_observation_json(observation: &CompilerObservation) -> String {
             "    \"artifacts_captured\": {},",
             json_string_array(&observation.provenance.artifacts_captured)
         ),
+        match &observation.provenance.failure_stage {
+            Some(stage) => format!("    \"failure_stage\": \"{}\",", json_escape(stage)),
+            None => "    \"failure_stage\": null,".to_string(),
+        },
         match &observation.provenance.comparison_basis {
             Some(basis) => format!("    \"comparison_basis\": \"{}\"", json_escape(basis)),
             None => "    \"comparison_basis\": null".to_string(),
@@ -2431,6 +2483,7 @@ fn render_observation_markdown(observation: &CompilerObservation) -> String {
         format!("adapter_kind: `{}`", observation.provenance.adapter_kind),
         format!("backend_mode: `{}`", observation.provenance.backend_mode),
         format!("backend_detail: {}", observation.provenance.backend_detail),
+        format!("failure_stage: `{}`", failure_stage_summary(observation)),
     ];
     if !observation.provenance.artifacts_captured.is_empty() {
         lines.push(format!(
@@ -7411,6 +7464,14 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn invalid_fixture(name: &str) -> PathBuf {
+        bencch_repo_root()
+            .join("fixtures")
+            .join("invalid")
+            .join(name)
+    }
+
+    #[cfg(unix)]
     fn ensure_fixture_executable(path: &Path) {
         let mut perms = fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
@@ -7734,6 +7795,7 @@ mod tests {
                 backend_detail: "left detail".into(),
                 artifacts_captured: vec!["executable".into()],
                 comparison_basis: None,
+                failure_stage: None,
             },
         };
         let right = CompilerObservation {
@@ -7752,6 +7814,7 @@ mod tests {
                 backend_detail: "right detail".into(),
                 artifacts_captured: vec!["executable".into()],
                 comparison_basis: None,
+                failure_stage: None,
             },
         };
 
@@ -7789,6 +7852,7 @@ mod tests {
                 backend_detail: "left detail".into(),
                 artifacts_captured: vec!["executable".into()],
                 comparison_basis: None,
+                failure_stage: None,
             },
         };
         let right = CompilerObservation {
@@ -7807,6 +7871,7 @@ mod tests {
                 backend_detail: "right detail".into(),
                 artifacts_captured: vec!["executable".into()],
                 comparison_basis: None,
+                failure_stage: None,
             },
         };
 
@@ -8023,6 +8088,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn introspect_armfortas_failure_reports_stage_and_partial_capture() {
+        let config = IntrospectConfig {
+            compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+            program: invalid_fixture("parse_error.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([
+                ArtifactKey::Asm,
+                ArtifactKey::Extra("armfortas.tokens".into()),
+                ArtifactKey::Extra("armfortas.ir".into()),
+            ]),
+            json_report: None,
+            markdown_report: None,
+            all_artifacts: false,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let observed = run_introspect(&config).unwrap();
+        let observation = &observed.observation;
+        assert_eq!(observation.compile_exit_code, 1);
+        assert_eq!(
+            observation.provenance.failure_stage.as_deref(),
+            Some("parser")
+        );
+        assert!(observation
+            .artifacts
+            .contains_key(&ArtifactKey::Diagnostics));
+        assert!(observation
+            .artifacts
+            .contains_key(&ArtifactKey::Extra("armfortas.tokens".into())));
+        assert!(missing_introspection_artifact_names(&observed).contains(&"asm".to_string()));
+        assert!(
+            missing_introspection_artifact_names(&observed).contains(&"armfortas.ir".to_string())
+        );
+
+        let rendered = render_introspection_text(&observed);
+        assert!(rendered.contains("status: compile failed"));
+        assert!(rendered.contains("failure_stage: parser"));
+        assert!(rendered.contains("diagnostic_excerpt:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn introspect_named_external_compiler_reports_generic_artifacts_when_available() {
         if !command_is_available("gfortran") {
             return;
@@ -8032,11 +8139,7 @@ mod tests {
             compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
             program: runtime_fixture("if_else.f90"),
             opt_level: OptLevel::O0,
-            artifacts: BTreeSet::from([
-                ArtifactKey::Asm,
-                ArtifactKey::Obj,
-                ArtifactKey::Runtime,
-            ]),
+            artifacts: BTreeSet::from([ArtifactKey::Asm, ArtifactKey::Obj, ArtifactKey::Runtime]),
             json_report: None,
             markdown_report: None,
             all_artifacts: false,
@@ -8053,6 +8156,40 @@ mod tests {
         assert!(observation.artifacts.contains_key(&ArtifactKey::Runtime));
         assert!(observation_adapter_extras(observation).is_empty());
         assert!(missing_introspection_artifact_names(&observed).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn introspect_external_failure_reports_missing_requested_artifacts() {
+        let compiler = fake_compiler_fixture("compile_fail.sh");
+        ensure_fixture_executable(&compiler);
+
+        let config = IntrospectConfig {
+            compiler: CompilerSpec::Binary(compiler),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([ArtifactKey::Asm, ArtifactKey::Obj, ArtifactKey::Runtime]),
+            json_report: None,
+            markdown_report: None,
+            all_artifacts: false,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let observed = run_introspect(&config).unwrap();
+        let observation = &observed.observation;
+        assert_eq!(observation.compile_exit_code, 1);
+        assert_eq!(observation.provenance.failure_stage, None);
+        assert!(observation
+            .artifacts
+            .contains_key(&ArtifactKey::Diagnostics));
+        assert_eq!(
+            missing_introspection_artifact_names(&observed),
+            vec!["asm".to_string(), "obj".to_string(), "runtime".to_string()]
+        );
+
+        let rendered = render_introspection_text(&observed);
+        assert!(rendered.contains("status: compile failed"));
+        assert!(rendered.contains("failure_stage: none"));
     }
 
     #[test]
@@ -8895,6 +9032,7 @@ end
                 backend_detail: "linked armfortas::testing capture adapter".into(),
                 artifacts_captured: vec!["asm".into(), "armfortas.ir".into()],
                 comparison_basis: None,
+                failure_stage: None,
             },
         };
         let compare = ComparisonResult {
@@ -8915,6 +9053,7 @@ end
                     backend_detail: "generic external driver adapter using gfortran".into(),
                     artifacts_captured: vec!["asm".into()],
                     comparison_basis: Some("compile-status, diagnostics, runtime, asm".into()),
+                    failure_stage: None,
                 },
             },
             basis: "compile-status, diagnostics, runtime, asm".into(),
@@ -8936,9 +9075,9 @@ end
         let introspection_text = render_introspection_text(&observed);
         assert!(introspection_text.contains("status: compile ok"));
         assert!(introspection_text.contains("artifact_count: 2"));
-        assert!(introspection_text.contains(
-            "requested_artifacts: asm, armfortas.ir, armfortas.tokens"
-        ));
+        assert!(
+            introspection_text.contains("requested_artifacts: asm, armfortas.ir, armfortas.tokens")
+        );
         assert!(introspection_text.contains("missing_artifacts: armfortas.tokens"));
         assert!(introspection_text.contains("generic_artifacts: asm"));
         assert!(introspection_text.contains("adapter_extras: armfortas(ir)"));
@@ -8960,10 +9099,10 @@ end
         let introspection_markdown = render_introspection_markdown(&observed);
         assert!(introspection_markdown.contains("# bencch introspect report"));
         assert!(introspection_markdown.contains("status: compile ok"));
+        assert!(introspection_markdown.contains("failure_stage: `none`"));
         assert!(introspection_markdown.contains("artifact_count: 2"));
-        assert!(introspection_markdown.contains(
-            "requested_artifacts: `asm`, `armfortas.ir`, `armfortas.tokens`"
-        ));
+        assert!(introspection_markdown
+            .contains("requested_artifacts: `asm`, `armfortas.ir`, `armfortas.tokens`"));
         assert!(introspection_markdown.contains("missing_artifacts: `armfortas.tokens`"));
         assert!(introspection_markdown.contains("## Generic artifacts"));
         assert!(introspection_markdown.contains("## Adapter extras"));
@@ -8984,6 +9123,57 @@ end
         assert!(compare_json.contains("\"classification\": \"artifact divergence\""));
         assert!(compare_json.contains("\"difference_count\": 1"));
         assert!(compare_json.contains("\"changed_artifacts\": [\"asm\"]"));
+    }
+
+    #[test]
+    fn render_failure_introspection_reports_stage_and_excerpt() {
+        let observed = ObservedProgram {
+            observation: CompilerObservation {
+                compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+                program: PathBuf::from("broken.f90"),
+                opt_level: OptLevel::O0,
+                compile_exit_code: 1,
+                artifacts: BTreeMap::from([
+                    (
+                        ArtifactKey::Diagnostics,
+                        ArtifactValue::Text("undefined symbol: missing_value\nmore detail".into()),
+                    ),
+                    (
+                        ArtifactKey::Extra("armfortas.tokens".into()),
+                        ArtifactValue::Text("token stream".into()),
+                    ),
+                ]),
+                provenance: ObservationProvenance {
+                    compiler_identity: "armfortas".into(),
+                    adapter_kind: "named".into(),
+                    backend_mode: "linked".into(),
+                    backend_detail: "linked armfortas::testing capture adapter".into(),
+                    artifacts_captured: vec!["diagnostics".into(), "armfortas.tokens".into()],
+                    comparison_basis: None,
+                    failure_stage: Some("sema".into()),
+                },
+            },
+            requested_artifacts: BTreeSet::from([
+                ArtifactKey::Asm,
+                ArtifactKey::Extra("armfortas.tokens".into()),
+            ]),
+        };
+
+        let text = render_introspection_text(&observed);
+        assert!(text.contains("status: compile failed"));
+        assert!(text.contains("failure_stage: sema"));
+        assert!(text.contains("diagnostic_excerpt: undefined symbol: missing_value"));
+        assert!(text.contains("missing_artifacts: asm"));
+
+        let json = render_introspection_json(&observed);
+        assert!(json.contains("\"stage\": \"sema\""));
+        assert!(json.contains("\"diagnostic_excerpt\": \"undefined symbol: missing_value\""));
+        assert!(json.contains("\"failure_stage\": \"sema\""));
+
+        let markdown = render_introspection_markdown(&observed);
+        assert!(markdown.contains("status: compile failed"));
+        assert!(markdown.contains("failure_stage: `sema`"));
+        assert!(markdown.contains("diagnostic_excerpt: `undefined symbol: missing_value`"));
     }
 
     #[test]

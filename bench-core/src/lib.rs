@@ -382,6 +382,7 @@ pub struct ObservationProvenance {
     pub backend_detail: String,
     pub artifacts_captured: Vec<String>,
     pub comparison_basis: Option<String>,
+    pub failure_stage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
