@@ -8156,7 +8156,12 @@ fn write_failure_bundle(
         fs::create_dir_all(&refs_root)
             .map_err(|e| format!("cannot create references bundle dir: {}", e))?;
         for reference in &artifacts.references {
-            write_reference_bundle(&refs_root, reference)?;
+            write_reference_bundle(
+                &refs_root,
+                &prepared.compiler_source,
+                outcome.opt_level,
+                reference,
+            )?;
         }
     }
 
@@ -8370,7 +8375,12 @@ fn bundle_artifacts_for_stages(stages: &BTreeMap<Stage, CapturedStage>) -> BTree
     requested
 }
 
-fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<(), String> {
+fn write_reference_bundle(
+    root: &Path,
+    program: &Path,
+    opt_level: OptLevel,
+    reference: &ReferenceResult,
+) -> Result<(), String> {
     let ref_root = root.join(sanitize_component(reference.compiler.as_str()));
     fs::create_dir_all(&ref_root)
         .map_err(|e| format!("cannot create reference bundle dir: {}", e))?;
@@ -8406,6 +8416,41 @@ fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<()
         fs::write(ref_root.join("run.error.txt"), err)
             .map_err(|e| format!("cannot write reference run error bundle: {}", e))?;
     }
+    write_reference_observation_bundle(&ref_root, program, opt_level, reference)?;
+    Ok(())
+}
+
+fn write_reference_observation_bundle(
+    ref_root: &Path,
+    program: &Path,
+    opt_level: OptLevel,
+    reference: &ReferenceResult,
+) -> Result<(), String> {
+    let observed = observed_program_from_reference_result(
+        program,
+        opt_level,
+        default_differential_artifacts(),
+        reference,
+    );
+    let render_config = IntrospectionRenderConfig {
+        summary_only: false,
+        max_artifact_lines: None,
+    };
+    fs::write(
+        ref_root.join("observation.txt"),
+        render_introspection_text(&observed, render_config),
+    )
+    .map_err(|e| format!("cannot write reference observation text bundle: {}", e))?;
+    fs::write(
+        ref_root.join("observation.json"),
+        render_introspection_json(&observed),
+    )
+    .map_err(|e| format!("cannot write reference observation json bundle: {}", e))?;
+    fs::write(
+        ref_root.join("observation.md"),
+        render_introspection_markdown(&observed, render_config),
+    )
+    .map_err(|e| format!("cannot write reference observation markdown bundle: {}", e))?;
     Ok(())
 }
 
@@ -10357,6 +10402,21 @@ end
         assert!(bundle
             .join("references")
             .join("gfortran")
+            .join("observation.txt")
+            .exists());
+        assert!(bundle
+            .join("references")
+            .join("gfortran")
+            .join("observation.json")
+            .exists());
+        assert!(bundle
+            .join("references")
+            .join("gfortran")
+            .join("observation.md")
+            .exists());
+        assert!(bundle
+            .join("references")
+            .join("gfortran")
             .join("run.stdout.txt")
             .exists());
         assert!(bundle.join("consistency").join("summary.txt").exists());
@@ -10381,6 +10441,18 @@ end
         assert!(observation.contains("failure_stage: sema"));
         assert!(observation.contains("generic_artifacts: diagnostics, runtime"));
         assert!(observation.contains("adapter_extras: armfortas(ir)"));
+        let reference_observation = fs::read_to_string(
+            bundle
+                .join("references")
+                .join("gfortran")
+                .join("observation.txt"),
+        )
+        .unwrap();
+        assert!(reference_observation.contains("Introspect"));
+        assert!(reference_observation.contains("compiler: gfortran"));
+        assert!(reference_observation.contains("status: compile ok"));
+        assert!(reference_observation.contains("requested_artifacts: diagnostics, runtime"));
+        assert!(reference_observation.contains("generic_artifacts: runtime"));
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
         assert!(consistency_summary.contains("issue_count: 2"));
