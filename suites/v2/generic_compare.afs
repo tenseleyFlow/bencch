@@ -9,6 +9,16 @@ expect compare.difference_count equals 0
 expect compare.changed_artifacts equals "none"
 end
 
+case "fake_compilers_match_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compare "../../fixtures/fake_compilers/match_42_a.sh" "../../fixtures/fake_compilers/match_42_b.sh" => asm
+expect compare.status equals "match"
+expect compare.classification equals "match"
+expect compare.difference_count equals 0
+expect compare.changed_artifacts equals "none"
+end
+
 case "fake_compilers_diverge"
 source "../../fixtures/runtime/if_else.f90"
 compare "../../fixtures/fake_compilers/match_42_a.sh" "../../fixtures/fake_compilers/runtime_41.sh" => asm
