@@ -177,8 +177,9 @@ text, JSON, and Markdown output, and it now reports requested, captured, and
 missing artifacts at the top of the report. Failure-side introspection also
 surfaces the failure stage when the adapter knows it, plus a short diagnostic
 excerpt before the full diagnostics block. For large captures, `--summary-only`
-and `--max-artifact-lines <n>` keep the text and Markdown surfaces readable
-without changing the full JSON record.
+and `--max-artifact-lines <n>` keep the text and Markdown surfaces readable.
+JSON reports keep the full artifact bodies and now add compact
+`artifact_summaries` alongside them for quick scanning.
 
 Environment overrides work too:
 
