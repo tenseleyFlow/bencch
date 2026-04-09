@@ -488,7 +488,7 @@ pub fn run_cli(args: &[String]) -> i32 {
 
 enum CommandKind {
     List { suite_filter: Option<String> },
-    Run(RunConfig),
+    Run(Box<RunConfig>),
     Help,
 }
 
@@ -575,7 +575,7 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                     other => return Err(format!("unknown run option: {}", other)),
                 }
             }
-            Ok(CommandKind::Run(config))
+            Ok(CommandKind::Run(Box::new(config)))
         }
         "--help" | "-h" | "help" => Ok(CommandKind::Help),
         other => Err(format!("unknown command: {}", other)),
@@ -3668,7 +3668,7 @@ fn capture_run_from_testing(source: &Path, opt_level: OptLevel) -> Result<RunCap
     capture_run_stage(&result).cloned()
 }
 
-fn capture_text_stage<'a>(result: &'a CaptureResult, stage: Stage) -> Result<&'a str, String> {
+fn capture_text_stage(result: &CaptureResult, stage: Stage) -> Result<&str, String> {
     match result.get(stage) {
         Some(CapturedStage::Text(text)) => Ok(text),
         Some(CapturedStage::Run(_)) => Err(format!(
@@ -4066,9 +4066,9 @@ fn describe_object_difference(
     let (first_name, first_expected, first_actual) = differing[0];
 
     format!(
-        "differing object components: {}\n{}\n{}",
+        "differing object components: {}\nfirst differing component: {}\n{}",
         component_list,
-        format!("first differing component: {}", first_name),
+        first_name,
         describe_text_difference(first_expected, first_actual, left_label, right_label)
     )
 }
