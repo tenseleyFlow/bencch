@@ -34,6 +34,7 @@ struct CaseSpec {
     graph_files: Vec<PathBuf>,
     requested: BTreeSet<Stage>,
     generic_introspect: Option<GenericIntrospectCase>,
+    generic_compare: Option<GenericCompareCase>,
     opt_levels: Vec<OptLevel>,
     repeat_count: usize,
     reference_compilers: Vec<ReferenceCompiler>,
@@ -49,6 +50,10 @@ impl CaseSpec {
 
     fn is_generic_introspect(&self) -> bool {
         self.generic_introspect.is_some()
+    }
+
+    fn is_generic_compare(&self) -> bool {
+        self.generic_compare.is_some()
     }
 
     fn source_label(&self) -> String {
@@ -67,6 +72,13 @@ impl CaseSpec {
 #[derive(Debug, Clone)]
 struct GenericIntrospectCase {
     compiler: CompilerSpec,
+    artifacts: BTreeSet<ArtifactKey>,
+}
+
+#[derive(Debug, Clone)]
+struct GenericCompareCase {
+    left: CompilerSpec,
+    right: CompilerSpec,
     artifacts: BTreeSet<ArtifactKey>,
 }
 
@@ -204,6 +216,11 @@ enum Expectation {
 enum Target {
     Stage(Stage),
     Artifact(ArtifactKey),
+    CompareStatus,
+    CompareClassification,
+    CompareChangedArtifacts,
+    CompareDifferenceCount,
+    CompareBasis,
     RunStdout,
     RunStderr,
     RunExitCode,
@@ -2993,6 +3010,10 @@ fn parse_suite_file(path: &Path) -> Result<SuiteSpec, String> {
             let (compiler, artifacts) = parse_compiler_artifact_declaration(rest, path, line_no)?;
             builder.generic_compiler = Some(compiler);
             builder.generic_artifacts = artifacts;
+        } else if let Some(rest) = line.strip_prefix("compare ") {
+            let (left, right, artifacts) = parse_compare_declaration(rest, path, line_no)?;
+            builder.generic_compare = Some((left, right));
+            builder.generic_compare_artifacts = artifacts;
         } else if let Some(rest) = line.strip_prefix("armfortas =>") {
             builder.requested = parse_stage_list(rest, path, line_no)?;
         } else if let Some(rest) = line.strip_prefix("repeat =>") {
@@ -3054,6 +3075,8 @@ struct CaseBuilder {
     requested: BTreeSet<Stage>,
     generic_compiler: Option<CompilerSpec>,
     generic_artifacts: BTreeSet<ArtifactKey>,
+    generic_compare: Option<(CompilerSpec, CompilerSpec)>,
+    generic_compare_artifacts: BTreeSet<ArtifactKey>,
     opt_levels: Vec<OptLevel>,
     repeat_count: usize,
     reference_compilers: Vec<ReferenceCompiler>,
@@ -3072,6 +3095,8 @@ impl CaseBuilder {
             requested: BTreeSet::new(),
             generic_compiler: None,
             generic_artifacts: BTreeSet::new(),
+            generic_compare: None,
+            generic_compare_artifacts: BTreeSet::new(),
             opt_levels: Vec::new(),
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -3082,9 +3107,19 @@ impl CaseBuilder {
     }
 
     fn build(self, suite_path: &Path) -> Result<CaseSpec, String> {
-        if self.generic_compiler.is_some() && !self.requested.is_empty() {
+        let generic_mode_count = usize::from(self.generic_compiler.is_some())
+            + usize::from(self.generic_compare.is_some());
+        if generic_mode_count > 1 {
             return Err(format!(
-                "{}: case '{}' mixes generic compiler syntax with legacy 'armfortas => ...' stages",
+                "{}: case '{}' mixes multiple suite-v2 execution forms",
+                suite_path.display(),
+                self.name
+            ));
+        }
+
+        if generic_mode_count > 0 && !self.requested.is_empty() {
+            return Err(format!(
+                "{}: case '{}' mixes generic suite-v2 syntax with legacy 'armfortas => ...' stages",
                 suite_path.display(),
                 self.name
             ));
@@ -3134,11 +3169,11 @@ impl CaseBuilder {
             ));
         };
 
-        if self.generic_compiler.is_some()
+        if generic_mode_count > 0
             && (!self.reference_compilers.is_empty() || !self.consistency_checks.is_empty())
         {
             return Err(format!(
-                "{}: case '{}' uses generic compiler syntax with differential/consistency rules; that suite-v2 surface is not supported yet",
+                "{}: case '{}' uses suite-v2 syntax with differential/consistency rules; that surface is not supported yet",
                 suite_path.display(),
                 self.name
             ));
@@ -3160,8 +3195,34 @@ impl CaseBuilder {
             None
         };
 
+        let generic_compare = if let Some((left, right)) = self.generic_compare {
+            if self.generic_compare_artifacts.iter().any(|artifact| !artifact.is_generic()) {
+                return Err(format!(
+                    "{}: case '{}' compare suite-v2 cases only support generic artifacts today",
+                    suite_path.display(),
+                    self.name
+                ));
+            }
+            let mut artifacts = self.generic_compare_artifacts;
+            if artifacts.is_empty() {
+                return Err(format!(
+                    "{}: case '{}' compare artifact list is empty",
+                    suite_path.display(),
+                    self.name
+                ));
+            }
+            artifacts.extend(default_compare_artifacts(&artifacts));
+            Some(GenericCompareCase {
+                left,
+                right,
+                artifacts,
+            })
+        } else {
+            None
+        };
+
         let mut requested = self.requested;
-        if requested.is_empty() && generic_introspect.is_none() {
+        if requested.is_empty() && generic_introspect.is_none() && generic_compare.is_none() {
             requested.insert(Stage::Run);
         }
 
@@ -3177,6 +3238,7 @@ impl CaseBuilder {
             graph_files,
             requested,
             generic_introspect,
+            generic_compare,
             opt_levels,
             repeat_count: self.repeat_count,
             reference_compilers: self.reference_compilers,
@@ -3240,6 +3302,71 @@ fn parse_compiler_artifact_declaration(
         ));
     }
     Ok((compiler, artifacts))
+}
+
+fn parse_compare_declaration(
+    rest: &str,
+    path: &Path,
+    line_no: usize,
+) -> Result<(CompilerSpec, CompilerSpec, BTreeSet<ArtifactKey>), String> {
+    let (compilers_raw, artifacts_raw) = rest.split_once("=>").ok_or_else(|| {
+        format!(
+            "{}:{}: compare declaration must use 'compare <left> <right> => <artifacts>'",
+            path.display(),
+            line_no
+        )
+    })?;
+    let tokens = split_compiler_tokens(compilers_raw.trim(), path, line_no)?;
+    if tokens.len() != 2 {
+        return Err(format!(
+            "{}:{}: compare declaration requires exactly two compiler specs",
+            path.display(),
+            line_no
+        ));
+    }
+    let left = parse_compiler_spec_token(&tokens[0], path, line_no)?;
+    let right = parse_compiler_spec_token(&tokens[1], path, line_no)?;
+    let artifacts = ArtifactKey::parse_list(artifacts_raw.trim()).map_err(|err| {
+        format!("{}:{}: {}", path.display(), line_no, err)
+    })?;
+    Ok((left, right, artifacts))
+}
+
+fn split_compiler_tokens(raw: &str, path: &Path, line_no: usize) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+
+    for ch in raw.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                current.push(ch);
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !current.trim().is_empty() {
+                    tokens.push(current.trim().to_string());
+                    current.clear();
+                }
+            }
+            other => current.push(other),
+        }
+    }
+
+    if quoted {
+        return Err(format!(
+            "{}:{}: unterminated quoted compiler spec '{}'",
+            path.display(),
+            line_no,
+            raw
+        ));
+    }
+
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+
+    Ok(tokens)
 }
 
 fn parse_compiler_spec_token(raw: &str, path: &Path, line_no: usize) -> Result<CompilerSpec, String> {
@@ -3405,7 +3532,12 @@ fn parse_expectation(rest: &str, path: &Path, line_no: usize) -> Result<Expectat
 
     if let Some((target, value)) = rest.split_once(" equals ") {
         let target = parse_target(target.trim(), path, line_no)?;
-        if matches!(target, Target::RunExitCode) {
+        if matches!(
+            target,
+            Target::RunExitCode
+                | Target::Artifact(ArtifactKey::ExitCode)
+                | Target::CompareDifferenceCount
+        ) {
             let value = parse_integer(value.trim(), path, line_no)?;
             return Ok(Expectation::IntEquals { target, value });
         }
@@ -3500,6 +3632,11 @@ fn parse_opt_selector(raw: &str, path: &Path, line_no: usize) -> Result<OptSelec
 
 fn parse_target(raw: &str, path: &Path, line_no: usize) -> Result<Target, String> {
     match raw {
+        "compare.status" => Ok(Target::CompareStatus),
+        "compare.classification" => Ok(Target::CompareClassification),
+        "compare.changed_artifacts" => Ok(Target::CompareChangedArtifacts),
+        "compare.difference_count" => Ok(Target::CompareDifferenceCount),
+        "compare.basis" => Ok(Target::CompareBasis),
         "run.stdout" => Ok(Target::RunStdout),
         "run.stderr" => Ok(Target::RunStderr),
         "run.exit_code" => Ok(Target::RunExitCode),
@@ -3685,6 +3822,9 @@ fn execute_case_cell(
     opt_level: OptLevel,
     config: &RunConfig,
 ) -> Result<Outcome, String> {
+    if case.is_generic_compare() {
+        return execute_generic_compare_case_cell(suite, case, opt_level, config);
+    }
     if case.is_generic_introspect() {
         return execute_generic_introspect_case_cell(suite, case, opt_level, config);
     }
@@ -3789,7 +3929,14 @@ fn execute_case_cell(
                     expected_failure_description(case)
                 ))
             } else {
-                let mut execution = evaluate_positive_expectations(case, result);
+                let observed = observed_program_from_armfortas_capture(
+                    &prepared.compiler_source,
+                    opt_level,
+                    expected_artifacts_for_legacy_case(case),
+                    result,
+                    None,
+                );
+                let mut execution = evaluate_observation_expectations(case, &observed);
                 if execution.is_ok() && !artifacts.references.is_empty() {
                     execution = compare_differential(result, &artifacts.references);
                 }
@@ -3907,6 +4054,141 @@ fn execute_case_cell(
     cleanup_prepared_input(&prepared);
     cleanup_consistency_issues(&artifacts.consistency_issues);
 
+    Ok(outcome)
+}
+
+fn execute_generic_compare_case_cell(
+    suite: &SuiteSpec,
+    case: &CaseSpec,
+    opt_level: OptLevel,
+    config: &RunConfig,
+) -> Result<Outcome, String> {
+    let effective_status = status_for_opt(case, opt_level);
+    if let EffectiveStatus::Future(reason) = &effective_status {
+        if !config.include_future {
+            return Ok(Outcome {
+                suite: suite.name.clone(),
+                case: case.name.clone(),
+                opt_level,
+                kind: OutcomeKind::Future,
+                detail: reason.clone(),
+                bundle: None,
+                primary_backend: None,
+                consistency_observations: Vec::new(),
+            });
+        }
+    }
+
+    let generic = case
+        .generic_compare
+        .as_ref()
+        .ok_or_else(|| "missing generic compare case configuration".to_string())?;
+    let prepared = prepare_case_input(case, suite, opt_level)?;
+
+    if config.verbose {
+        let artifacts = generic
+            .artifacts
+            .iter()
+            .map(ArtifactKey::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  source: {}", case.source_label());
+        if case.is_graph() {
+            for file in &case.graph_files {
+                println!("  file: {}", file.display());
+            }
+            println!("  compiled_as: {}", prepared.compiler_source.display());
+        }
+        println!(
+            "  compare: {} vs {}",
+            generic.left.display_name(),
+            generic.right.display_name()
+        );
+        println!("  opt: {}", opt_level.as_str());
+        println!("  artifacts: {}", artifacts);
+    }
+
+    let result = run_compare(&CompareConfig {
+        left: generic.left.clone(),
+        right: generic.right.clone(),
+        program: prepared.compiler_source.clone(),
+        opt_level,
+        artifacts: generic.artifacts.clone(),
+        json_report: None,
+        markdown_report: None,
+        tools: config.tools.clone(),
+    })?;
+
+    let execution = if has_failure_expectation(case) {
+        Err("suite-v2 compare cases do not support expect-fail rules".to_string())
+    } else {
+        evaluate_compare_expectations(case, &result)
+    };
+
+    let mut outcome = match (effective_status, execution) {
+        (EffectiveStatus::Normal, Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Pass,
+            detail: String::new(),
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Normal, Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Fail,
+            detail,
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xpass,
+            detail: reason,
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xfail,
+            detail: format!("{}\n{}", reason, detail),
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Future(reason), Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xpass,
+            detail: reason,
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+        (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Future,
+            detail: format!("{}\n{}", reason, detail),
+            bundle: None,
+            primary_backend: None,
+            consistency_observations: Vec::new(),
+        },
+    };
+
+    outcome.detail = outcome.detail.trim().to_string();
     Ok(outcome)
 }
 
@@ -4209,6 +4491,11 @@ fn ensure_target_stage(expectation: &Expectation, requested: &mut BTreeSet<Stage
                 requested.insert(*stage);
             }
             Target::Artifact(artifact) => ensure_artifact_stage(artifact, requested),
+            Target::CompareStatus
+            | Target::CompareClassification
+            | Target::CompareChangedArtifacts
+            | Target::CompareDifferenceCount
+            | Target::CompareBasis => {}
             Target::RunStdout | Target::RunStderr | Target::RunExitCode => {
                 requested.insert(Stage::Run);
             }
@@ -4250,73 +4537,6 @@ fn armfortas_extra_stage(name: &str) -> Option<Stage> {
     } else {
         None
     }
-}
-
-fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Result<(), String> {
-    for expectation in &case.expectations {
-        match expectation {
-            Expectation::CheckComments(target) => {
-                let text = target_text(result, target)?;
-                let source = fs::read_to_string(&case.source)
-                    .map_err(|e| format!("cannot read '{}': {}", case.source.display(), e))?;
-                let checks = extract_checks(&source);
-                if checks.is_empty() {
-                    return Err(format!(
-                        "case '{}' requested check-comments but '{}' has no ! CHECK: lines",
-                        case.name,
-                        case.source.display()
-                    ));
-                }
-                match_checks(&checks, text, &case.name)?;
-            }
-            Expectation::Contains { target, needle } => {
-                let text = target_text(result, target)?;
-                if !text.contains(needle) {
-                    return Err(format!(
-                        "expected {} to contain {:?}\nactual:\n{}",
-                        target_name(target),
-                        needle,
-                        text
-                    ));
-                }
-            }
-            Expectation::NotContains { target, needle } => {
-                let text = target_text(result, target)?;
-                if text.contains(needle) {
-                    return Err(format!(
-                        "expected {} to not contain {:?}\nactual:\n{}",
-                        target_name(target),
-                        needle,
-                        text
-                    ));
-                }
-            }
-            Expectation::Equals { target, value } => {
-                let text = target_text(result, target)?;
-                if text.trim_end() != value {
-                    return Err(format!(
-                        "expected {} to equal {:?}\nactual:\n{}",
-                        target_name(target),
-                        value,
-                        text
-                    ));
-                }
-            }
-            Expectation::IntEquals { target, value } => {
-                let actual = target_int(result, target)?;
-                if actual != *value {
-                    return Err(format!(
-                        "expected {} to equal {}\nactual: {}",
-                        target_name(target),
-                        value,
-                        actual
-                    ));
-                }
-            }
-            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
-        }
-    }
-    Ok(())
 }
 
 fn evaluate_observation_expectations(case: &CaseSpec, observed: &ObservedProgram) -> Result<(), String> {
@@ -4371,6 +4591,62 @@ fn evaluate_observation_expectations(case: &CaseSpec, observed: &ObservedProgram
             }
             Expectation::IntEquals { target, value } => {
                 let actual = observation_target_int(&observed.observation, target)?;
+                if actual != *value {
+                    return Err(format!(
+                        "expected {} to equal {}\nactual: {}",
+                        target_name(target),
+                        value,
+                        actual
+                    ));
+                }
+            }
+            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_compare_expectations(case: &CaseSpec, result: &ComparisonResult) -> Result<(), String> {
+    for expectation in &case.expectations {
+        match expectation {
+            Expectation::CheckComments(_) => {
+                return Err("compare cases do not support check-comments expectations".into())
+            }
+            Expectation::Contains { target, needle } => {
+                let text = compare_target_text(result, target)?;
+                if !text.contains(needle) {
+                    return Err(format!(
+                        "expected {} to contain {:?}\nactual:\n{}",
+                        target_name(target),
+                        needle,
+                        text
+                    ));
+                }
+            }
+            Expectation::NotContains { target, needle } => {
+                let text = compare_target_text(result, target)?;
+                if text.contains(needle) {
+                    return Err(format!(
+                        "expected {} to not contain {:?}\nactual:\n{}",
+                        target_name(target),
+                        needle,
+                        text
+                    ));
+                }
+            }
+            Expectation::Equals { target, value } => {
+                let text = compare_target_text(result, target)?;
+                if text.trim_end() != value {
+                    return Err(format!(
+                        "expected {} to equal {:?}\nactual:\n{}",
+                        target_name(target),
+                        value,
+                        text
+                    ));
+                }
+            }
+            Expectation::IntEquals { target, value } => {
+                let actual = compare_target_int(result, target)?;
                 if actual != *value {
                     return Err(format!(
                         "expected {} to equal {}\nactual: {}",
@@ -4529,7 +4805,14 @@ fn evaluate_failed_armfortas(
         evaluate_failure_expectations(case, failure)
     } else {
         let partial = failure.partial_result();
-        match evaluate_positive_expectations(case, &partial) {
+        let observed = observed_program_from_armfortas_capture(
+            &case.source,
+            failure.opt_level,
+            expected_artifacts_for_legacy_case(case),
+            &partial,
+            Some(failure),
+        );
+        match evaluate_observation_expectations(case, &observed) {
             Ok(()) => Err(compose_armfortas_failure_detail(artifacts)),
             Err(detail) if is_missing_stage_detail(&detail) => {
                 Err(compose_armfortas_failure_detail(artifacts))
@@ -4569,104 +4852,57 @@ fn expected_failure_description(case: &CaseSpec) -> String {
 }
 
 fn is_missing_stage_detail(detail: &str) -> bool {
-    detail.starts_with("missing captured stage '") || detail == "missing captured run stage"
-}
-
-fn target_text<'a>(result: &'a CaptureResult, target: &Target) -> Result<&'a str, String> {
-    match target {
-        Target::Stage(stage) => match result.get(*stage) {
-            Some(CapturedStage::Text(text)) => Ok(text),
-            Some(CapturedStage::Run(_)) => {
-                Err(format!("stage '{}' is not textual", stage.as_str()))
-            }
-            None => Err(format!("missing captured stage '{}'", stage.as_str())),
-        },
-        Target::Artifact(artifact) => capture_artifact_text(result, artifact),
-        Target::RunStdout => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stdout),
-            None => Err("missing captured run stage".into()),
-        },
-        Target::RunStderr => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stderr),
-            None => Err("missing captured run stage".into()),
-        },
-        Target::RunExitCode => {
-            Err("run.exit_code is numeric; use 'expect run.exit_code equals <int>'".into())
-        }
-    }
-}
-
-fn target_int(result: &CaptureResult, target: &Target) -> Result<i32, String> {
-    match target {
-        Target::RunExitCode => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(run.exit_code),
-            None => Err("missing captured run stage".into()),
-        },
-        Target::Artifact(ArtifactKey::ExitCode) => {
-            match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-                Some(run) => Ok(run.exit_code),
-                None => Err("missing captured run stage".into()),
-            }
-        }
-        _ => Err(format!(
-            "{} is textual; use a string matcher instead",
-            target_name(target)
-        )),
-    }
+    detail.starts_with("missing captured stage '")
+        || detail == "missing captured run stage"
+        || detail.starts_with("missing artifact '")
 }
 
 fn target_name(target: &Target) -> String {
     match target {
         Target::Stage(stage) => stage.as_str().to_string(),
         Target::Artifact(artifact) => artifact.as_str().to_string(),
+        Target::CompareStatus => "compare.status".to_string(),
+        Target::CompareClassification => "compare.classification".to_string(),
+        Target::CompareChangedArtifacts => "compare.changed_artifacts".to_string(),
+        Target::CompareDifferenceCount => "compare.difference_count".to_string(),
+        Target::CompareBasis => "compare.basis".to_string(),
         Target::RunStdout => "run.stdout".to_string(),
         Target::RunStderr => "run.stderr".to_string(),
         Target::RunExitCode => "run.exit_code".to_string(),
     }
 }
 
-fn capture_artifact_text<'a>(
-    result: &'a CaptureResult,
-    artifact: &ArtifactKey,
-) -> Result<&'a str, String> {
-    match artifact {
-        ArtifactKey::Asm => match result.get(Stage::Asm) {
-            Some(CapturedStage::Text(text)) => Ok(text),
-            Some(CapturedStage::Run(_)) => Err("asm artifact is not textual".into()),
-            None => Err("missing captured stage 'asm'".into()),
-        },
-        ArtifactKey::Obj => match result.get(Stage::Obj) {
-            Some(CapturedStage::Text(text)) => Ok(text),
-            Some(CapturedStage::Run(_)) => Err("obj artifact is not textual".into()),
-            None => Err("missing captured stage 'obj'".into()),
-        },
-        ArtifactKey::Stdout => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stdout),
-            None => Err("missing captured run stage".into()),
-        },
-        ArtifactKey::Stderr => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stderr),
-            None => Err("missing captured run stage".into()),
-        },
-        ArtifactKey::Extra(name) => {
-            let stage = armfortas_extra_stage(name)
-                .ok_or_else(|| format!("legacy capture cannot provide generic extra '{}'", name))?;
-            match result.get(stage) {
-                Some(CapturedStage::Text(text)) => Ok(text),
-                Some(CapturedStage::Run(_)) => {
-                    Err(format!("artifact '{}' is not textual", artifact.as_str()))
-                }
-                None => Err(format!("missing captured stage '{}'", stage.as_str())),
+fn compare_target_text(result: &ComparisonResult, target: &Target) -> Result<String, String> {
+    match target {
+        Target::CompareStatus => Ok(compare_status(result).to_string()),
+        Target::CompareClassification => Ok(compare_classification(result).to_string()),
+        Target::CompareChangedArtifacts => {
+            let changed = compare_changed_artifacts(result);
+            if changed.is_empty() {
+                Ok("none".to_string())
+            } else {
+                Ok(changed.join(", "))
             }
         }
-        ArtifactKey::Diagnostics => {
-            Err("legacy capture does not expose diagnostics on successful compilation".into())
-        }
-        ArtifactKey::Runtime => Err("runtime is structured; use run.stdout, run.stderr, or run.exit_code".into()),
-        ArtifactKey::ExitCode => {
-            Err("exit-code is numeric; use 'expect run.exit_code equals <int>'".into())
-        }
-        ArtifactKey::Executable => Err("executable is binary/path data, not text".into()),
+        Target::CompareBasis => Ok(result.basis.clone()),
+        Target::CompareDifferenceCount => Err(
+            "compare.difference_count is numeric; use 'expect compare.difference_count equals <int>'"
+                .into(),
+        ),
+        _ => Err(format!(
+            "{} is not a compare text target",
+            target_name(target)
+        )),
+    }
+}
+
+fn compare_target_int(result: &ComparisonResult, target: &Target) -> Result<i32, String> {
+    match target {
+        Target::CompareDifferenceCount => Ok(result.differences.len() as i32),
+        _ => Err(format!(
+            "{} is textual; use a string matcher instead",
+            target_name(target)
+        )),
     }
 }
 
@@ -4687,6 +4923,11 @@ fn observation_target_text<'a>(
             ),
         },
         Target::Artifact(artifact) => observation_artifact_text(observation, artifact),
+        Target::CompareStatus
+        | Target::CompareClassification
+        | Target::CompareChangedArtifacts
+        | Target::CompareDifferenceCount
+        | Target::CompareBasis => Err("compare targets are only valid in compare suite-v2 cases".into()),
         Target::RunStdout => observation_run_stdout(observation),
         Target::RunStderr => observation_run_stderr(observation),
         Target::RunExitCode => {
@@ -4699,6 +4940,13 @@ fn observation_target_int(observation: &CompilerObservation, target: &Target) ->
     match target {
         Target::RunExitCode => observation_run_exit_code(observation),
         Target::Artifact(ArtifactKey::ExitCode) => observation_run_exit_code(observation),
+        Target::CompareStatus
+        | Target::CompareClassification
+        | Target::CompareChangedArtifacts
+        | Target::CompareDifferenceCount
+        | Target::CompareBasis => {
+            Err("compare targets are only valid in compare suite-v2 cases".into())
+        }
         _ => Err(format!(
             "{} is textual; use a string matcher instead",
             target_name(target)
@@ -4872,6 +5120,119 @@ fn compose_observation_failure_detail(observation: &CompilerObservation) -> Stri
         detail.push_str(diagnostics);
     }
     detail
+}
+
+fn expected_artifacts_for_legacy_case(case: &CaseSpec) -> BTreeSet<ArtifactKey> {
+    let mut requested = BTreeSet::new();
+    for stage in &case.requested {
+        requested.insert(stage_to_artifact_key(*stage));
+    }
+    for expectation in &case.expectations {
+        match expectation {
+            Expectation::CheckComments(target)
+            | Expectation::Contains { target, .. }
+            | Expectation::NotContains { target, .. }
+            | Expectation::Equals { target, .. }
+            | Expectation::IntEquals { target, .. } => match target {
+                Target::Stage(stage) => {
+                    requested.insert(stage_to_artifact_key(*stage));
+                }
+                Target::Artifact(artifact) => {
+                    requested.insert(artifact.clone());
+                }
+                Target::RunStdout => {
+                    requested.insert(ArtifactKey::Stdout);
+                }
+                Target::RunStderr => {
+                    requested.insert(ArtifactKey::Stderr);
+                }
+                Target::RunExitCode => {
+                    requested.insert(ArtifactKey::ExitCode);
+                }
+                Target::CompareStatus
+                | Target::CompareClassification
+                | Target::CompareChangedArtifacts
+                | Target::CompareDifferenceCount
+                | Target::CompareBasis => {}
+            },
+            Expectation::FailContains { .. } | Expectation::FailEquals { .. } => {}
+        }
+    }
+    requested
+}
+
+fn stage_to_artifact_key(stage: Stage) -> ArtifactKey {
+    match stage {
+        Stage::Asm => ArtifactKey::Asm,
+        Stage::Obj => ArtifactKey::Obj,
+        Stage::Run => ArtifactKey::Runtime,
+        other => ArtifactKey::Extra(format!("armfortas.{}", other.as_str())),
+    }
+}
+
+fn observed_program_from_armfortas_capture(
+    program: &Path,
+    opt_level: OptLevel,
+    requested_artifacts: BTreeSet<ArtifactKey>,
+    result: &CaptureResult,
+    failure: Option<&CaptureFailure>,
+) -> ObservedProgram {
+    let mut artifacts = BTreeMap::new();
+    for (stage, captured) in &result.stages {
+        match (stage, captured) {
+            (Stage::Asm, CapturedStage::Text(text))
+                if requested_artifacts.contains(&ArtifactKey::Asm) =>
+            {
+                artifacts.insert(ArtifactKey::Asm, ArtifactValue::Text(text.clone()));
+            }
+            (Stage::Obj, CapturedStage::Text(text))
+                if requested_artifacts.contains(&ArtifactKey::Obj) =>
+            {
+                artifacts.insert(ArtifactKey::Obj, ArtifactValue::Text(text.clone()));
+            }
+            (Stage::Run, CapturedStage::Run(run)) => {
+                insert_run_artifacts(&requested_artifacts, run, &mut artifacts);
+            }
+            (stage, CapturedStage::Text(text)) => {
+                let key = ArtifactKey::Extra(format!("armfortas.{}", stage.as_str()));
+                if requested_artifacts.contains(&key) {
+                    artifacts.insert(key, ArtifactValue::Text(text.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(failure) = failure {
+        if requested_artifacts.contains(&ArtifactKey::Diagnostics) || !artifacts.contains_key(&ArtifactKey::Diagnostics) {
+            artifacts.insert(
+                ArtifactKey::Diagnostics,
+                ArtifactValue::Text(failure.detail.clone()),
+            );
+        }
+    }
+    let artifacts_captured = artifacts
+        .keys()
+        .map(|artifact| artifact.as_str().to_string())
+        .collect::<Vec<_>>();
+    ObservedProgram {
+        observation: CompilerObservation {
+            compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+            program: program.to_path_buf(),
+            opt_level,
+            compile_exit_code: if failure.is_some() { 1 } else { 0 },
+            artifacts,
+            provenance: ObservationProvenance {
+                compiler_identity: "armfortas".into(),
+                adapter_kind: "named".into(),
+                backend_mode: "suite-legacy-capture".into(),
+                backend_detail: "legacy suite cell capture converted into generic observation".into(),
+                artifacts_captured,
+                comparison_basis: None,
+                failure_stage: failure.map(|failure| failure.stage.as_str().to_string()),
+            },
+        },
+        requested_artifacts,
+    }
 }
 
 fn run_consistency_checks(
@@ -8321,6 +8682,7 @@ mod tests {
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: vec![ReferenceCompiler::Gfortran],
@@ -8414,6 +8776,7 @@ mod tests {
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm, Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
@@ -9029,6 +9392,7 @@ mod tests {
                     ArtifactKey::Runtime,
                 ]),
             }),
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -9062,6 +9426,79 @@ mod tests {
         assert_eq!(outcome.kind, OutcomeKind::Pass);
         assert!(outcome.detail.is_empty());
         assert!(outcome.bundle.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_generic_compare_suite_case_uses_compare_engine() {
+        let left = fake_compiler_fixture("match_42_a.sh");
+        let right = fake_compiler_fixture("runtime_41.sh");
+        ensure_fixture_executable(&left);
+        ensure_fixture_executable(&right);
+
+        let suite = SuiteSpec {
+            name: "v2/generic-compare".into(),
+            path: PathBuf::from("suite.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "fake-divergence".into(),
+            source: runtime_fixture("if_else.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: None,
+            generic_compare: Some(GenericCompareCase {
+                left: CompilerSpec::Binary(left),
+                right: CompilerSpec::Binary(right),
+                artifacts: BTreeSet::from([
+                    ArtifactKey::Diagnostics,
+                    ArtifactKey::Runtime,
+                    ArtifactKey::Asm,
+                ]),
+            }),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![
+                Expectation::Equals {
+                    target: Target::CompareStatus,
+                    value: "diff".into(),
+                },
+                Expectation::Equals {
+                    target: Target::CompareClassification,
+                    value: "mixed divergence".into(),
+                },
+                Expectation::Contains {
+                    target: Target::CompareChangedArtifacts,
+                    needle: "asm".into(),
+                },
+                Expectation::Contains {
+                    target: Target::CompareChangedArtifacts,
+                    needle: "runtime".into(),
+                },
+                Expectation::IntEquals {
+                    target: Target::CompareDifferenceCount,
+                    value: 2,
+                },
+            ],
+            status_rules: Vec::new(),
+        };
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let outcome = execute_case_cell(&suite, &case, OptLevel::O0, &config).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Pass);
     }
 
     #[test]
@@ -9125,6 +9562,35 @@ end
         );
         assert!(generic.artifacts.contains(&ArtifactKey::Asm));
         assert!(generic.artifacts.contains(&ArtifactKey::Obj));
+        assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
+        assert!(case.requested.is_empty());
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parses_generic_compare_case() {
+        let root = std::env::temp_dir().join("bencch_generic_compare_parser_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "v2/generic-compare"
+
+case "fake-match"
+source "../../fixtures/runtime/if_else.f90"
+compare gfortran flang-new => asm
+expect compare.status equals "match"
+expect compare.difference_count equals 0
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root).unwrap();
+        let case = &suite.cases[0];
+        let generic = case.generic_compare.as_ref().unwrap();
+        assert_eq!(generic.left, CompilerSpec::Named(NamedCompiler::Gfortran));
+        assert_eq!(generic.right, CompilerSpec::Named(NamedCompiler::FlangNew));
+        assert!(generic.artifacts.contains(&ArtifactKey::Asm));
+        assert!(generic.artifacts.contains(&ArtifactKey::Diagnostics));
         assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
         assert!(case.requested.is_empty());
         let _ = fs::remove_file(&root);
@@ -9509,6 +9975,7 @@ end
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -9527,7 +9994,14 @@ end
                 CapturedStage::Text("mov x19, x0\nret\n".into()),
             )]),
         };
-        assert!(evaluate_positive_expectations(&case, &result).is_ok());
+        let observed = observed_program_from_armfortas_capture(
+            Path::new("demo.f90"),
+            OptLevel::O0,
+            expected_artifacts_for_legacy_case(&case),
+            &result,
+            None,
+        );
+        assert!(evaluate_observation_expectations(&case, &observed).is_ok());
 
         let bad = CaptureResult {
             input: PathBuf::from("demo.f90"),
@@ -9537,7 +10011,14 @@ end
                 CapturedStage::Text("mov x18, x0\nret\n".into()),
             )]),
         };
-        let err = evaluate_positive_expectations(&case, &bad).unwrap_err();
+        let observed = observed_program_from_armfortas_capture(
+            Path::new("demo.f90"),
+            OptLevel::O0,
+            expected_artifacts_for_legacy_case(&case),
+            &bad,
+            None,
+        );
+        let err = evaluate_observation_expectations(&case, &observed).unwrap_err();
         assert!(err.contains("expected asm to not contain"));
     }
 
@@ -9557,6 +10038,7 @@ end
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Ir, Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: vec![ReferenceCompiler::Gfortran],
@@ -9746,6 +10228,7 @@ end
             graph_files: vec![module.clone(), main.clone()],
             requested: BTreeSet::from([Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -9797,6 +10280,7 @@ end
             graph_files: vec![module.clone(), main.clone()],
             requested: BTreeSet::from([Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 2,
             reference_compilers: Vec::new(),
@@ -10528,6 +11012,7 @@ end
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Tokens, Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
@@ -10570,6 +11055,7 @@ end
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
@@ -10609,6 +11095,7 @@ end
             graph_files: Vec::new(),
             requested: BTreeSet::from([Stage::Asm, Stage::Obj, Stage::Run]),
             generic_introspect: None,
+            generic_compare: None,
             opt_levels: vec![OptLevel::O0],
             repeat_count: 3,
             reference_compilers: Vec::new(),
