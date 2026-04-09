@@ -7013,6 +7013,12 @@ mod tests {
     #[cfg(unix)]
     fn stable_runtime_compare_corpus() -> Vec<PathBuf> {
         [
+            "allocatable.f90",
+            "do_while.f90",
+            "exit_cycle.f90",
+            "nested_loops.f90",
+            "subroutine_call.f90",
+            "string_fixed.f90",
             "if_else.f90",
             "mixed_types.f90",
             "select_case.f90",
