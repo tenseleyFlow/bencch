@@ -1,0 +1,8 @@
+suite "v2/mem2reg-compat"
+
+case "ir_comment_compat"
+source "../../fixtures/compat/mem2reg_ir_comments.f90"
+compiler armfortas => runtime, armfortas.ir
+expect run.stdout check-comments
+expect armfortas.ir check-comments
+end
