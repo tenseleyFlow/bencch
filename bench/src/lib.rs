@@ -4089,16 +4089,13 @@ fn execute_case_cell(
                     expected_failure_description(case)
                 ))
             } else {
-                let mut observed_artifacts = expected_artifacts_for_legacy_case(case);
-                if !artifacts.references.is_empty() {
-                    observed_artifacts.extend(default_differential_artifacts());
-                }
-                let observed = observed_program_from_armfortas_capture(
+                let observed = legacy_success_observed_program(
+                    case,
                     &prepared.compiler_source,
                     opt_level,
-                    observed_artifacts,
                     result,
-                    None,
+                    !artifacts.references.is_empty(),
+                    &config.tools,
                 );
                 let mut execution = evaluate_observation_expectations(case, &observed);
                 if execution.is_ok() && !artifacts.references.is_empty() {
@@ -4249,6 +4246,50 @@ fn execute_case_cell(
     cleanup_consistency_issues(&artifacts.consistency_issues);
 
     Ok(outcome)
+}
+
+fn legacy_success_observed_program(
+    case: &CaseSpec,
+    program: &Path,
+    opt_level: OptLevel,
+    result: &CaptureResult,
+    has_references: bool,
+    tools: &ToolchainConfig,
+) -> ObservedProgram {
+    let mut requested_artifacts = expected_artifacts_for_legacy_case(case);
+    if has_references {
+        requested_artifacts.extend(default_differential_artifacts());
+    }
+
+    if legacy_case_uses_generic_observation_execution(case, &case.requested) {
+        if let Ok(observation) = observe_compiler(
+            &CompilerSpec::Named(NamedCompiler::Armfortas),
+            program,
+            opt_level,
+            &requested_artifacts,
+            tools,
+        ) {
+            if observation.compile_exit_code == 0 {
+                return ObservedProgram {
+                    observation,
+                    requested_artifacts,
+                };
+            }
+        }
+    }
+
+    observed_program_from_armfortas_capture(program, opt_level, requested_artifacts, result, None)
+}
+
+fn legacy_case_uses_generic_observation_execution(
+    case: &CaseSpec,
+    requested: &BTreeSet<Stage>,
+) -> bool {
+    !has_failure_expectation(case)
+        && !requested.is_empty()
+        && requested
+            .iter()
+            .all(|stage| matches!(stage, Stage::Asm | Stage::Obj | Stage::Run))
 }
 
 fn execute_generic_compare_case_cell(
@@ -9761,6 +9802,52 @@ mod tests {
             ..cli_only_case.clone()
         };
         assert!(!legacy_case_uses_generic_consistency_checks(&mixed_case));
+    }
+
+    #[test]
+    fn legacy_observable_cases_use_generic_observation_execution() {
+        let observable_case = CaseSpec {
+            name: "observable".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Contains {
+                target: Target::RunStdout,
+                needle: "42".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        assert!(legacy_case_uses_generic_observation_execution(
+            &observable_case,
+            &observable_case.requested
+        ));
+
+        let richer_case = CaseSpec {
+            requested: BTreeSet::from([Stage::Run, Stage::Ir]),
+            ..observable_case.clone()
+        };
+        assert!(!legacy_case_uses_generic_observation_execution(
+            &richer_case,
+            &richer_case.requested
+        ));
+
+        let failure_case = CaseSpec {
+            expectations: vec![Expectation::FailContains {
+                stage: FailureStage::Run,
+                needle: "boom".into(),
+            }],
+            ..observable_case
+        };
+        assert!(!legacy_case_uses_generic_observation_execution(
+            &failure_case,
+            &failure_case.requested
+        ));
     }
 
     #[cfg(unix)]
