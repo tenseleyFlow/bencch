@@ -585,6 +585,13 @@ struct ConsistencyObservation {
 }
 
 #[derive(Debug, Clone)]
+struct ListConfig {
+    suite_filter: Option<String>,
+    verbose: bool,
+    tools: ToolchainConfig,
+}
+
+#[derive(Debug, Clone)]
 struct RunConfig {
     suite_filter: Option<String>,
     case_filter: Option<String>,
@@ -786,9 +793,12 @@ pub fn run_cli(args: &[String]) -> i32 {
 
 pub fn run_cli_named(program_name: &str, args: &[String]) -> i32 {
     match parse_cli(args) {
-        Ok(CommandKind::List { suite_filter }) => match discover_suites(default_suite_root()) {
+        Ok(CommandKind::List(config)) => match discover_suites(default_suite_root()) {
             Ok(suites) => {
-                print_suites(&filter_suites(&suites, suite_filter.as_deref()));
+                print_suites(
+                    &filter_suites(&suites, config.suite_filter.as_deref()),
+                    &config,
+                );
                 0
             }
             Err(err) => {
@@ -871,7 +881,7 @@ pub fn run_cli_named(program_name: &str, args: &[String]) -> i32 {
 }
 
 enum CommandKind {
-    List { suite_filter: Option<String> },
+    List(ListConfig),
     Run(RunConfig),
     Compare(CompareConfig),
     Introspect(IntrospectConfig),
@@ -935,19 +945,27 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
 
     match args[0].as_str() {
         "list" => {
-            let mut suite_filter = None;
+            let mut config = ListConfig {
+                suite_filter: None,
+                verbose: false,
+                tools: ToolchainConfig::from_env(),
+            };
             let mut queue: VecDeque<&String> = args[1..].iter().collect();
             while let Some(arg) = queue.pop_front() {
+                if parse_tool_override_arg(arg, &mut queue, &mut config.tools)? {
+                    continue;
+                }
                 match arg.as_str() {
                     "--suite" => {
                         let value = queue.pop_front().ok_or("--suite requires a value")?;
-                        suite_filter = Some(value.clone());
+                        config.suite_filter = Some(value.clone());
                     }
+                    "--verbose" => config.verbose = true,
                     "--help" | "-h" => return Ok(CommandKind::Help),
                     other => return Err(format!("unknown list option: {}", other)),
                 }
             }
-            Ok(CommandKind::List { suite_filter })
+            Ok(CommandKind::List(config))
         }
         "run" => {
             let mut config = RunConfig {
@@ -1172,7 +1190,10 @@ fn print_usage(program_name: &str) {
     );
     eprintln!();
     eprintln!("usage:");
-    eprintln!("  {} list [--suite <filter>]", program_name);
+    eprintln!(
+        "  {} list [--suite <filter>] [--verbose] [tool overrides]",
+        program_name
+    );
     eprintln!(
         "  {} run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--json-report <path>] [--markdown-report <path>] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]",
         program_name
@@ -3300,11 +3321,265 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
     lines.join("\n")
 }
 
+fn render_doctor_capabilities_json(capabilities: &CompilerCapabilities) -> String {
+    let unavailable = capabilities
+        .unavailable_artifacts
+        .iter()
+        .map(|(artifact, reason)| {
+            format!(
+                "{{\"artifact\":\"{}\",\"reason\":\"{}\"}}",
+                json_escape(artifact.as_str()),
+                json_escape(reason)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{{\"generic_artifacts\":{},\"adapter_extras\":{},\"unavailable_artifacts\":[{}]}}",
+        json_string_iter(
+            capabilities
+                .generic_artifacts()
+                .iter()
+                .map(|artifact| artifact.as_str())
+        ),
+        json_string_vec_map(&capabilities.adapter_extras()),
+        unavailable
+    )
+}
+
+fn json_string_vec_map(map: &BTreeMap<String, Vec<String>>) -> String {
+    let mut rendered = String::from("{");
+    for (index, (key, values)) in map.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push('"');
+        rendered.push_str(&json_escape(key));
+        rendered.push_str("\": ");
+        rendered.push_str(&json_string_iter(values.iter().map(|value| value.as_str())));
+    }
+    rendered.push('}');
+    rendered
+}
+
 fn render_doctor_json(config: &DoctorConfig) -> String {
     let fields = doctor_report_fields(config);
+    let workspace_root = workspace_root();
+    let suite_root = default_suite_root();
+    let report_root = default_report_root();
+    let armfortas = config.tools.armfortas_adapters();
+    let observable_backend = config
+        .tools
+        .cli_observable_capture_backend(report_root.join(".tmp").join("doctor"));
+    let capture_root = armfortas.capture_root();
+    let capture_manifest = capture_root.as_ref().map(|root| root.join("Cargo.toml"));
+    let armfortas_capabilities = compiler_capabilities(
+        &CompilerSpec::Named(NamedCompiler::Armfortas),
+        &config.tools,
+    );
+    let gfortran_capabilities =
+        compiler_capabilities(&CompilerSpec::Named(NamedCompiler::Gfortran), &config.tools);
+    let flang_capabilities =
+        compiler_capabilities(&CompilerSpec::Named(NamedCompiler::FlangNew), &config.tools);
+    let explicit_capabilities = compiler_capabilities(
+        &CompilerSpec::Binary(PathBuf::from("/path/to/compiler")),
+        &config.tools,
+    );
     let mut lines = vec![
         "{".to_string(),
         "  \"command\": \"doctor\",".to_string(),
+        "  \"workspace\": {".to_string(),
+        format!(
+            "    \"workspace_root\": \"{}\",",
+            json_escape(&display_path(&workspace_root))
+        ),
+        format!(
+            "    \"suite_root\": \"{}\",",
+            json_escape(&display_path(&suite_root))
+        ),
+        format!(
+            "    \"report_root\": \"{}\"",
+            json_escape(&display_path(&report_root))
+        ),
+        "  },".to_string(),
+        "  \"armfortas\": {".to_string(),
+        format!(
+            "    \"cli_adapter\": \"{}\",",
+            json_escape(armfortas.cli_description())
+        ),
+        format!(
+            "    \"capture_adapter\": \"{}\",",
+            json_escape(armfortas.capture_description())
+        ),
+        format!(
+            "    \"cli_mode\": \"{}\",",
+            json_escape(armfortas.cli_mode_name())
+        ),
+        format!(
+            "    \"cli_status\": \"{}\",",
+            json_escape(
+                &match armfortas.cli() {
+                    ArmfortasCliAdapter::Linked => capture_root
+                        .as_ref()
+                        .map(|root| format!("linked via Cargo to {}", display_path(root)))
+                        .unwrap_or_else(|| {
+                            "linked adapter requested but unavailable in this build".to_string()
+                        }),
+                    ArmfortasCliAdapter::External(binary) => tool_probe_status(binary, false),
+                }
+            )
+        ),
+        format!(
+            "    \"capture_mode\": \"{}\",",
+            json_escape(armfortas.capture_mode_name())
+        ),
+        format!(
+            "    \"capture_status\": \"{}\",",
+            json_escape(
+                &capture_root
+                    .as_ref()
+                    .map(|root| format!("linked via Cargo to {}", display_path(root)))
+                    .unwrap_or_else(|| {
+                        "unavailable in this build; use scripts/bootstrap-linked-armfortas.sh"
+                            .to_string()
+                    })
+            )
+        ),
+        format!(
+            "    \"capture_root\": {},",
+            match capture_root.as_ref() {
+                Some(root) => format!("\"{}\"", json_escape(&display_path(root))),
+                None => "null".to_string(),
+            }
+        ),
+        format!(
+            "    \"capture_manifest\": \"{}\"",
+            json_escape(
+                &capture_manifest
+                    .as_ref()
+                    .map(|manifest| {
+                        if manifest.exists() {
+                            display_path(manifest)
+                        } else {
+                            "missing".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "unavailable".to_string())
+            )
+        ),
+        "  },".to_string(),
+        "  \"primary_backends\": {".to_string(),
+        format!(
+            "    \"full\": \"{}\",",
+            json_escape(armfortas.capture_description())
+        ),
+        format!(
+            "    \"observable\": \"{}\",",
+            json_escape(observable_backend.description())
+        ),
+        format!(
+            "    \"selection\": \"{}\"",
+            json_escape("observable backend is selected for asm/obj/run-only cells when the armfortas CLI is external and the case does not require expect-fail or capture-consistency semantics; otherwise full backend")
+        ),
+        "  },".to_string(),
+        "  \"named_compilers\": {".to_string(),
+        format!(
+            "    \"armfortas\": {{\"surface\":\"{}\",\"capabilities\":{}}},",
+            json_escape(&format!(
+                "cli={} capture={}",
+                armfortas.cli_mode_name(),
+                armfortas.capture_mode_name()
+            )),
+            render_doctor_capabilities_json(&armfortas_capabilities)
+        ),
+        format!(
+            "    \"gfortran\": {{\"status\":\"{}\",\"capabilities\":{}}},",
+            json_escape(&tool_probe_status(&config.tools.gfortran, false)),
+            render_doctor_capabilities_json(&gfortran_capabilities)
+        ),
+        format!(
+            "    \"flang-new\": {{\"status\":\"{}\",\"capabilities\":{}}}",
+            json_escape(&tool_probe_status(&config.tools.flang_new, false)),
+            render_doctor_capabilities_json(&flang_capabilities)
+        ),
+        "  },".to_string(),
+        format!(
+            "  \"explicit_compiler_path\": {{\"description\":\"{}\",\"capabilities\":{}}},",
+            json_escape(
+                "any filesystem path passed to compare/introspect uses the generic external-driver adapter"
+            ),
+            render_doctor_capabilities_json(&explicit_capabilities)
+        ),
+        "  \"tools\": {".to_string(),
+        format!(
+            "    \"gfortran\": \"{}\",",
+            json_escape(&tool_probe_status(&config.tools.gfortran, false))
+        ),
+        format!(
+            "    \"flang-new\": \"{}\",",
+            json_escape(&tool_probe_status(&config.tools.flang_new, false))
+        ),
+        format!(
+            "    \"as\": \"{}\",",
+            json_escape(&tool_probe_status(&config.tools.system_as, false))
+        ),
+        format!(
+            "    \"otool\": \"{}\",",
+            json_escape(&tool_probe_status(&config.tools.otool, false))
+        ),
+        format!(
+            "    \"nm\": \"{}\"",
+            json_escape(&tool_probe_status(&config.tools.nm, false))
+        ),
+        "  },".to_string(),
+        "  \"mode\": {".to_string(),
+        format!(
+            "    \"note\": \"{}\",",
+            json_escape(
+                if capture_root.is_some() {
+                    "linked capture still depends on the surrounding armfortas checkout"
+                } else {
+                    "linked capture is unavailable in this build; external compiler compare/introspect surfaces still work"
+                }
+            )
+        ),
+        format!(
+            "    \"surface_key\": \"{}\",",
+            if capture_root.is_some() {
+                "linked_mode_surface"
+            } else {
+                "external_only_surface"
+            }
+        ),
+        format!(
+            "    \"surface_value\": \"{}\",",
+            json_escape(
+                if capture_root.is_some() {
+                    "rich armfortas stages, legacy frontend/module suites, capture consistency"
+                } else {
+                    "compare, introspect, generic suite-v2, observable-only run cells"
+                }
+            )
+        ),
+        format!(
+            "    \"limits_key\": \"{}\",",
+            if capture_root.is_some() {
+                "external_only_limits"
+            } else {
+                "linked_only_surface"
+            }
+        ),
+        format!(
+            "    \"limits_value\": \"{}\"",
+            json_escape(
+                if capture_root.is_some() {
+                    "none in this build"
+                } else {
+                    "armfortas.* extras, legacy frontend/module suites, capture consistency"
+                }
+            )
+        ),
+        "  },".to_string(),
         "  \"fields\": {".to_string(),
     ];
     for (index, (field, value)) in fields.iter().enumerate() {
@@ -4365,11 +4640,158 @@ fn filter_suites<'a>(suites: &'a [SuiteSpec], suite_filter: Option<&str>) -> Vec
         .collect()
 }
 
-fn print_suites(suites: &[&SuiteSpec]) {
+fn print_suites(suites: &[&SuiteSpec], config: &ListConfig) {
     for suite in suites {
         println!("{} ({})", suite.name, suite.cases.len());
         println!("  {}", suite.path.display());
+        if config.verbose {
+            for case in &suite.cases {
+                println!("  - {} [{}]", case.name, case_discovery_mode_label(case));
+                for line in case_discovery_lines(case, &config.tools) {
+                    println!("    {}", line);
+                }
+            }
+        }
     }
+}
+
+fn case_discovery_mode_label(case: &CaseSpec) -> &'static str {
+    if case.is_generic_compare() {
+        "generic-compare"
+    } else if case.is_generic_introspect() {
+        "generic-introspect"
+    } else {
+        "legacy"
+    }
+}
+
+fn format_opt_level_list(levels: &[OptLevel]) -> String {
+    levels
+        .iter()
+        .map(OptLevel::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn case_discovery_lines(case: &CaseSpec, tools: &ToolchainConfig) -> Vec<String> {
+    let mut lines = vec![
+        format!("source: {}", case.source_label()),
+        format!("opts: {}", format_opt_level_list(&case.opt_levels)),
+    ];
+
+    if let Some(generic) = &case.generic_introspect {
+        lines.push(format!("compiler: {}", generic.compiler.display_name()));
+        lines.push(format!(
+            "artifacts: {}",
+            format_artifact_name_list(
+                &generic
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.as_str().to_string())
+                    .collect::<Vec<_>>()
+            )
+        ));
+        match capability_request_issue(&generic.compiler, &generic.artifacts, tools) {
+            Some(issue) => {
+                lines.push("capability_status: blocked".to_string());
+                lines.extend(
+                    issue
+                        .lines()
+                        .map(|line| format!("capability_detail: {}", line)),
+                );
+            }
+            None => lines.push("capability_status: ready".to_string()),
+        }
+        return lines;
+    }
+
+    if let Some(generic) = &case.generic_compare {
+        lines.push(format!(
+            "compare: {} vs {}",
+            generic.left.display_name(),
+            generic.right.display_name()
+        ));
+        lines.push(format!(
+            "artifacts: {}",
+            format_artifact_name_list(
+                &generic
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.as_str().to_string())
+                    .collect::<Vec<_>>()
+            )
+        ));
+        let mut issues = Vec::new();
+        if let Some(issue) = capability_request_issue(&generic.left, &generic.artifacts, tools) {
+            issues.push(format!("left {}", issue));
+        }
+        if let Some(issue) = capability_request_issue(&generic.right, &generic.artifacts, tools) {
+            issues.push(format!("right {}", issue));
+        }
+        if issues.is_empty() {
+            lines.push("capability_status: ready".to_string());
+        } else {
+            lines.push("capability_status: blocked".to_string());
+            lines.extend(issues.into_iter().flat_map(|issue| {
+                issue
+                    .lines()
+                    .map(|line| format!("capability_detail: {}", line))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        return lines;
+    }
+
+    let needs_linked_capture = primary_backend_kind_for_case(case, &case.requested, tools)
+        == PrimaryCaptureBackendKind::Full;
+    if case.requested.is_empty() {
+        lines.push("stages: run".to_string());
+    } else {
+        let stages = case
+            .requested
+            .iter()
+            .map(Stage::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("stages: {}", stages));
+    }
+    if !case.reference_compilers.is_empty() {
+        lines.push(format!(
+            "differential: {}",
+            case.reference_compilers
+                .iter()
+                .map(ReferenceCompiler::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !case.consistency_checks.is_empty() {
+        lines.push(format!(
+            "consistency: {}",
+            case.consistency_checks
+                .iter()
+                .map(ConsistencyCheck::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if needs_linked_capture {
+        lines.push("surface: linked armfortas capture".to_string());
+        if linked_capture_available() {
+            lines.push("capability_status: ready".to_string());
+        } else {
+            lines.push("capability_status: blocked".to_string());
+            lines.push(
+                "capability_detail: linked armfortas capture is unavailable in this build"
+                    .to_string(),
+            );
+        }
+    } else {
+        lines.push("surface: observable-only legacy path".to_string());
+        lines.push("capability_status: ready".to_string());
+    }
+
+    lines
 }
 
 fn run_suites(config: &RunConfig) -> Result<Summary, String> {
@@ -11990,6 +12412,34 @@ end
     }
 
     #[test]
+    fn parse_cli_collects_list_config() {
+        let args = vec![
+            "list".to_string(),
+            "--suite".to_string(),
+            "v2/generic".to_string(),
+            "--verbose".to_string(),
+            "--armfortas-bin".to_string(),
+            "/tmp/armfortas".to_string(),
+        ];
+
+        let command = parse_cli(&args).unwrap();
+        let config = match command {
+            CommandKind::List(config) => config,
+            other => panic!(
+                "expected list command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        assert_eq!(config.suite_filter.as_deref(), Some("v2/generic"));
+        assert!(config.verbose);
+        assert_eq!(
+            config.tools.armfortas,
+            ArmfortasCliAdapter::External("/tmp/armfortas".into())
+        );
+    }
+
+    #[test]
     fn parse_cli_collects_doctor_tool_overrides() {
         let args = vec![
             "doctor".to_string(),
@@ -13307,11 +13757,90 @@ end
         let rendered_json = render_doctor_json(&config);
         let rendered_markdown = render_doctor_markdown(&config);
         assert!(rendered_json.contains("\"command\": \"doctor\""));
+        assert!(rendered_json.contains("\"workspace\": {"));
+        assert!(rendered_json.contains("\"named_compilers\": {"));
+        assert!(rendered_json.contains("\"tools\": {"));
         assert!(rendered_json.contains("\"named_compiler.armfortas.adapter_extras\""));
         assert!(rendered_markdown.contains("# bencch doctor report"));
         assert!(rendered_markdown.contains("| `named_compiler.armfortas` |"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn case_discovery_lines_report_capability_block_for_generic_introspect() {
+        let case = CaseSpec {
+            name: "unsupported_extra".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: Some(GenericIntrospectCase {
+                compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+                artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.ir".into())]),
+            }),
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+
+        let lines = case_discovery_lines(&case, &ToolchainConfig::from_env());
+        assert!(lines.contains(&"capability_status: blocked".to_string()));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("unsupported in this adapter: armfortas.ir")));
+    }
+
+    #[test]
+    fn case_discovery_lines_distinguish_legacy_surfaces() {
+        let observable_case = CaseSpec {
+            name: "observable".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+        let linked_case = CaseSpec {
+            name: "linked".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Tokens]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0, OptLevel::O1],
+            repeat_count: 2,
+            reference_compilers: vec![ReferenceCompiler::Gfortran],
+            consistency_checks: vec![ConsistencyCheck::CaptureAsmReproducible],
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+
+        let tools = ToolchainConfig {
+            armfortas: ArmfortasCliAdapter::External("/tmp/armfortas".into()),
+            ..ToolchainConfig::from_env()
+        };
+        let observable_lines = case_discovery_lines(&observable_case, &tools);
+        let linked_lines = case_discovery_lines(&linked_case, &tools);
+
+        assert!(observable_lines.contains(&"surface: observable-only legacy path".to_string()));
+        assert!(observable_lines.contains(&"capability_status: ready".to_string()));
+        assert!(linked_lines.contains(&"surface: linked armfortas capture".to_string()));
+        assert!(linked_lines
+            .iter()
+            .any(|line| line.contains("differential: gfortran")));
+        assert!(linked_lines
+            .iter()
+            .any(|line| line.contains("consistency: capture_asm_reproducible")));
     }
 
     #[test]
