@@ -1,0 +1,10 @@
+suite "v2/generic-differential"
+
+case "gfortran_runtime_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compiler gfortran => runtime
+differential => flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end

@@ -1,0 +1,21 @@
+suite "v2/generic-consistency"
+
+case "fake_compiler_runtime_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+repeat => 3
+compiler "../../fixtures/fake_compilers/match_42_a.sh" => asm, runtime
+consistency => cli_asm_reproducible, cli_run_reproducible
+expect asm contains ".globl _main"
+expect run.stdout contains "42"
+expect run.exit_code equals 0
+end
+
+case "fake_compiler_object_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+repeat => 3
+compiler "../../fixtures/fake_compilers/match_42_a.sh" => obj
+consistency => cli_obj_reproducible
+expect obj contains "object snapshot unavailable"
+end
