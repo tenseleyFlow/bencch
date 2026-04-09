@@ -150,6 +150,10 @@ Compare two explicit compiler binaries:
 cargo run -p afs-tests --bin bencch -- compare /path/to/one /path/to/other --program fixtures/runtime/mixed_types.f90 --artifact asm,obj
 ```
 
+Namespaced adapter artifacts are allowed in `compare` too, but only when both
+compiler surfaces can actually provide them. If not, `bencch` fails early with
+an explicit capability message.
+
 Introspect one compiler on one program:
 
 ```bash
