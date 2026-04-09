@@ -63,6 +63,18 @@ Example external-only authored compare matrix:
 cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-compare --case fake_compilers_match_matrix --all
 ```
 
+Example external-only authored differential matrix:
+
+```bash
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-differential --all
+```
+
+Example external-only authored consistency matrix:
+
+```bash
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-consistency --all
+```
+
 Example external-only authored failure matrix:
 
 ```bash

@@ -76,6 +76,23 @@ jobs:
           grep "PASS   v2/generic-compare::fake_compilers_match_matrix\\[O1\\]" compare-suite.txt
           grep "PASS   v2/generic-compare::fake_compilers_match_matrix\\[O2\\]" compare-suite.txt
 
+      - name: Verify external-only generic differential suite run
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-differential --all > differential-suite.txt
+          grep "PASS   v2/generic-differential::gfortran_runtime_matrix\\[O0\\]" differential-suite.txt
+          grep "PASS   v2/generic-differential::gfortran_runtime_matrix\\[O1\\]" differential-suite.txt
+          grep "PASS   v2/generic-differential::gfortran_runtime_matrix\\[O2\\]" differential-suite.txt
+
+      - name: Verify external-only generic consistency suite run
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-consistency --all > consistency-suite.txt
+          grep "PASS   v2/generic-consistency::fake_compiler_runtime_matrix\\[O0\\]" consistency-suite.txt
+          grep "PASS   v2/generic-consistency::fake_compiler_runtime_matrix\\[O1\\]" consistency-suite.txt
+          grep "PASS   v2/generic-consistency::fake_compiler_runtime_matrix\\[O2\\]" consistency-suite.txt
+          grep "PASS   v2/generic-consistency::fake_compiler_object_matrix\\[O0\\]" consistency-suite.txt
+          grep "PASS   v2/generic-consistency::fake_compiler_object_matrix\\[O1\\]" consistency-suite.txt
+          grep "PASS   v2/generic-consistency::fake_compiler_object_matrix\\[O2\\]" consistency-suite.txt
+
       - name: Verify external-only generic failure suites
         run: |
           cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-failures --case fake_compiler_expected_diagnostic --all > failure-suite.txt
