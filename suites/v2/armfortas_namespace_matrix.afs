@@ -1,0 +1,21 @@
+suite "v2/armfortas-namespace-matrix"
+
+case "if_else_frontend_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compiler armfortas => armfortas.tokens, armfortas.ast, armfortas.sema
+expect armfortas.tokens contains "\"then\""
+expect armfortas.ast contains "node: IfConstruct"
+expect armfortas.ast contains "\"test_if\""
+expect armfortas.sema contains "diagnostics: none"
+end
+
+case "where_construct_frontend_matrix"
+source "../../fixtures/runtime/where_construct.f90"
+opts => O0, O1, O2
+compiler armfortas => armfortas.tokens, armfortas.ast, armfortas.sema
+expect armfortas.tokens contains "\"where\""
+expect armfortas.ast contains "node: Allocate"
+expect armfortas.ast contains "\"test_where\""
+expect armfortas.sema contains "diagnostics: none"
+end
