@@ -8338,6 +8338,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn introspect_explicit_path_compiler_reports_generic_artifacts_when_available() {
+        let compiler = fake_compiler_fixture("match_42_a.sh");
+        ensure_fixture_executable(&compiler);
+
+        let config = IntrospectConfig {
+            compiler: CompilerSpec::Binary(compiler.clone()),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([ArtifactKey::Asm, ArtifactKey::Obj, ArtifactKey::Runtime]),
+            json_report: None,
+            markdown_report: None,
+            all_artifacts: false,
+            summary_only: false,
+            max_artifact_lines: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let observed = run_introspect(&config).unwrap();
+        let observation = &observed.observation;
+        assert_eq!(observation.compile_exit_code, 0);
+        assert_eq!(observation.provenance.backend_mode, "external-driver");
+        assert_eq!(observation.provenance.adapter_kind, "explicit-path");
+        assert!(observation
+            .provenance
+            .backend_detail
+            .contains("match_42_a.sh"));
+        assert!(observation.artifacts.contains_key(&ArtifactKey::Asm));
+        assert!(observation.artifacts.contains_key(&ArtifactKey::Obj));
+        assert!(observation.artifacts.contains_key(&ArtifactKey::Runtime));
+        assert!(observation_adapter_extras(observation).is_empty());
+        assert!(missing_introspection_artifact_names(&observed).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn introspect_external_failure_reports_missing_requested_artifacts() {
         let compiler = fake_compiler_fixture("compile_fail.sh");
         ensure_fixture_executable(&compiler);
