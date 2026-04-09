@@ -238,6 +238,15 @@ For mem2reg-branch compatibility, `check-comments` on `armfortas.ir` understands
 inline `! IR_CHECK:` and `! IR_NOT:` annotations, while `run.stdout
 check-comments` keeps using the usual `! CHECK:` lines.
 
+Two more opt-in bridges exist for imported mem2reg-style audits:
+
+- `expect-fail comments` reads `! ERROR_EXPECTED:` lines from the source
+- `xfail comments` reads the first `! XFAIL:` line from the source
+
+Those compose the same way the old mem2reg harness did: a case can keep a
+source-owned expected diagnostic and still remain `xfail` until trunk starts
+producing that diagnostic correctly.
+
 Suite-v2 can also drive the generic compare engine:
 
 ```text
@@ -279,6 +288,8 @@ Common things the runner understands:
 - generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
 - suite-v2 generic compiler cases can also use opt matrices
 - `check-comments` on `armfortas.ir` / `ir` uses `! IR_CHECK:` and `! IR_NOT:`
+- `expect-fail comments` uses inline `! ERROR_EXPECTED:` source comments
+- `xfail comments` uses the first inline `! XFAIL:` source comment
 - generic compare cases like `compare gfortran flang-new => asm`, including opt matrices
 - suite-v2 graph cases with `entry` plus ordered `file` lines
 - opt matrices like `opts => O0, O1, O2`
