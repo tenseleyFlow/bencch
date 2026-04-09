@@ -234,6 +234,10 @@ expect run.exit_code equals 0
 end
 ```
 
+For mem2reg-branch compatibility, `check-comments` on `armfortas.ir` understands
+inline `! IR_CHECK:` and `! IR_NOT:` annotations, while `run.stdout
+check-comments` keeps using the usual `! CHECK:` lines.
+
 Suite-v2 can also drive the generic compare engine:
 
 ```text
@@ -274,6 +278,7 @@ Common things the runner understands:
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
 - generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
 - suite-v2 generic compiler cases can also use opt matrices
+- `check-comments` on `armfortas.ir` / `ir` uses `! IR_CHECK:` and `! IR_NOT:`
 - generic compare cases like `compare gfortran flang-new => asm`, including opt matrices
 - suite-v2 graph cases with `entry` plus ordered `file` lines
 - opt matrices like `opts => O0, O1, O2`
