@@ -409,6 +409,96 @@ pub struct ComparisonResult {
     pub differences: Vec<ArtifactDifference>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerCapabilities {
+    pub compiler: CompilerSpec,
+    pub supported_artifacts: BTreeSet<ArtifactKey>,
+    pub unavailable_artifacts: BTreeMap<ArtifactKey, String>,
+}
+
+impl CompilerCapabilities {
+    pub fn new(compiler: CompilerSpec) -> Self {
+        Self {
+            compiler,
+            supported_artifacts: BTreeSet::new(),
+            unavailable_artifacts: BTreeMap::new(),
+        }
+    }
+
+    pub fn support(mut self, artifact: ArtifactKey) -> Self {
+        self.supported_artifacts.insert(artifact);
+        self
+    }
+
+    pub fn support_all<I>(mut self, artifacts: I) -> Self
+    where
+        I: IntoIterator<Item = ArtifactKey>,
+    {
+        self.supported_artifacts.extend(artifacts);
+        self
+    }
+
+    pub fn mark_unavailable<S: Into<String>>(mut self, artifact: ArtifactKey, reason: S) -> Self {
+        self.unavailable_artifacts.insert(artifact, reason.into());
+        self
+    }
+
+    pub fn supports(&self, artifact: &ArtifactKey) -> bool {
+        self.supported_artifacts.contains(artifact)
+    }
+
+    pub fn unavailable_reason(&self, artifact: &ArtifactKey) -> Option<&str> {
+        self.unavailable_artifacts.get(artifact).map(String::as_str)
+    }
+
+    pub fn unavailable_requests(&self, requested: &BTreeSet<ArtifactKey>) -> Vec<(String, String)> {
+        requested
+            .iter()
+            .filter_map(|artifact| {
+                self.unavailable_artifacts
+                    .get(artifact)
+                    .map(|reason| (artifact.as_str().to_string(), reason.clone()))
+            })
+            .collect()
+    }
+
+    pub fn unsupported_requests(&self, requested: &BTreeSet<ArtifactKey>) -> Vec<String> {
+        requested
+            .iter()
+            .filter(|artifact| {
+                !self.supported_artifacts.contains(*artifact)
+                    && !self.unavailable_artifacts.contains_key(*artifact)
+            })
+            .map(|artifact| artifact.as_str().to_string())
+            .collect()
+    }
+
+    pub fn generic_artifacts(&self) -> Vec<String> {
+        self.supported_artifacts
+            .iter()
+            .filter(|artifact| artifact.is_generic())
+            .map(|artifact| artifact.as_str().to_string())
+            .collect()
+    }
+
+    pub fn adapter_extras(&self) -> BTreeMap<String, Vec<String>> {
+        let mut extras = BTreeMap::new();
+        for artifact in &self.supported_artifacts {
+            if let ArtifactKey::Extra(name) = artifact {
+                let (namespace, local_name) = artifact
+                    .extra_parts()
+                    .map(|(namespace, local_name)| (namespace.to_string(), local_name.to_string()))
+                    .unwrap_or_else(|| ("extra".to_string(), name.clone()));
+                extras
+                    .entry(namespace)
+                    .or_insert_with(Vec::new)
+                    .push(local_name);
+            }
+        }
+        extras
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +544,54 @@ mod tests {
 
         let malformed = ArtifactKey::Extra("odd".into());
         assert_eq!(malformed.extra_parts(), None);
+    }
+
+    #[test]
+    fn compiler_capabilities_classify_supported_unavailable_and_unsupported_requests() {
+        let caps = CompilerCapabilities::new(CompilerSpec::Named(NamedCompiler::Armfortas))
+            .support_all([ArtifactKey::Asm, ArtifactKey::Obj])
+            .mark_unavailable(
+                ArtifactKey::Extra("armfortas.ir".into()),
+                "linked capture unavailable",
+            );
+        let requested = BTreeSet::from([
+            ArtifactKey::Asm,
+            ArtifactKey::Extra("armfortas.ir".into()),
+            ArtifactKey::Extra("armfortas.tokens".into()),
+        ]);
+
+        assert!(caps.supports(&ArtifactKey::Asm));
+        assert_eq!(
+            caps.unavailable_reason(&ArtifactKey::Extra("armfortas.ir".into())),
+            Some("linked capture unavailable")
+        );
+        assert_eq!(
+            caps.unavailable_requests(&requested),
+            vec![("armfortas.ir".into(), "linked capture unavailable".into())]
+        );
+        assert_eq!(
+            caps.unsupported_requests(&requested),
+            vec!["armfortas.tokens".to_string()]
+        );
+    }
+
+    #[test]
+    fn compiler_capabilities_group_generic_and_namespaced_artifacts() {
+        let caps = CompilerCapabilities::new(CompilerSpec::Named(NamedCompiler::Armfortas))
+            .support_all([
+                ArtifactKey::Asm,
+                ArtifactKey::Runtime,
+                ArtifactKey::Extra("armfortas.tokens".into()),
+                ArtifactKey::Extra("armfortas.ir".into()),
+            ]);
+
+        assert_eq!(
+            caps.generic_artifacts(),
+            vec!["asm".to_string(), "runtime".to_string()]
+        );
+        assert_eq!(
+            caps.adapter_extras().get("armfortas"),
+            Some(&vec!["ir".to_string(), "tokens".to_string()])
+        );
     }
 }
