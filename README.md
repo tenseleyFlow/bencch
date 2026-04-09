@@ -224,9 +224,10 @@ The new suite-v2 generic surface can target any compiler spec the same way
 ```text
 suite "v2/generic-introspect"
 
-case "fake_compiler_runtime"
+case "fake_compiler_runtime_matrix"
 source "../../fixtures/runtime/if_else.f90"
-compiler "../../fixtures/fake_compilers/match_42_a.sh" => asm, obj, runtime
+opts => O0, O1, O2
+compiler "../../fixtures/fake_compilers/match_42_a.sh" => asm, runtime
 expect asm contains ".globl _main"
 expect run.stdout contains "42"
 expect run.exit_code equals 0
@@ -272,6 +273,7 @@ Common things the runner understands:
 
 - stage capture like `armfortas => tokens, ir, asm, obj, run`
 - generic compiler capture like `compiler gfortran => asm, obj, runtime` or `compiler "/path/to/compiler" => asm, obj, runtime`
+- suite-v2 generic compiler cases can also use opt matrices
 - generic compare cases like `compare gfortran flang-new => asm`, including opt matrices
 - suite-v2 graph cases with `entry` plus ordered `file` lines
 - opt matrices like `opts => O0, O1, O2`
