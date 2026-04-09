@@ -565,10 +565,6 @@ impl ReferenceResult {
             run_error: None,
         }
     }
-
-    fn run_signature(&self) -> Option<RunSignature> {
-        self.run.as_ref().map(normalize_run_signature)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -988,6 +984,10 @@ fn default_compare_artifacts(extra: &BTreeSet<ArtifactKey>) -> BTreeSet<Artifact
     let mut requested = BTreeSet::from([ArtifactKey::Diagnostics, ArtifactKey::Runtime]);
     requested.extend(extra.iter().cloned());
     requested
+}
+
+fn default_differential_artifacts() -> BTreeSet<ArtifactKey> {
+    BTreeSet::from([ArtifactKey::Diagnostics, ArtifactKey::Runtime])
 }
 
 fn default_introspection_artifacts(
@@ -3196,7 +3196,11 @@ impl CaseBuilder {
         };
 
         let generic_compare = if let Some((left, right)) = self.generic_compare {
-            if self.generic_compare_artifacts.iter().any(|artifact| !artifact.is_generic()) {
+            if self
+                .generic_compare_artifacts
+                .iter()
+                .any(|artifact| !artifact.is_generic())
+            {
                 return Err(format!(
                     "{}: case '{}' compare suite-v2 cases only support generic artifacts today",
                     suite_path.display(),
@@ -3291,9 +3295,8 @@ fn parse_compiler_artifact_declaration(
         )
     })?;
     let compiler = parse_compiler_spec_token(compiler_raw.trim(), path, line_no)?;
-    let artifacts = ArtifactKey::parse_list(artifact_raw.trim()).map_err(|err| {
-        format!("{}:{}: {}", path.display(), line_no, err)
-    })?;
+    let artifacts = ArtifactKey::parse_list(artifact_raw.trim())
+        .map_err(|err| format!("{}:{}: {}", path.display(), line_no, err))?;
     if artifacts.is_empty() {
         return Err(format!(
             "{}:{}: generic compiler artifact list is empty",
@@ -3326,9 +3329,8 @@ fn parse_compare_declaration(
     }
     let left = parse_compiler_spec_token(&tokens[0], path, line_no)?;
     let right = parse_compiler_spec_token(&tokens[1], path, line_no)?;
-    let artifacts = ArtifactKey::parse_list(artifacts_raw.trim()).map_err(|err| {
-        format!("{}:{}: {}", path.display(), line_no, err)
-    })?;
+    let artifacts = ArtifactKey::parse_list(artifacts_raw.trim())
+        .map_err(|err| format!("{}:{}: {}", path.display(), line_no, err))?;
     Ok((left, right, artifacts))
 }
 
@@ -3369,7 +3371,11 @@ fn split_compiler_tokens(raw: &str, path: &Path, line_no: usize) -> Result<Vec<S
     Ok(tokens)
 }
 
-fn parse_compiler_spec_token(raw: &str, path: &Path, line_no: usize) -> Result<CompilerSpec, String> {
+fn parse_compiler_spec_token(
+    raw: &str,
+    path: &Path,
+    line_no: usize,
+) -> Result<CompilerSpec, String> {
     let token = if raw.starts_with('"') {
         parse_quoted(raw, path, line_no)?
     } else {
@@ -3929,16 +3935,34 @@ fn execute_case_cell(
                     expected_failure_description(case)
                 ))
             } else {
+                let mut observed_artifacts = expected_artifacts_for_legacy_case(case);
+                if !artifacts.references.is_empty() {
+                    observed_artifacts.extend(default_differential_artifacts());
+                }
                 let observed = observed_program_from_armfortas_capture(
                     &prepared.compiler_source,
                     opt_level,
-                    expected_artifacts_for_legacy_case(case),
+                    observed_artifacts,
                     result,
                     None,
                 );
                 let mut execution = evaluate_observation_expectations(case, &observed);
                 if execution.is_ok() && !artifacts.references.is_empty() {
-                    execution = compare_differential(result, &artifacts.references);
+                    let requested = default_differential_artifacts();
+                    let references = artifacts
+                        .references
+                        .iter()
+                        .map(|reference| {
+                            observed_program_from_reference_result(
+                                &prepared.compiler_source,
+                                opt_level,
+                                requested.clone(),
+                                reference,
+                            )
+                            .observation
+                        })
+                        .collect::<Vec<_>>();
+                    execution = compare_differential(&observed.observation, &references);
                 }
                 if execution.is_ok() && !case.consistency_checks.is_empty() {
                     artifacts.consistency_issues =
@@ -4518,7 +4542,10 @@ fn ensure_artifact_stage(artifact: &ArtifactKey, requested: &mut BTreeSet<Stage>
         ArtifactKey::Obj => {
             requested.insert(Stage::Obj);
         }
-        ArtifactKey::Runtime | ArtifactKey::Stdout | ArtifactKey::Stderr | ArtifactKey::ExitCode => {
+        ArtifactKey::Runtime
+        | ArtifactKey::Stdout
+        | ArtifactKey::Stderr
+        | ArtifactKey::ExitCode => {
             requested.insert(Stage::Run);
         }
         ArtifactKey::Extra(name) => {
@@ -4539,7 +4566,10 @@ fn armfortas_extra_stage(name: &str) -> Option<Stage> {
     }
 }
 
-fn evaluate_observation_expectations(case: &CaseSpec, observed: &ObservedProgram) -> Result<(), String> {
+fn evaluate_observation_expectations(
+    case: &CaseSpec,
+    observed: &ObservedProgram,
+) -> Result<(), String> {
     for expectation in &case.expectations {
         match expectation {
             Expectation::CheckComments(target) => {
@@ -4735,9 +4765,7 @@ fn evaluate_observation_failure_expectations(
                 saw_failure_expectation = true;
                 let actual_stage = observation_failure_stage(observation);
                 if actual_stage != Some(*stage) {
-                    let actual = actual_stage
-                        .map(|stage| stage.as_str())
-                        .unwrap_or("none");
+                    let actual = actual_stage.map(|stage| stage.as_str()).unwrap_or("none");
                     return Err(format!(
                         "expected failure stage {} but compiler failed in {}\n{}",
                         stage.as_str(),
@@ -4758,9 +4786,7 @@ fn evaluate_observation_failure_expectations(
                 saw_failure_expectation = true;
                 let actual_stage = observation_failure_stage(observation);
                 if actual_stage != Some(*stage) {
-                    let actual = actual_stage
-                        .map(|stage| stage.as_str())
-                        .unwrap_or("none");
+                    let actual = actual_stage.map(|stage| stage.as_str()).unwrap_or("none");
                     return Err(format!(
                         "expected failure stage {} but compiler failed in {}\n{}",
                         stage.as_str(),
@@ -4927,7 +4953,9 @@ fn observation_target_text<'a>(
         | Target::CompareClassification
         | Target::CompareChangedArtifacts
         | Target::CompareDifferenceCount
-        | Target::CompareBasis => Err("compare targets are only valid in compare suite-v2 cases".into()),
+        | Target::CompareBasis => {
+            Err("compare targets are only valid in compare suite-v2 cases".into())
+        }
         Target::RunStdout => observation_run_stdout(observation),
         Target::RunStderr => observation_run_stderr(observation),
         Target::RunExitCode => {
@@ -4936,7 +4964,10 @@ fn observation_target_text<'a>(
     }
 }
 
-fn observation_target_int(observation: &CompilerObservation, target: &Target) -> Result<i32, String> {
+fn observation_target_int(
+    observation: &CompilerObservation,
+    target: &Target,
+) -> Result<i32, String> {
     match target {
         Target::RunExitCode => observation_run_exit_code(observation),
         Target::Artifact(ArtifactKey::ExitCode) => observation_run_exit_code(observation),
@@ -5020,68 +5051,52 @@ fn observation_failure_stage(observation: &CompilerObservation) -> Option<Failur
 }
 
 fn compare_differential(
-    result: &CaptureResult,
-    references: &[ReferenceResult],
+    armfortas: &CompilerObservation,
+    references: &[CompilerObservation],
 ) -> Result<(), String> {
-    let arm_run = result
-        .get(Stage::Run)
-        .and_then(CapturedStage::as_run)
-        .ok_or("differential comparison requires the run stage")?;
-    let arm_sig = normalize_run_signature(arm_run);
+    let requested = default_differential_artifacts();
+    let comparisons = references
+        .iter()
+        .cloned()
+        .map(|reference| compare_observations(armfortas.clone(), reference, &requested))
+        .collect::<Vec<_>>();
+    let matching_refs = comparisons
+        .iter()
+        .filter(|comparison| comparison.differences.is_empty())
+        .count();
 
-    let mut reference_sigs = BTreeSet::new();
-    let mut matching_refs = 0usize;
-    let mut detail = Vec::new();
-
-    for reference in references {
-        if reference.compile_exit_code != 0 {
-            return Err(format!(
-                "reference compiler '{}' failed to compile\n{}",
-                reference.compiler.as_str(),
-                format_reference_result(reference)
-            ));
-        }
-
-        if let Some(run_error) = &reference.run_error {
-            return Err(format!(
-                "reference compiler '{}' built but could not run: {}\n{}",
-                reference.compiler.as_str(),
-                run_error,
-                format_reference_result(reference)
-            ));
-        }
-
-        let signature = reference.run_signature().ok_or_else(|| {
-            format!(
-                "reference compiler '{}' did not produce a run result",
-                reference.compiler.as_str()
-            )
-        })?;
-
-        if signature == arm_sig {
-            matching_refs += 1;
-        } else {
-            detail.push(format_reference_result(reference));
-        }
-        reference_sigs.insert(signature);
-    }
-
-    if matching_refs == references.len() {
+    if matching_refs == comparisons.len() {
         return Ok(());
     }
 
-    let classification = if matching_refs == 0 && reference_sigs.len() == 1 {
+    let reference_disagreement = if references.len() > 1 {
+        let baseline = references[0].clone();
+        references[1..].iter().cloned().any(|reference| {
+            !compare_observations(baseline.clone(), reference, &requested)
+                .differences
+                .is_empty()
+        })
+    } else {
+        false
+    };
+
+    let classification = if matching_refs == 0 && !reference_disagreement {
         "classification: armfortas-only divergence"
-    } else if reference_sigs.len() > 1 {
+    } else if reference_disagreement {
         "classification: reference disagreement"
     } else {
         "classification: partial disagreement"
     };
 
+    let detail = comparisons
+        .iter()
+        .filter(|comparison| !comparison.differences.is_empty())
+        .map(render_compare_text)
+        .collect::<Vec<_>>();
+
     Err(format!(
-        "behavior mismatch against reference compilers\n{}\n\narmfortas\n{}\n\n{}",
+        "behavior mismatch against reference compilers\n{}\n\n{}",
         classification,
-        format_run_capture(arm_run),
         detail.join("\n\n")
     ))
 }
@@ -5108,10 +5123,7 @@ fn compose_armfortas_failure_detail(artifacts: &ExecutionArtifacts) -> String {
 
 fn compose_observation_failure_detail(observation: &CompilerObservation) -> String {
     let mut detail = String::new();
-    detail.push_str(&format!(
-        "{} failed",
-        observation.compiler.display_name()
-    ));
+    detail.push_str(&format!("{} failed", observation.compiler.display_name()));
     if let Some(stage) = &observation.provenance.failure_stage {
         detail.push_str(&format!(" in {}", stage));
     }
@@ -5203,7 +5215,9 @@ fn observed_program_from_armfortas_capture(
         }
     }
     if let Some(failure) = failure {
-        if requested_artifacts.contains(&ArtifactKey::Diagnostics) || !artifacts.contains_key(&ArtifactKey::Diagnostics) {
+        if requested_artifacts.contains(&ArtifactKey::Diagnostics)
+            || !artifacts.contains_key(&ArtifactKey::Diagnostics)
+        {
             artifacts.insert(
                 ArtifactKey::Diagnostics,
                 ArtifactValue::Text(failure.detail.clone()),
@@ -5225,10 +5239,77 @@ fn observed_program_from_armfortas_capture(
                 compiler_identity: "armfortas".into(),
                 adapter_kind: "named".into(),
                 backend_mode: "suite-legacy-capture".into(),
-                backend_detail: "legacy suite cell capture converted into generic observation".into(),
+                backend_detail: "legacy suite cell capture converted into generic observation"
+                    .into(),
                 artifacts_captured,
                 comparison_basis: None,
                 failure_stage: failure.map(|failure| failure.stage.as_str().to_string()),
+            },
+        },
+        requested_artifacts,
+    }
+}
+
+fn observed_program_from_reference_result(
+    program: &Path,
+    opt_level: OptLevel,
+    requested_artifacts: BTreeSet<ArtifactKey>,
+    reference: &ReferenceResult,
+) -> ObservedProgram {
+    let mut artifacts = BTreeMap::new();
+    let diagnostics = [
+        reference.compile_stdout.trim_end(),
+        reference.compile_stderr.trim_end(),
+    ]
+    .iter()
+    .filter(|part| !part.is_empty())
+    .copied()
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    if requested_artifacts.contains(&ArtifactKey::Diagnostics) && !diagnostics.is_empty() {
+        artifacts.insert(ArtifactKey::Diagnostics, ArtifactValue::Text(diagnostics));
+    }
+
+    if let Some(run) = &reference.run {
+        insert_run_artifacts(&requested_artifacts, run, &mut artifacts);
+    } else if let Some(run_error) = &reference.run_error {
+        let diagnostics = artifacts
+            .entry(ArtifactKey::Diagnostics)
+            .or_insert_with(|| ArtifactValue::Text(String::new()));
+        if let ArtifactValue::Text(text) = diagnostics {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!("run error: {}", run_error));
+        }
+    }
+
+    let artifacts_captured = artifacts
+        .keys()
+        .map(|artifact| artifact.as_str().to_string())
+        .collect::<Vec<_>>();
+    ObservedProgram {
+        observation: CompilerObservation {
+            compiler: match reference.compiler {
+                ReferenceCompiler::Gfortran => CompilerSpec::Named(NamedCompiler::Gfortran),
+                ReferenceCompiler::FlangNew => CompilerSpec::Named(NamedCompiler::FlangNew),
+            },
+            program: program.to_path_buf(),
+            opt_level,
+            compile_exit_code: reference.compile_exit_code,
+            artifacts,
+            provenance: ObservationProvenance {
+                compiler_identity: reference.compiler.as_str().to_string(),
+                adapter_kind: "named".into(),
+                backend_mode: "legacy-reference".into(),
+                backend_detail: format!(
+                    "legacy differential reference observation via {}",
+                    reference.compile_command
+                ),
+                artifacts_captured,
+                comparison_basis: None,
+                failure_stage: None,
             },
         },
         requested_artifacts,
@@ -9576,6 +9657,7 @@ end
 
 case "fake-match"
 source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
 compare gfortran flang-new => asm
 expect compare.status equals "match"
 expect compare.difference_count equals 0
@@ -9592,7 +9674,10 @@ end
         assert!(generic.artifacts.contains(&ArtifactKey::Asm));
         assert!(generic.artifacts.contains(&ArtifactKey::Diagnostics));
         assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
-        assert!(case.requested.is_empty());
+        assert_eq!(
+            case.opt_levels,
+            vec![OptLevel::O0, OptLevel::O1, OptLevel::O2]
+        );
         let _ = fs::remove_file(&root);
     }
 
@@ -9965,6 +10050,36 @@ end
             }),
             run_error: None,
         }
+    }
+
+    fn differential_armfortas_observation(
+        stdout: &str,
+        stderr: &str,
+        exit_code: i32,
+    ) -> CompilerObservation {
+        observed_program_from_armfortas_capture(
+            Path::new("demo.f90"),
+            OptLevel::O0,
+            default_differential_artifacts(),
+            &run_only_result(stdout, stderr, exit_code),
+            None,
+        )
+        .observation
+    }
+
+    fn differential_reference_observation(
+        compiler: ReferenceCompiler,
+        stdout: &str,
+        stderr: &str,
+        exit_code: i32,
+    ) -> CompilerObservation {
+        observed_program_from_reference_result(
+            Path::new("demo.f90"),
+            OptLevel::O0,
+            default_differential_artifacts(),
+            &reference_run(compiler, stdout, stderr, exit_code),
+        )
+        .observation
     }
 
     #[test]
@@ -10764,37 +10879,43 @@ end
 
     #[test]
     fn differential_reports_armfortas_only_divergence() {
-        let result = run_only_result("0\n", "", 0);
+        let armfortas = differential_armfortas_observation("0\n", "", 0);
         let refs = vec![
-            reference_run(ReferenceCompiler::Gfortran, "42\n", "", 0),
-            reference_run(ReferenceCompiler::FlangNew, "42\n", "", 0),
+            differential_reference_observation(ReferenceCompiler::Gfortran, "42\n", "", 0),
+            differential_reference_observation(ReferenceCompiler::FlangNew, "42\n", "", 0),
         ];
 
-        let err = compare_differential(&result, &refs).unwrap_err();
+        let err = compare_differential(&armfortas, &refs).unwrap_err();
         assert!(err.contains("classification: armfortas-only divergence"));
+        assert!(err.contains("basis: compile-status, diagnostics, runtime"));
     }
 
     #[test]
     fn differential_reports_reference_disagreement() {
-        let result = run_only_result("42\n", "", 0);
+        let armfortas = differential_armfortas_observation("42\n", "", 0);
         let refs = vec![
-            reference_run(ReferenceCompiler::Gfortran, "42\n", "", 0),
-            reference_run(ReferenceCompiler::FlangNew, "99\n", "", 0),
+            differential_reference_observation(ReferenceCompiler::Gfortran, "42\n", "", 0),
+            differential_reference_observation(ReferenceCompiler::FlangNew, "99\n", "", 0),
         ];
 
-        let err = compare_differential(&result, &refs).unwrap_err();
+        let err = compare_differential(&armfortas, &refs).unwrap_err();
         assert!(err.contains("classification: reference disagreement"));
     }
 
     #[test]
     fn differential_tolerates_numeric_formatting_differences() {
-        let result = run_only_result("     5.5000000E0\n", "", 0);
+        let armfortas = differential_armfortas_observation("     5.5000000E0\n", "", 0);
         let refs = vec![
-            reference_run(ReferenceCompiler::Gfortran, "   5.50000000\n", "", 0),
-            reference_run(ReferenceCompiler::FlangNew, " 5.5\n", "", 0),
+            differential_reference_observation(
+                ReferenceCompiler::Gfortran,
+                "   5.50000000\n",
+                "",
+                0,
+            ),
+            differential_reference_observation(ReferenceCompiler::FlangNew, " 5.5\n", "", 0),
         ];
 
-        assert!(compare_differential(&result, &refs).is_ok());
+        assert!(compare_differential(&armfortas, &refs).is_ok());
     }
 
     #[test]
