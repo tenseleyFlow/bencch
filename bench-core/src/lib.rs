@@ -258,14 +258,32 @@ pub enum NamedCompiler {
     Armfortas,
     Gfortran,
     FlangNew,
+    LFortran,
+    Ifort,
+    Ifx,
+    Nvfortran,
 }
 
 impl NamedCompiler {
+    pub const ALL: [Self; 7] = [
+        Self::Armfortas,
+        Self::Gfortran,
+        Self::FlangNew,
+        Self::LFortran,
+        Self::Ifort,
+        Self::Ifx,
+        Self::Nvfortran,
+    ];
+
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "armfortas" | "afs" => Some(Self::Armfortas),
             "gfortran" => Some(Self::Gfortran),
             "flang-new" | "flang_new" | "flang" => Some(Self::FlangNew),
+            "lfortran" => Some(Self::LFortran),
+            "ifort" => Some(Self::Ifort),
+            "ifx" => Some(Self::Ifx),
+            "nvfortran" | "pgfortran" => Some(Self::Nvfortran),
             _ => None,
         }
     }
@@ -275,6 +293,34 @@ impl NamedCompiler {
             Self::Armfortas => "armfortas",
             Self::Gfortran => "gfortran",
             Self::FlangNew => "flang-new",
+            Self::LFortran => "lfortran",
+            Self::Ifort => "ifort",
+            Self::Ifx => "ifx",
+            Self::Nvfortran => "nvfortran",
+        }
+    }
+
+    pub fn accepted_names(&self) -> &'static [&'static str] {
+        match self {
+            Self::Armfortas => &["armfortas", "afs"],
+            Self::Gfortran => &["gfortran"],
+            Self::FlangNew => &["flang-new", "flang_new", "flang"],
+            Self::LFortran => &["lfortran"],
+            Self::Ifort => &["ifort"],
+            Self::Ifx => &["ifx"],
+            Self::Nvfortran => &["nvfortran", "pgfortran"],
+        }
+    }
+
+    pub fn candidate_binaries(&self) -> &'static [&'static str] {
+        match self {
+            Self::Armfortas => &["armfortas", "afs"],
+            Self::Gfortran => &["gfortran"],
+            Self::FlangNew => &["flang-new", "flang"],
+            Self::LFortran => &["lfortran"],
+            Self::Ifort => &["ifort"],
+            Self::Ifx => &["ifx"],
+            Self::Nvfortran => &["nvfortran", "pgfortran"],
         }
     }
 }
@@ -510,8 +556,24 @@ mod tests {
             CompilerSpec::Named(NamedCompiler::Armfortas)
         );
         assert_eq!(
+            CompilerSpec::parse("afs"),
+            CompilerSpec::Named(NamedCompiler::Armfortas)
+        );
+        assert_eq!(
             CompilerSpec::parse("flang-new"),
             CompilerSpec::Named(NamedCompiler::FlangNew)
+        );
+        assert_eq!(
+            CompilerSpec::parse("lfortran"),
+            CompilerSpec::Named(NamedCompiler::LFortran)
+        );
+        assert_eq!(
+            CompilerSpec::parse("ifx"),
+            CompilerSpec::Named(NamedCompiler::Ifx)
+        );
+        assert_eq!(
+            CompilerSpec::parse("pgfortran"),
+            CompilerSpec::Named(NamedCompiler::Nvfortran)
         );
         assert_eq!(
             CompilerSpec::parse("/tmp/compiler"),
