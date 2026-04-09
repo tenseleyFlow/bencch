@@ -295,6 +295,21 @@ expect compare.difference_count equals 2
 end
 ```
 
+Namespaced armfortas artifacts can be matrixed too:
+
+```text
+suite "v2/armfortas-namespace-matrix"
+
+case "if_else_frontend_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+compiler armfortas => armfortas.tokens, armfortas.ast, armfortas.sema
+expect armfortas.tokens contains "\"then\""
+expect armfortas.ast contains "node: IfConstruct"
+expect armfortas.sema contains "diagnostics: none"
+end
+```
+
 Graph cases use `entry` plus ordered `file` lines:
 
 ```text
