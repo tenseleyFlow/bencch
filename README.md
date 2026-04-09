@@ -118,6 +118,12 @@ The built-in named compiler set now includes `armfortas`, `gfortran`,
 `flang-new`, `lfortran`, `ifort`, `ifx`, and `nvfortran` / `pgfortran`, plus
 any explicit compiler path you pass to `compare` or `introspect`.
 
+It also probes each named compiler surface a bit more deeply now:
+
+- `probe_status` like `linked`, `invokable`, or `missing`
+- `probe_resolved_path`
+- `probe_banner` when a version/help probe returns something useful
+
 Write the same `doctor` snapshot to JSON and Markdown:
 
 ```bash
@@ -126,6 +132,12 @@ cargo run -p afs-tests --bin bencch -- doctor --json-report reports/doctor.json 
 
 The JSON report now includes structured sections for workspace, named compiler
 surfaces, tools, and mode, while keeping the flat field map too.
+
+`list --verbose` now echoes the same probe posture for suite-v2 generic cases,
+so capability-blocked authored cases show both:
+
+- why the request is blocked or deferred
+- what compiler binary or linked surface would have been used
 
 Generate a local linked workspace against an external `armfortas` checkout:
 
