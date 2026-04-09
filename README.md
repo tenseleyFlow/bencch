@@ -93,6 +93,12 @@ Introspect a rich armfortas stage explicitly:
 cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/mixed_types.f90 --artifact armfortas.ir,asm
 ```
 
+Introspect the full linked armfortas stage surface:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/runtime/mixed_types.f90 --all
+```
+
 Run against an explicit compiler binary:
 
 ```bash
@@ -140,6 +146,10 @@ Reports are written under `reports/`.
 `compare` now prints a short summary block with status, divergence
 classification, basis, difference count, changed artifacts, and the backend
 used on each side before any per-artifact diffs.
+
+`introspect` now groups portable outputs like `asm`, `obj`, and `runtime`
+separately from adapter extras like `armfortas.ir` and `armfortas.tokens` in
+text, JSON, and Markdown output.
 
 Environment overrides work too:
 
