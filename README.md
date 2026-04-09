@@ -117,6 +117,12 @@ Introspect a named external compiler on the generic surface:
 cargo run -p afs-tests --bin bencch -- introspect gfortran fixtures/runtime/if_else.f90 --artifact asm,obj,runtime
 ```
 
+Introspect an explicit compiler path on that same generic surface:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect /path/to/compiler fixtures/runtime/if_else.f90 --artifact asm,obj,runtime
+```
+
 Introspect a failing armfortas source and keep the partial capture:
 
 ```bash
