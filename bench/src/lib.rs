@@ -443,21 +443,22 @@ fn named_compiler_status_value(
     tools: &ToolchainConfig,
     capture_root: Option<&PathBuf>,
 ) -> String {
-    match named {
-        NamedCompiler::Armfortas => match &tools.armfortas {
-            ArmfortasCliAdapter::Linked => capture_root
-                .map(|root| format!("linked via Cargo to {}", display_path(root)))
-                .unwrap_or_else(|| {
-                    "linked adapter requested but unavailable in this build".to_string()
-                }),
-            ArmfortasCliAdapter::External(binary) => tool_probe_status(binary, false),
-        },
-        _ => tool_probe_status(
-            &tools
-                .named_compiler_binary(named)
-                .unwrap_or_else(|| named.as_str().to_string()),
-            false,
+    let probe = named_compiler_probe(named, tools, capture_root);
+    match probe.resolved_path {
+        Some(path) => format!(
+            "configured={} resolved={}",
+            probe.configured,
+            path.display()
         ),
+        None => {
+            if probe.status == "linked" {
+                probe
+                    .detail
+                    .unwrap_or_else(|| "linked via Cargo".to_string())
+            } else {
+                format!("configured={} resolved=missing", probe.configured)
+            }
+        }
     }
 }
 
@@ -469,6 +470,7 @@ fn append_named_compiler_fields(
 ) {
     let prefix = format!("named_compiler.{}", named.as_str());
     let capabilities = compiler_capabilities(&CompilerSpec::Named(named), tools);
+    let probe = named_compiler_probe(named, tools, capture_root);
     if named == NamedCompiler::Armfortas {
         let armfortas = tools.armfortas_adapters();
         fields.push((
@@ -504,6 +506,23 @@ fn append_named_compiler_fields(
     fields.push((
         format!("{}.unavailable_artifacts", prefix),
         capability_unavailable_summary(&capabilities),
+    ));
+    fields.push((format!("{}.probe_status", prefix), probe.status.clone()));
+    fields.push((
+        format!("{}.probe_resolved_path", prefix),
+        probe
+            .resolved_path
+            .as_ref()
+            .map(|path| display_path(path))
+            .unwrap_or_else(|| "none".to_string()),
+    ));
+    fields.push((
+        format!("{}.probe_banner", prefix),
+        probe.banner.clone().unwrap_or_else(|| "none".to_string()),
+    ));
+    fields.push((
+        format!("{}.probe_detail", prefix),
+        probe.detail.clone().unwrap_or_else(|| "none".to_string()),
     ));
 }
 
@@ -3446,6 +3465,26 @@ fn render_doctor_capabilities_json(capabilities: &CompilerCapabilities) -> Strin
     )
 }
 
+fn render_tool_probe_json(probe: &ToolProbe) -> String {
+    format!(
+        "{{\"configured\":\"{}\",\"status\":\"{}\",\"resolved_path\":{},\"banner\":{},\"detail\":{}}}",
+        json_escape(&probe.configured),
+        json_escape(&probe.status),
+        match probe.resolved_path.as_ref() {
+            Some(path) => format!("\"{}\"", json_escape(&display_path(path))),
+            None => "null".to_string(),
+        },
+        match probe.banner.as_ref() {
+            Some(banner) => format!("\"{}\"", json_escape(banner)),
+            None => "null".to_string(),
+        },
+        match probe.detail.as_ref() {
+            Some(detail) => format!("\"{}\"", json_escape(detail)),
+            None => "null".to_string(),
+        },
+    )
+}
+
 fn json_string_vec_map(map: &BTreeMap<String, Vec<String>>) -> String {
     let mut rendered = String::from("{");
     for (index, (key, values)) in map.iter().enumerate() {
@@ -3467,6 +3506,7 @@ fn render_named_compiler_entry_json(
     capture_root: Option<&PathBuf>,
 ) -> String {
     let capabilities = compiler_capabilities(&CompilerSpec::Named(named), tools);
+    let probe = named_compiler_probe(named, tools, capture_root);
     let mut fields = vec![
         format!(
             "\"accepted_names\": {}",
@@ -3480,6 +3520,7 @@ fn render_named_compiler_entry_json(
             "\"capabilities\": {}",
             render_doctor_capabilities_json(&capabilities)
         ),
+        format!("\"probe\": {}", render_tool_probe_json(&probe)),
     ];
     if named == NamedCompiler::Armfortas {
         let armfortas = tools.armfortas_adapters();
@@ -3780,8 +3821,17 @@ fn doctor_markdown_cell(value: &str) -> String {
     value.replace('|', "\\|").replace('\n', "<br>")
 }
 
-fn tool_probe_status(configured: &str, already_resolved_path: bool) -> String {
-    let resolved = if already_resolved_path {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolProbe {
+    configured: String,
+    resolved_path: Option<PathBuf>,
+    status: String,
+    banner: Option<String>,
+    detail: Option<String>,
+}
+
+fn tool_probe(configured: &str, already_resolved_path: bool) -> ToolProbe {
+    let resolved_path = if already_resolved_path {
         let path = PathBuf::from(configured);
         if path.exists() {
             Some(path)
@@ -3792,7 +3842,126 @@ fn tool_probe_status(configured: &str, already_resolved_path: bool) -> String {
         resolve_tool_path(configured)
     };
 
-    match resolved {
+    match resolved_path {
+        Some(path) => match probe_tool_banner(&path) {
+            Ok((arg, banner)) => ToolProbe {
+                configured: configured.to_string(),
+                resolved_path: Some(path),
+                status: "invokable".into(),
+                banner: Some(banner),
+                detail: Some(format!("probe succeeded with {}", arg)),
+            },
+            Err(detail) => ToolProbe {
+                configured: configured.to_string(),
+                resolved_path: Some(path),
+                status: "resolved".into(),
+                banner: None,
+                detail: Some(detail),
+            },
+        },
+        None => ToolProbe {
+            configured: configured.to_string(),
+            resolved_path: None,
+            status: "missing".into(),
+            banner: None,
+            detail: Some("binary not found on disk or PATH".into()),
+        },
+    }
+}
+
+fn linked_tool_probe(capture_root: Option<&PathBuf>) -> ToolProbe {
+    match capture_root {
+        Some(root) => ToolProbe {
+            configured: "linked".into(),
+            resolved_path: Some(root.clone()),
+            status: "linked".into(),
+            banner: None,
+            detail: Some(format!("linked via Cargo to {}", display_path(root))),
+        },
+        None => ToolProbe {
+            configured: "linked".into(),
+            resolved_path: None,
+            status: "unavailable".into(),
+            banner: None,
+            detail: Some("linked adapter requested but unavailable in this build".into()),
+        },
+    }
+}
+
+fn named_compiler_probe(
+    named: NamedCompiler,
+    tools: &ToolchainConfig,
+    capture_root: Option<&PathBuf>,
+) -> ToolProbe {
+    match named {
+        NamedCompiler::Armfortas => match &tools.armfortas {
+            ArmfortasCliAdapter::Linked => linked_tool_probe(capture_root),
+            ArmfortasCliAdapter::External(binary) => tool_probe(binary, false),
+        },
+        _ => tool_probe(
+            &tools
+                .named_compiler_binary(named)
+                .unwrap_or_else(|| named.as_str().to_string()),
+            false,
+        ),
+    }
+}
+
+fn compiler_spec_probe(
+    spec: &CompilerSpec,
+    tools: &ToolchainConfig,
+    capture_root: Option<&PathBuf>,
+) -> ToolProbe {
+    match spec {
+        CompilerSpec::Named(named) => named_compiler_probe(*named, tools, capture_root),
+        CompilerSpec::Binary(path) => tool_probe(&path.display().to_string(), true),
+    }
+}
+
+fn probe_tool_banner(path: &Path) -> Result<(String, String), String> {
+    let mut last_detail = None;
+    for arg in ["--version", "-V", "-v"] {
+        match Command::new(path).arg(arg).output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let combined = stdout
+                    .lines()
+                    .chain(stderr.lines())
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| compact_probe_banner(line));
+                if let Some(line) = combined {
+                    return Ok((arg.to_string(), line));
+                }
+                last_detail = Some(format!(
+                    "{} returned no banner output (exit={})",
+                    arg,
+                    output.status.code().unwrap_or(-1)
+                ));
+            }
+            Err(err) => {
+                last_detail = Some(format!("{} failed: {}", arg, err));
+            }
+        }
+    }
+
+    Err(last_detail.unwrap_or_else(|| "probe failed".to_string()))
+}
+
+fn compact_probe_banner(line: &str) -> String {
+    let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars = compact.chars().collect::<Vec<_>>();
+    if chars.len() > 120 {
+        chars.into_iter().take(117).collect::<String>() + "..."
+    } else {
+        compact
+    }
+}
+
+fn tool_probe_status(configured: &str, already_resolved_path: bool) -> String {
+    let probe = tool_probe(configured, already_resolved_path);
+    match probe.resolved_path {
         Some(path) => format!("configured={} resolved={}", configured, path.display()),
         None => format!("configured={} resolved=missing", configured),
     }
@@ -4885,7 +5054,21 @@ fn case_discovery_lines(case: &CaseSpec, tools: &ToolchainConfig) -> Vec<String>
     }
 
     if let Some(generic) = &case.generic_introspect {
+        let capture_root = tools.armfortas_adapters().capture_root();
+        let probe = compiler_spec_probe(&generic.compiler, tools, capture_root.as_ref());
         lines.push(format!("compiler: {}", generic.compiler.display_name()));
+        lines.push(format!("compiler_probe_status: {}", probe.status));
+        lines.push(format!(
+            "compiler_probe_resolved_path: {}",
+            probe
+                .resolved_path
+                .as_ref()
+                .map(|path| display_path(path))
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        if let Some(banner) = &probe.banner {
+            lines.push(format!("compiler_probe_banner: {}", banner));
+        }
         lines.push(format!(
             "artifacts: {}",
             format_artifact_name_list(
@@ -4915,11 +5098,38 @@ fn case_discovery_lines(case: &CaseSpec, tools: &ToolchainConfig) -> Vec<String>
     }
 
     if let Some(generic) = &case.generic_compare {
+        let capture_root = tools.armfortas_adapters().capture_root();
+        let left_probe = compiler_spec_probe(&generic.left, tools, capture_root.as_ref());
+        let right_probe = compiler_spec_probe(&generic.right, tools, capture_root.as_ref());
         lines.push(format!(
             "compare: {} vs {}",
             generic.left.display_name(),
             generic.right.display_name()
         ));
+        lines.push(format!("left_probe_status: {}", left_probe.status));
+        lines.push(format!(
+            "left_probe_resolved_path: {}",
+            left_probe
+                .resolved_path
+                .as_ref()
+                .map(|path| display_path(path))
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        if let Some(banner) = &left_probe.banner {
+            lines.push(format!("left_probe_banner: {}", banner));
+        }
+        lines.push(format!("right_probe_status: {}", right_probe.status));
+        lines.push(format!(
+            "right_probe_resolved_path: {}",
+            right_probe
+                .resolved_path
+                .as_ref()
+                .map(|path| display_path(path))
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        if let Some(banner) = &right_probe.banner {
+            lines.push(format!("right_probe_banner: {}", banner));
+        }
         lines.push(format!(
             "artifacts: {}",
             format_artifact_name_list(
@@ -10993,6 +11203,14 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_probe_script(path: &Path, banner: &str) {
+        fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' {:?}\n", banner)).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
     fn command_is_available(name: &str) -> bool {
         Command::new("which")
             .arg(name)
@@ -14133,8 +14351,8 @@ end
         fs::create_dir_all(&root).unwrap();
         let armfortas_bin = root.join("armfortas");
         let gfortran_bin = root.join("gfortran");
-        fs::write(&armfortas_bin, "").unwrap();
-        fs::write(&gfortran_bin, "").unwrap();
+        write_probe_script(&armfortas_bin, "armfortas dev build");
+        write_probe_script(&gfortran_bin, "GNU Fortran 99.1");
 
         let config = DoctorConfig {
             tools: ToolchainConfig {
@@ -14189,6 +14407,10 @@ end
         assert!(rendered.contains("named_compiler.lfortran.candidate_binaries: lfortran"));
         assert!(rendered.contains("named_compiler.ifx.accepted_names: ifx"));
         assert!(rendered.contains("named_compiler.nvfortran.accepted_names: nvfortran, pgfortran"));
+        assert!(rendered.contains("named_compiler.armfortas.probe_status: invokable"));
+        assert!(rendered.contains("named_compiler.armfortas.probe_banner: armfortas dev build"));
+        assert!(rendered.contains("named_compiler.gfortran.probe_status: invokable"));
+        assert!(rendered.contains("named_compiler.gfortran.probe_banner: GNU Fortran 99.1"));
         assert!(rendered.contains(
             "explicit_compiler_path: any filesystem path passed to compare/introspect uses the generic external-driver adapter"
         ));
@@ -14214,8 +14436,30 @@ end
         assert!(rendered_json.contains("\"tools\": {"));
         assert!(rendered_json.contains("\"lfortran\": {"));
         assert!(rendered_json.contains("\"named_compiler.armfortas.adapter_extras\""));
+        assert!(rendered_json.contains("\"probe\": {"));
         assert!(rendered_markdown.contains("# bencch doctor report"));
         assert!(rendered_markdown.contains("| `named_compiler.armfortas` |"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_probe_reads_banner_from_executable() {
+        let root = std::env::temp_dir().join("bencch_tool_probe_banner");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let probe_bin = root.join("fakefortran");
+        write_probe_script(&probe_bin, "Fake Fortran 1.2.3");
+
+        let probe = tool_probe(&probe_bin.display().to_string(), true);
+        assert_eq!(probe.status, "invokable");
+        assert_eq!(probe.banner.as_deref(), Some("Fake Fortran 1.2.3"));
+        assert!(probe
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("--version"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -14278,6 +14522,43 @@ end
             &"capability_policy: future when blocked (generic gfortran surface has no armfortas extras)"
                 .to_string()
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_discovery_lines_include_compiler_probe_banner() {
+        let root = std::env::temp_dir().join("bencch_case_discovery_probe");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let compiler = root.join("probe-compiler");
+        write_probe_script(&compiler, "Probe Compiler 7.4");
+
+        let case = CaseSpec {
+            name: "probe".into(),
+            source: PathBuf::from("demo.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: Some(GenericIntrospectCase {
+                compiler: CompilerSpec::Binary(compiler.clone()),
+                artifacts: BTreeSet::from([ArtifactKey::Asm]),
+            }),
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+            capability_policy: None,
+        };
+
+        let lines = case_discovery_lines(&case, &ToolchainConfig::from_env());
+        assert!(lines.contains(&"compiler_probe_status: invokable".to_string()));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("compiler_probe_banner: Probe Compiler 7.4")));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
