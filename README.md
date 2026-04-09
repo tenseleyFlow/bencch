@@ -105,6 +105,12 @@ Introspect a named external compiler on the generic surface:
 cargo run -p afs-tests --bin bencch -- introspect gfortran fixtures/runtime/if_else.f90 --artifact asm,obj,runtime
 ```
 
+Introspect a failing armfortas source and keep the partial capture:
+
+```bash
+cargo run -p afs-tests --bin bencch -- introspect armfortas fixtures/invalid/parse_error.f90 --artifact armfortas.tokens,armfortas.ir,asm
+```
+
 Run against an explicit compiler binary:
 
 ```bash
@@ -156,7 +162,9 @@ used on each side before any per-artifact diffs.
 `introspect` now groups portable outputs like `asm`, `obj`, and `runtime`
 separately from adapter extras like `armfortas.ir` and `armfortas.tokens` in
 text, JSON, and Markdown output, and it now reports requested, captured, and
-missing artifacts at the top of the report.
+missing artifacts at the top of the report. Failure-side introspection also
+surfaces the failure stage when the adapter knows it, plus a short diagnostic
+excerpt before the full diagnostics block.
 
 Environment overrides work too:
 
