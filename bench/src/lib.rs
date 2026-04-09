@@ -5811,6 +5811,16 @@ fn compose_observation_failure_detail(observation: &CompilerObservation) -> Stri
         return detail;
     }
 
+    if let Some(diagnostics) = observation_diagnostics_text(observation) {
+        if diagnostics.contains("does not support requested artifacts in this adapter") {
+            return format!(
+                "{} does not support requested artifacts in this adapter\n{}",
+                observation.compiler.display_name(),
+                diagnostics
+            );
+        }
+    }
+
     let mut detail = String::new();
     detail.push_str(&format!("{} failed", observation.compiler.display_name()));
     if let Some(stage) = &observation.provenance.failure_stage {
@@ -11140,6 +11150,84 @@ mod tests {
         let detail = compose_observation_failure_detail(&observation);
         assert!(detail.contains("armfortas unavailable for requested artifacts in this build"));
         assert!(!detail.contains("failed in"));
+    }
+
+    #[test]
+    fn compose_observation_failure_detail_uses_unsupported_wording() {
+        let observation = CompilerObservation {
+            compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+            program: PathBuf::from("demo.f90"),
+            opt_level: OptLevel::O0,
+            compile_exit_code: 1,
+            artifacts: BTreeMap::from([(
+                ArtifactKey::Diagnostics,
+                ArtifactValue::Text(
+                    "gfortran does not support requested artifacts in this adapter: armfortas.ir"
+                        .into(),
+                ),
+            )]),
+            provenance: ObservationProvenance {
+                compiler_identity: "gfortran".into(),
+                adapter_kind: "named".into(),
+                backend_mode: "external-driver".into(),
+                backend_detail: "generic external driver adapter using gfortran".into(),
+                artifacts_captured: vec!["diagnostics".into()],
+                comparison_basis: None,
+                failure_stage: None,
+            },
+        };
+
+        let detail = compose_observation_failure_detail(&observation);
+        assert!(detail.contains("gfortran does not support requested artifacts in this adapter"));
+        assert!(!detail.contains("gfortran failed"));
+    }
+
+    #[test]
+    fn execute_generic_introspect_case_reports_capability_mismatch_clearly() {
+        let suite = SuiteSpec {
+            name: "v2/generic-introspect".into(),
+            path: PathBuf::from("suite.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "gfortran-armfortas-ir".into(),
+            source: runtime_fixture("if_else.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: Some(GenericIntrospectCase {
+                compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+                artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.ir".into())]),
+            }),
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Contains {
+                target: Target::Artifact(ArtifactKey::Extra("armfortas.ir".into())),
+                needle: "func".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let outcome = execute_case_cell(&suite, &case, OptLevel::O0, &config).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Fail);
+        assert!(outcome
+            .detail
+            .contains("gfortran does not support requested artifacts in this adapter"));
+        assert!(!outcome.detail.contains("gfortran failed"));
     }
 
     #[cfg(unix)]
