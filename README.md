@@ -114,6 +114,10 @@ cargo run -p afs-tests --bin bencch -- doctor
 `doctor` now also lists the generic artifacts and namespaced adapter extras
 that each named compiler surface can provide in the current build.
 
+The built-in named compiler set now includes `armfortas`, `gfortran`,
+`flang-new`, `lfortran`, `ifort`, `ifx`, and `nvfortran` / `pgfortran`, plus
+any explicit compiler path you pass to `compare` or `introspect`.
+
 Write the same `doctor` snapshot to JSON and Markdown:
 
 ```bash
@@ -418,6 +422,25 @@ expect compare.difference_count equals 2
 end
 ```
 
+If a suite-v2 case is intentionally blocked by adapter capability limits, you
+can say so directly:
+
+```text
+suite "v2/capability-policy"
+
+case "gfortran_armfortas_ir_future"
+source "../../fixtures/runtime/if_else.f90"
+compiler gfortran => armfortas.ir
+future capability "generic gfortran surface has no armfortas extras"
+end
+
+case "mixed_surface_ir_compare_xfail"
+source "../../fixtures/runtime/if_else.f90"
+compare armfortas gfortran => armfortas.ir
+xfail capability "mixed-surface namespaced compare stays soft for now"
+end
+```
+
 Namespaced armfortas artifacts can be matrixed too:
 
 ```text
@@ -462,6 +485,7 @@ Common things the runner understands:
 - `expect-fail comments` uses inline `! ERROR_EXPECTED:` source comments
 - `xfail comments` uses the first inline `! XFAIL:` source comment
 - generic compare cases like `compare gfortran flang-new => asm`, including opt matrices
+- capability-aware authored softening with `future capability "..."` and `xfail capability "..."`
 - suite-v2 graph cases with `entry` plus ordered `file` lines
 - opt matrices like `opts => O0, O1, O2`
 - references like `differential => gfortran, flang-new`

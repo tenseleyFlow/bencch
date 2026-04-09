@@ -1,0 +1,13 @@
+suite "v2/capability-policy"
+
+case "gfortran_armfortas_ir_future"
+source "../../fixtures/runtime/if_else.f90"
+compiler gfortran => armfortas.ir
+future capability "generic gfortran surface has no armfortas extras"
+end
+
+case "mixed_surface_ir_compare_xfail"
+source "../../fixtures/runtime/if_else.f90"
+compare armfortas gfortran => armfortas.ir
+xfail capability "mixed-surface namespaced compare stays soft for now"
+end
