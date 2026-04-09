@@ -32,6 +32,9 @@ scripts/bootstrap-linked-armfortas.sh /path/to/armfortas
 cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- doctor
 ```
 
+That generated path keeps linked capture working and makes `doctor` report the
+actual linked `armfortas` checkout instead of assuming `bencch` is embedded.
+
 ## Usage
 
 List suites:

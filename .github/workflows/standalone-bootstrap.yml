@@ -29,4 +29,7 @@ jobs:
         run: scripts/bootstrap-linked-armfortas.sh external-armfortas
 
       - name: Verify bootstrap doctor
-        run: cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- doctor
+        run: |
+          cargo run --manifest-path .bencch-local/Cargo.toml -p afs-tests --bin bencch -- doctor > doctor.txt
+          grep "armfortas_capture_root: .*external-armfortas" doctor.txt
+          grep "armfortas_capture_status: linked via Cargo to .*external-armfortas" doctor.txt
