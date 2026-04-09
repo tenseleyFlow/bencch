@@ -40,3 +40,8 @@ toolchains happen to be installed on a machine.
 Sprint 11 adds `fixtures/invalid/` for bench-owned bad-source probes. Those
 fixtures let `bencch introspect` exercise compiler failure reporting and
 partial capture without depending on temp-file setup inside tests.
+
+The mem2reg merge-smoothing work adds `fixtures/compat/mem2reg/` for imported
+branch-owned audit programs. Those files keep their inline `! IR_CHECK:`,
+`! IR_NOT:`, `! ERROR_EXPECTED:`, and `! XFAIL:` comments so `bencch` can
+absorb the new syntax without reviving the old in-repo harness.

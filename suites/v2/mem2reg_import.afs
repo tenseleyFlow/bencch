@@ -1,0 +1,22 @@
+suite "v2/mem2reg-import"
+
+case "audit4_maj4_parameter_inlined"
+source "../../fixtures/compat/mem2reg/audit4_maj4_parameter_inlined.f90"
+compiler armfortas => armfortas.ir
+expect armfortas.ir check-comments
+xfail "Current trunk still lowers PARAMETER locals through loads instead of inline constants."
+end
+
+case "audit4_maj1_use_only_hidden_ref"
+source "../../fixtures/compat/mem2reg/audit4_maj1_use_only_hidden_ref.f90"
+compiler armfortas => diagnostics
+expect-fail comments
+xfail "Current trunk still accepts the hidden USE ONLY reference instead of diagnosing it."
+end
+
+case "audit6_b1_allocatable_function_return"
+source "../../fixtures/compat/mem2reg/audit6_b1_allocatable_function_return.f90"
+compiler armfortas => runtime, diagnostics
+xfail comments
+expect run.stdout check-comments
+end
