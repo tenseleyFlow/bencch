@@ -401,6 +401,7 @@ struct ExecutionArtifacts {
 #[derive(Debug, Clone)]
 struct ObservedProgram {
     observation: CompilerObservation,
+    requested_artifacts: BTreeSet<ArtifactKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1009,6 +1010,7 @@ fn run_introspect(config: &IntrospectConfig) -> Result<ObservedProgram, String> 
             &requested,
             &config.tools,
         )?,
+        requested_artifacts: requested,
     })
 }
 
@@ -1893,7 +1895,7 @@ fn print_compare_result(result: &ComparisonResult) {
 }
 
 fn print_introspection(observed: &ObservedProgram) {
-    println!("{}", render_introspection_text(&observed.observation));
+    println!("{}", render_introspection_text(observed));
 }
 
 fn write_compare_reports(config: &CompareConfig, result: &ComparisonResult) -> Result<(), String> {
@@ -1915,7 +1917,7 @@ fn write_introspection_reports(
     if let Some(path) = &config.json_report {
         write_report(
             path,
-            &render_introspection_json(&observed.observation),
+            &render_introspection_json(observed),
             "json report",
         )?;
         println!("json report: {}", path.display());
@@ -1923,7 +1925,7 @@ fn write_introspection_reports(
     if let Some(path) = &config.markdown_report {
         write_report(
             path,
-            &render_introspection_markdown(&observed.observation),
+            &render_introspection_markdown(observed),
             "markdown report",
         )?;
         println!("markdown report: {}", path.display());
@@ -1937,6 +1939,31 @@ fn introspection_status(observation: &CompilerObservation) -> &'static str {
     } else {
         "compile failed"
     }
+}
+
+fn requested_introspection_artifact_names(observed: &ObservedProgram) -> Vec<String> {
+    observed
+        .requested_artifacts
+        .iter()
+        .map(|artifact| artifact.as_str().to_string())
+        .collect()
+}
+
+fn missing_introspection_artifact_names(observed: &ObservedProgram) -> Vec<String> {
+    observed
+        .requested_artifacts
+        .iter()
+        .filter(|artifact| {
+            if matches!(artifact, ArtifactKey::Diagnostics)
+                && observed.observation.compile_exit_code == 0
+                && !observed.observation.artifacts.contains_key(*artifact)
+            {
+                return false;
+            }
+            !observed.observation.artifacts.contains_key(*artifact)
+        })
+        .map(|artifact| artifact.as_str().to_string())
+        .collect()
 }
 
 fn observation_generic_artifacts<'a>(
@@ -2065,13 +2092,16 @@ fn render_namespaced_artifacts_json(
     rendered
 }
 
-fn render_introspection_text(observation: &CompilerObservation) -> String {
+fn render_introspection_text(observed: &ObservedProgram) -> String {
+    let observation = &observed.observation;
     let generic_artifacts = observation_generic_artifacts(observation);
     let generic_names = generic_artifacts
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     let adapter_extras = observation_adapter_extras(observation);
+    let requested_artifacts = requested_introspection_artifact_names(observed);
+    let missing_artifacts = missing_introspection_artifact_names(observed);
     let mut lines = vec![
         "Introspect".to_string(),
         format!("  status: {}", introspection_status(observation)),
@@ -2086,6 +2116,14 @@ fn render_introspection_text(observation: &CompilerObservation) -> String {
             observation.provenance.backend_detail
         ),
         format!("  artifact_count: {}", observation.artifacts.len()),
+        format!(
+            "  requested_artifacts: {}",
+            format_artifact_name_list(&requested_artifacts)
+        ),
+        format!(
+            "  missing_artifacts: {}",
+            format_artifact_name_list(&missing_artifacts)
+        ),
         format!(
             "  generic_artifacts: {}",
             format_artifact_name_list(&generic_names)
@@ -2188,21 +2226,27 @@ fn render_compare_markdown(result: &ComparisonResult) -> String {
     lines.join("\n") + "\n"
 }
 
-fn render_introspection_json(observation: &CompilerObservation) -> String {
+fn render_introspection_json(observed: &ObservedProgram) -> String {
+    let observation = &observed.observation;
     let generic_artifacts = observation_generic_artifacts(observation);
     let generic_names = generic_artifacts
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     let adapter_extras = observation_adapter_extras(observation);
+    let requested_artifacts = requested_introspection_artifact_names(observed);
+    let missing_artifacts = missing_introspection_artifact_names(observed);
     format!(
-        "{{\n  \"status\": \"{}\",\n  \"compiler\": \"{}\",\n  \"program\": \"{}\",\n  \"opt\": \"{}\",\n  \"compile_exit_code\": {},\n  \"artifact_summary\": {{\n    \"artifact_count\": {},\n    \"generic_artifacts\": {},\n    \"adapter_extras\": {}\n  }},\n  \"provenance\": {{\n    \"compiler_identity\": \"{}\",\n    \"adapter_kind\": \"{}\",\n    \"backend_mode\": \"{}\",\n    \"backend_detail\": \"{}\",\n    \"artifacts_captured\": {},\n    \"comparison_basis\": {}\n  }},\n  \"generic_artifacts\": {},\n  \"adapter_extras\": {},\n  \"artifacts\": {}\n}}\n",
+        "{{\n  \"status\": \"{}\",\n  \"compiler\": \"{}\",\n  \"program\": \"{}\",\n  \"opt\": \"{}\",\n  \"compile_exit_code\": {},\n  \"artifact_summary\": {{\n    \"artifact_count\": {},\n    \"requested_artifacts\": {},\n    \"captured_artifacts\": {},\n    \"missing_artifacts\": {},\n    \"generic_artifacts\": {},\n    \"adapter_extras\": {}\n  }},\n  \"provenance\": {{\n    \"compiler_identity\": \"{}\",\n    \"adapter_kind\": \"{}\",\n    \"backend_mode\": \"{}\",\n    \"backend_detail\": \"{}\",\n    \"artifacts_captured\": {},\n    \"comparison_basis\": {}\n  }},\n  \"generic_artifacts\": {},\n  \"adapter_extras\": {},\n  \"artifacts\": {}\n}}\n",
         json_escape(introspection_status(observation)),
         json_escape(&observation.compiler.display_name()),
         json_escape(&observation.program.display().to_string()),
         observation.opt_level.as_str(),
         observation.compile_exit_code,
         observation.artifacts.len(),
+        json_string_array(&requested_artifacts),
+        json_string_array(&observation.provenance.artifacts_captured),
+        json_string_array(&missing_artifacts),
         json_string_array(&generic_names),
         render_adapter_extra_summary_json(&adapter_extras),
         json_escape(&observation.provenance.compiler_identity),
@@ -2220,13 +2264,16 @@ fn render_introspection_json(observation: &CompilerObservation) -> String {
     )
 }
 
-fn render_introspection_markdown(observation: &CompilerObservation) -> String {
+fn render_introspection_markdown(observed: &ObservedProgram) -> String {
+    let observation = &observed.observation;
     let generic_artifacts = observation_generic_artifacts(observation);
     let generic_names = generic_artifacts
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     let adapter_extras = observation_adapter_extras(observation);
+    let requested_artifacts = requested_introspection_artifact_names(observed);
+    let missing_artifacts = missing_introspection_artifact_names(observed);
     let mut lines = vec![
         "# bencch introspect report".to_string(),
         String::new(),
@@ -2239,6 +2286,22 @@ fn render_introspection_markdown(observation: &CompilerObservation) -> String {
         format!("backend_mode: `{}`", observation.provenance.backend_mode),
         format!("backend_detail: {}", observation.provenance.backend_detail),
         format!("artifact_count: {}", observation.artifacts.len()),
+        format!(
+            "requested_artifacts: {}",
+            if requested_artifacts.is_empty() {
+                "none".to_string()
+            } else {
+                format!("`{}`", requested_artifacts.join("`, `"))
+            }
+        ),
+        format!(
+            "missing_artifacts: {}",
+            if missing_artifacts.is_empty() {
+                "none".to_string()
+            } else {
+                format!("`{}`", missing_artifacts.join("`, `"))
+            }
+        ),
         format!(
             "generic_artifacts: {}",
             if generic_names.is_empty() {
@@ -7913,11 +7976,83 @@ mod tests {
         };
         assert!(ir.contains("func") || ir.contains("module"));
 
-        let rendered = render_introspection_text(observation);
+        let rendered = render_introspection_text(&observed);
         assert!(rendered.contains("Generic artifacts"));
         assert!(rendered.contains("Adapter extras"));
         assert!(rendered.contains("-- armfortas --"));
         assert!(rendered.contains("== ir =="));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn introspect_armfortas_all_artifacts_includes_stage_extras() {
+        let config = IntrospectConfig {
+            compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::new(),
+            json_report: None,
+            markdown_report: None,
+            all_artifacts: true,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let observed = run_introspect(&config).unwrap();
+        let observation = &observed.observation;
+        for artifact in [
+            ArtifactKey::Asm,
+            ArtifactKey::Obj,
+            ArtifactKey::Runtime,
+            ArtifactKey::Extra("armfortas.preprocess".into()),
+            ArtifactKey::Extra("armfortas.tokens".into()),
+            ArtifactKey::Extra("armfortas.ast".into()),
+            ArtifactKey::Extra("armfortas.sema".into()),
+            ArtifactKey::Extra("armfortas.ir".into()),
+            ArtifactKey::Extra("armfortas.optir".into()),
+            ArtifactKey::Extra("armfortas.mir".into()),
+            ArtifactKey::Extra("armfortas.regalloc".into()),
+        ] {
+            assert!(
+                observation.artifacts.contains_key(&artifact),
+                "missing artifact {}",
+                artifact.as_str()
+            );
+        }
+        assert!(missing_introspection_artifact_names(&observed).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn introspect_named_external_compiler_reports_generic_artifacts_when_available() {
+        if !command_is_available("gfortran") {
+            return;
+        }
+
+        let config = IntrospectConfig {
+            compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([
+                ArtifactKey::Asm,
+                ArtifactKey::Obj,
+                ArtifactKey::Runtime,
+            ]),
+            json_report: None,
+            markdown_report: None,
+            all_artifacts: false,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let observed = run_introspect(&config).unwrap();
+        let observation = &observed.observation;
+        assert_eq!(observation.compile_exit_code, 0);
+        assert_eq!(observation.provenance.backend_mode, "external-driver");
+        assert_eq!(observation.provenance.adapter_kind, "named");
+        assert!(observation.artifacts.contains_key(&ArtifactKey::Asm));
+        assert!(observation.artifacts.contains_key(&ArtifactKey::Obj));
+        assert!(observation.artifacts.contains_key(&ArtifactKey::Runtime));
+        assert!(observation_adapter_extras(observation).is_empty());
+        assert!(missing_introspection_artifact_names(&observed).is_empty());
     }
 
     #[test]
@@ -8789,26 +8924,47 @@ end
             }],
         };
 
-        let introspection_text = render_introspection_text(&observation);
+        let observed = ObservedProgram {
+            observation: observation.clone(),
+            requested_artifacts: BTreeSet::from([
+                ArtifactKey::Asm,
+                ArtifactKey::Extra("armfortas.ir".into()),
+                ArtifactKey::Extra("armfortas.tokens".into()),
+            ]),
+        };
+
+        let introspection_text = render_introspection_text(&observed);
         assert!(introspection_text.contains("status: compile ok"));
         assert!(introspection_text.contains("artifact_count: 2"));
+        assert!(introspection_text.contains(
+            "requested_artifacts: asm, armfortas.ir, armfortas.tokens"
+        ));
+        assert!(introspection_text.contains("missing_artifacts: armfortas.tokens"));
         assert!(introspection_text.contains("generic_artifacts: asm"));
         assert!(introspection_text.contains("adapter_extras: armfortas(ir)"));
         assert!(introspection_text.contains("Generic artifacts"));
         assert!(introspection_text.contains("Adapter extras"));
 
-        let introspection_json = render_introspection_json(&observation);
+        let introspection_json = render_introspection_json(&observed);
         assert!(introspection_json.contains("\"status\": \"compile ok\""));
         assert!(introspection_json.contains("\"artifact_count\": 2"));
+        assert!(introspection_json.contains(
+            "\"requested_artifacts\": [\"asm\", \"armfortas.ir\", \"armfortas.tokens\"]"
+        ));
+        assert!(introspection_json.contains("\"missing_artifacts\": [\"armfortas.tokens\"]"));
         assert!(introspection_json.contains("\"generic_artifacts\": [\"asm\"]"));
         assert!(introspection_json.contains("\"adapter_extras\": {\"armfortas\": [\"ir\"]}"));
         assert!(introspection_json.contains("\"backend_mode\": \"linked\""));
         assert!(introspection_json.contains("\"armfortas.ir\""));
 
-        let introspection_markdown = render_introspection_markdown(&observation);
+        let introspection_markdown = render_introspection_markdown(&observed);
         assert!(introspection_markdown.contains("# bencch introspect report"));
         assert!(introspection_markdown.contains("status: compile ok"));
         assert!(introspection_markdown.contains("artifact_count: 2"));
+        assert!(introspection_markdown.contains(
+            "requested_artifacts: `asm`, `armfortas.ir`, `armfortas.tokens`"
+        ));
+        assert!(introspection_markdown.contains("missing_artifacts: `armfortas.tokens`"));
         assert!(introspection_markdown.contains("## Generic artifacts"));
         assert!(introspection_markdown.contains("## Adapter extras"));
         assert!(introspection_markdown.contains("### `armfortas`"));
