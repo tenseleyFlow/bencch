@@ -996,6 +996,16 @@ fn print_usage(program_name: &str) {
     eprintln!("env overrides:");
     eprintln!("  BENCCH_ARMFORTAS_BIN, BENCCH_GFORTRAN_BIN, BENCCH_FLANG_BIN");
     eprintln!("  BENCCH_AS_BIN, BENCCH_OTOOL_BIN, BENCCH_NM_BIN");
+    eprintln!();
+    if linked_capture_available() {
+        eprintln!("mode:");
+        eprintln!("  linked armfortas capture is available in this build");
+    } else {
+        eprintln!("mode:");
+        eprintln!("  linked armfortas capture is unavailable in this build");
+        eprintln!("  compare, introspect, and generic/observable suite runs still work");
+        eprintln!("  use scripts/bootstrap-linked-armfortas.sh for rich armfortas stages and legacy frontend/module suites");
+    }
 }
 
 fn default_compare_artifacts(extra: &BTreeSet<ArtifactKey>) -> BTreeSet<ArtifactKey> {
@@ -2907,6 +2917,16 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         "  note: linked capture still depends on the surrounding armfortas checkout".to_string()
     } else {
         "  note: linked capture is unavailable in this build; external compiler compare/introspect surfaces still work".to_string()
+    });
+    lines.push(if capture_root.is_some() {
+        "  linked_mode_surface: rich armfortas stages, legacy frontend/module suites, capture consistency".to_string()
+    } else {
+        "  external_only_surface: compare, introspect, generic suite-v2, observable-only run cells".to_string()
+    });
+    lines.push(if capture_root.is_some() {
+        "  external_only_limits: none in this build".to_string()
+    } else {
+        "  linked_only_surface: armfortas.* extras, legacy frontend/module suites, capture consistency".to_string()
     });
 
     lines.join("\n")
@@ -12563,6 +12583,9 @@ end
         assert!(
             rendered.contains("primary_backend_full: linked armfortas::testing capture adapter")
         );
+        assert!(rendered.contains(
+            "linked_mode_surface: rich armfortas stages, legacy frontend/module suites, capture consistency"
+        ));
         assert!(rendered.contains(
             "primary_backend_observable: cli-observable armfortas driver capture adapter"
         ));
