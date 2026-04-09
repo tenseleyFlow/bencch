@@ -1,4 +1,6 @@
 .docs/
+.bencch-local/
 reports/
 target/
+afs_*.dat
 .DS_Store
