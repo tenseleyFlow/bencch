@@ -4145,7 +4145,11 @@ fn execute_case_cell(
             }
         }
         (None, Some(failure)) => {
-            let mut execution = evaluate_failed_armfortas(case, &artifacts, failure);
+            let observed =
+                legacy_failure_observed_program(&prepared.compiler_source, case, failure);
+            artifacts.armfortas_observation = Some(observed.clone());
+            let mut execution =
+                evaluate_failed_armfortas_with_observed(case, &artifacts, &observed);
             if execution.is_ok() && !artifacts.references.is_empty() {
                 execution =
                     Err("differential comparison requires a successful armfortas run".to_string());
@@ -5057,23 +5061,25 @@ fn evaluate_observation_failure_expectations(
     Ok(())
 }
 
+#[cfg(test)]
 fn evaluate_failed_armfortas(
     case: &CaseSpec,
     artifacts: &ExecutionArtifacts,
     failure: &CaptureFailure,
 ) -> Result<(), String> {
-    let partial = failure.partial_result();
-    let observed = observed_program_from_armfortas_capture(
-        &case.source,
-        failure.opt_level,
-        expected_artifacts_for_legacy_case(case),
-        &partial,
-        Some(failure),
-    );
+    let observed = legacy_failure_observed_program(&case.source, case, failure);
+    evaluate_failed_armfortas_with_observed(case, artifacts, &observed)
+}
+
+fn evaluate_failed_armfortas_with_observed(
+    case: &CaseSpec,
+    artifacts: &ExecutionArtifacts,
+    observed: &ObservedProgram,
+) -> Result<(), String> {
     if has_failure_expectation(case) {
         evaluate_observation_failure_expectations(case, &observed.observation)
     } else {
-        match evaluate_observation_expectations(case, &observed) {
+        match evaluate_observation_expectations(case, observed) {
             Ok(()) => Err(compose_armfortas_failure_detail(artifacts)),
             Err(detail) if is_missing_stage_detail(&detail) => {
                 Err(compose_armfortas_failure_detail(artifacts))
@@ -5081,6 +5087,21 @@ fn evaluate_failed_armfortas(
             Err(detail) => Err(detail),
         }
     }
+}
+
+fn legacy_failure_observed_program(
+    program: &Path,
+    case: &CaseSpec,
+    failure: &CaptureFailure,
+) -> ObservedProgram {
+    let partial = failure.partial_result();
+    observed_program_from_armfortas_capture(
+        program,
+        failure.opt_level,
+        expected_artifacts_for_legacy_case(case),
+        &partial,
+        Some(failure),
+    )
 }
 
 fn has_failure_expectation(case: &CaseSpec) -> bool {
@@ -12629,6 +12650,50 @@ end
         };
 
         assert!(evaluate_failed_armfortas(&case, &artifacts, &failure).is_ok());
+    }
+
+    #[test]
+    fn legacy_failure_observed_program_uses_prepared_source_and_partial_stages() {
+        let case = CaseSpec {
+            name: "missing_then".into(),
+            source: PathBuf::from("authored.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Tokens, Stage::Run]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::FailContains {
+                stage: FailureStage::Parser,
+                needle: "expected 'then'".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let failure = CaptureFailure {
+            input: PathBuf::from("generated.f90"),
+            opt_level: OptLevel::O0,
+            stage: FailureStage::Parser,
+            detail: "expected 'then'".into(),
+            stages: BTreeMap::from([(Stage::Tokens, CapturedStage::Text("if\n".into()))]),
+        };
+
+        let observed = legacy_failure_observed_program(Path::new("prepared.f90"), &case, &failure);
+        assert_eq!(observed.observation.program, PathBuf::from("prepared.f90"));
+        assert_eq!(observed.observation.compile_exit_code, 1);
+        assert_eq!(
+            observed.observation.provenance.failure_stage.as_deref(),
+            Some("parser")
+        );
+        assert!(observed
+            .observation
+            .artifacts
+            .contains_key(&ArtifactKey::Diagnostics));
+        assert!(observed
+            .observation
+            .artifacts
+            .contains_key(&ArtifactKey::Extra("armfortas.tokens".into())));
     }
 
     #[test]
