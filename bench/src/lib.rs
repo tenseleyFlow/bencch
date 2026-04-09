@@ -386,6 +386,8 @@ struct IntrospectConfig {
     json_report: Option<PathBuf>,
     markdown_report: Option<PathBuf>,
     all_artifacts: bool,
+    summary_only: bool,
+    max_artifact_lines: Option<usize>,
     tools: ToolchainConfig,
 }
 
@@ -402,6 +404,12 @@ struct ExecutionArtifacts {
 struct ObservedProgram {
     observation: CompilerObservation,
     requested_artifacts: BTreeSet<ArtifactKey>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IntrospectionRenderConfig {
+    summary_only: bool,
+    max_artifact_lines: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,7 +603,7 @@ pub fn run_cli_named(program_name: &str, args: &[String]) -> i32 {
         },
         Ok(CommandKind::Introspect(config)) => match run_introspect(&config) {
             Ok(observation) => {
-                print_introspection(&observation);
+                print_introspection(&config, &observation);
                 if let Err(err) = write_introspection_reports(&config, &observation) {
                     eprintln!("{}: {}", program_name, err);
                     return 1;
@@ -839,6 +847,8 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                 json_report: None,
                 markdown_report: None,
                 all_artifacts: false,
+                summary_only: false,
+                max_artifact_lines: None,
                 tools: ToolchainConfig::from_env(),
             };
             let mut queue: VecDeque<&String> = args[3..].iter().collect();
@@ -865,6 +875,19 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                         config.artifacts.extend(ArtifactKey::parse_list(value)?);
                     }
                     "--all" => config.all_artifacts = true,
+                    "--summary-only" => config.summary_only = true,
+                    "--max-artifact-lines" => {
+                        let value = queue
+                            .pop_front()
+                            .ok_or("--max-artifact-lines requires a value")?;
+                        let parsed = value.parse::<usize>().map_err(|_| {
+                            format!("invalid --max-artifact-lines value '{}'", value)
+                        })?;
+                        if parsed == 0 {
+                            return Err("--max-artifact-lines must be greater than 0".to_string());
+                        }
+                        config.max_artifact_lines = Some(parsed);
+                    }
                     "--json-report" => {
                         let value = queue.pop_front().ok_or("--json-report requires a value")?;
                         config.json_report = Some(PathBuf::from(value));
@@ -919,7 +942,7 @@ fn print_usage(program_name: &str) {
         program_name
     );
     eprintln!(
-        "  {} introspect <compiler> <program> [--opt <O0>] [--artifact <list>] [--all] [--json-report <path>] [--markdown-report <path>] [tool overrides]",
+        "  {} introspect <compiler> <program> [--opt <O0>] [--artifact <list>] [--all] [--summary-only] [--max-artifact-lines <n>] [--json-report <path>] [--markdown-report <path>] [tool overrides]",
         program_name
     );
     eprintln!(
@@ -1898,8 +1921,17 @@ fn print_compare_result(result: &ComparisonResult) {
     println!("{}", render_compare_text(result));
 }
 
-fn print_introspection(observed: &ObservedProgram) {
-    println!("{}", render_introspection_text(observed));
+fn print_introspection(config: &IntrospectConfig, observed: &ObservedProgram) {
+    println!(
+        "{}",
+        render_introspection_text(
+            observed,
+            IntrospectionRenderConfig {
+                summary_only: config.summary_only,
+                max_artifact_lines: config.max_artifact_lines,
+            }
+        )
+    );
 }
 
 fn write_compare_reports(config: &CompareConfig, result: &ComparisonResult) -> Result<(), String> {
@@ -1918,6 +1950,10 @@ fn write_introspection_reports(
     config: &IntrospectConfig,
     observed: &ObservedProgram,
 ) -> Result<(), String> {
+    let render_config = IntrospectionRenderConfig {
+        summary_only: config.summary_only,
+        max_artifact_lines: config.max_artifact_lines,
+    };
     if let Some(path) = &config.json_report {
         write_report(path, &render_introspection_json(observed), "json report")?;
         println!("json report: {}", path.display());
@@ -1925,7 +1961,7 @@ fn write_introspection_reports(
     if let Some(path) = &config.markdown_report {
         write_report(
             path,
-            &render_introspection_markdown(observed),
+            &render_introspection_markdown(observed, render_config),
             "markdown report",
         )?;
         println!("markdown report: {}", path.display());
@@ -2111,7 +2147,82 @@ fn render_namespaced_artifacts_json(
     rendered
 }
 
-fn render_introspection_text(observed: &ObservedProgram) -> String {
+fn text_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
+}
+
+fn render_config_summary(config: IntrospectionRenderConfig) -> String {
+    if config.summary_only {
+        "summary-only".to_string()
+    } else if let Some(limit) = config.max_artifact_lines {
+        format!("first {} lines per artifact", limit)
+    } else {
+        "full artifact bodies".to_string()
+    }
+}
+
+fn artifact_value_summary(value: &ArtifactValue) -> String {
+    match value {
+        ArtifactValue::Text(text) => {
+            format!(
+                "text, {} lines, {} chars",
+                text_line_count(text),
+                text.len()
+            )
+        }
+        ArtifactValue::Int(value) => format!("int, value {}", value),
+        ArtifactValue::Run(run) => format!(
+            "runtime, exit {}, stdout {} lines, stderr {} lines",
+            run.exit_code,
+            text_line_count(&run.stdout),
+            text_line_count(&run.stderr)
+        ),
+        ArtifactValue::Path(path) => match fs::metadata(path) {
+            Ok(metadata) => format!("path, {} bytes", metadata.len()),
+            Err(_) => "path".to_string(),
+        },
+    }
+}
+
+fn render_artifact_body_lines(
+    value: &ArtifactValue,
+    config: IntrospectionRenderConfig,
+) -> Vec<String> {
+    if config.summary_only {
+        return vec!["[content omitted by --summary-only]".to_string()];
+    }
+
+    let rendered = render_artifact_value_text(value);
+    let mut lines = rendered
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return vec!["<empty>".to_string()];
+    }
+
+    if let Some(limit) = config.max_artifact_lines {
+        if lines.len() > limit {
+            let total = lines.len();
+            lines.truncate(limit);
+            lines.push(format!(
+                "... (truncated; showing first {} of {} lines)",
+                limit, total
+            ));
+        }
+    }
+
+    lines
+}
+
+fn render_introspection_text(
+    observed: &ObservedProgram,
+    render_config: IntrospectionRenderConfig,
+) -> String {
     let observation = &observed.observation;
     let generic_artifacts = observation_generic_artifacts(observation);
     let generic_names = generic_artifacts
@@ -2142,6 +2253,7 @@ fn render_introspection_text(observed: &ObservedProgram) -> String {
                 .clone()
                 .unwrap_or_else(|| "none".to_string())
         ),
+        format!("  content_mode: {}", render_config_summary(render_config)),
         format!("  artifact_count: {}", observation.artifacts.len()),
         format!(
             "  requested_artifacts: {}",
@@ -2173,7 +2285,8 @@ fn render_introspection_text(observed: &ObservedProgram) -> String {
         for (artifact, value) in generic_artifacts {
             lines.push(String::new());
             lines.push(format!("== {} ==", artifact));
-            lines.push(render_artifact_value_text(value));
+            lines.push(format!("summary: {}", artifact_value_summary(value)));
+            lines.extend(render_artifact_body_lines(value, render_config));
         }
     }
 
@@ -2186,7 +2299,8 @@ fn render_introspection_text(observed: &ObservedProgram) -> String {
             for (name, value) in entries {
                 lines.push(String::new());
                 lines.push(format!("== {} ==", name));
-                lines.push(render_artifact_value_text(value));
+                lines.push(format!("summary: {}", artifact_value_summary(value)));
+                lines.extend(render_artifact_body_lines(value, render_config));
             }
         }
     }
@@ -2304,7 +2418,10 @@ fn render_introspection_json(observed: &ObservedProgram) -> String {
     )
 }
 
-fn render_introspection_markdown(observed: &ObservedProgram) -> String {
+fn render_introspection_markdown(
+    observed: &ObservedProgram,
+    render_config: IntrospectionRenderConfig,
+) -> String {
     let observation = &observed.observation;
     let generic_artifacts = observation_generic_artifacts(observation);
     let generic_names = generic_artifacts
@@ -2333,6 +2450,7 @@ fn render_introspection_markdown(observed: &ObservedProgram) -> String {
                 .map(|line| format!("`{}`", line))
                 .unwrap_or_else(|| "none".to_string())
         ),
+        format!("content_mode: `{}`", render_config_summary(render_config)),
         format!("artifact_count: {}", observation.artifacts.len()),
         format!(
             "requested_artifacts: {}",
@@ -2376,12 +2494,9 @@ fn render_introspection_markdown(observed: &ObservedProgram) -> String {
         for (artifact, value) in generic_artifacts {
             lines.push(String::new());
             lines.push(format!("### `{}`", artifact));
+            lines.push(format!("summary: {}", artifact_value_summary(value)));
             lines.push("```text".to_string());
-            lines.extend(
-                render_artifact_value_text(value)
-                    .lines()
-                    .map(|line| line.to_string()),
-            );
+            lines.extend(render_artifact_body_lines(value, render_config));
             lines.push("```".to_string());
         }
     }
@@ -2395,12 +2510,9 @@ fn render_introspection_markdown(observed: &ObservedProgram) -> String {
             for (name, value) in entries {
                 lines.push(String::new());
                 lines.push(format!("#### `{}`", name));
+                lines.push(format!("summary: {}", artifact_value_summary(value)));
                 lines.push("```text".to_string());
-                lines.extend(
-                    render_artifact_value_text(value)
-                        .lines()
-                        .map(|line| line.to_string()),
-                );
+                lines.extend(render_artifact_body_lines(value, render_config));
                 lines.push("```".to_string());
             }
         }
@@ -7463,6 +7575,13 @@ mod tests {
             .join(name)
     }
 
+    fn full_introspection_render_config() -> IntrospectionRenderConfig {
+        IntrospectionRenderConfig {
+            summary_only: false,
+            max_artifact_lines: None,
+        }
+    }
+
     #[cfg(unix)]
     fn invalid_fixture(name: &str) -> PathBuf {
         bencch_repo_root()
@@ -8016,6 +8135,8 @@ mod tests {
             json_report: None,
             markdown_report: None,
             all_artifacts: false,
+            summary_only: false,
+            max_artifact_lines: None,
             tools: ToolchainConfig::from_env(),
         };
 
@@ -8041,7 +8162,7 @@ mod tests {
         };
         assert!(ir.contains("func") || ir.contains("module"));
 
-        let rendered = render_introspection_text(&observed);
+        let rendered = render_introspection_text(&observed, full_introspection_render_config());
         assert!(rendered.contains("Generic artifacts"));
         assert!(rendered.contains("Adapter extras"));
         assert!(rendered.contains("-- armfortas --"));
@@ -8059,6 +8180,8 @@ mod tests {
             json_report: None,
             markdown_report: None,
             all_artifacts: true,
+            summary_only: false,
+            max_artifact_lines: None,
             tools: ToolchainConfig::from_env(),
         };
 
@@ -8101,6 +8224,8 @@ mod tests {
             json_report: None,
             markdown_report: None,
             all_artifacts: false,
+            summary_only: false,
+            max_artifact_lines: None,
             tools: ToolchainConfig::from_env(),
         };
 
@@ -8122,7 +8247,7 @@ mod tests {
             missing_introspection_artifact_names(&observed).contains(&"armfortas.ir".to_string())
         );
 
-        let rendered = render_introspection_text(&observed);
+        let rendered = render_introspection_text(&observed, full_introspection_render_config());
         assert!(rendered.contains("status: compile failed"));
         assert!(rendered.contains("failure_stage: parser"));
         assert!(rendered.contains("diagnostic_excerpt:"));
@@ -8143,6 +8268,8 @@ mod tests {
             json_report: None,
             markdown_report: None,
             all_artifacts: false,
+            summary_only: false,
+            max_artifact_lines: None,
             tools: ToolchainConfig::from_env(),
         };
 
@@ -8172,6 +8299,8 @@ mod tests {
             json_report: None,
             markdown_report: None,
             all_artifacts: false,
+            summary_only: false,
+            max_artifact_lines: None,
             tools: ToolchainConfig::from_env(),
         };
 
@@ -8187,7 +8316,7 @@ mod tests {
             vec!["asm".to_string(), "obj".to_string(), "runtime".to_string()]
         );
 
-        let rendered = render_introspection_text(&observed);
+        let rendered = render_introspection_text(&observed, full_introspection_render_config());
         assert!(rendered.contains("status: compile failed"));
         assert!(rendered.contains("failure_stage: none"));
     }
@@ -8488,6 +8617,9 @@ end
             "--artifact".to_string(),
             "armfortas.ir,asm".to_string(),
             "--all".to_string(),
+            "--summary-only".to_string(),
+            "--max-artifact-lines".to_string(),
+            "12".to_string(),
             "--json-report".to_string(),
             "/tmp/introspect.json".to_string(),
         ];
@@ -8511,6 +8643,8 @@ end
             .artifacts
             .contains(&ArtifactKey::Extra("armfortas.ir".into())));
         assert!(config.all_artifacts);
+        assert!(config.summary_only);
+        assert_eq!(config.max_artifact_lines, Some(12));
         assert_eq!(
             config.json_report.as_deref(),
             Some(Path::new("/tmp/introspect.json"))
@@ -9072,7 +9206,8 @@ end
             ]),
         };
 
-        let introspection_text = render_introspection_text(&observed);
+        let introspection_text =
+            render_introspection_text(&observed, full_introspection_render_config());
         assert!(introspection_text.contains("status: compile ok"));
         assert!(introspection_text.contains("artifact_count: 2"));
         assert!(
@@ -9096,7 +9231,8 @@ end
         assert!(introspection_json.contains("\"backend_mode\": \"linked\""));
         assert!(introspection_json.contains("\"armfortas.ir\""));
 
-        let introspection_markdown = render_introspection_markdown(&observed);
+        let introspection_markdown =
+            render_introspection_markdown(&observed, full_introspection_render_config());
         assert!(introspection_markdown.contains("# bencch introspect report"));
         assert!(introspection_markdown.contains("status: compile ok"));
         assert!(introspection_markdown.contains("failure_stage: `none`"));
@@ -9159,7 +9295,7 @@ end
             ]),
         };
 
-        let text = render_introspection_text(&observed);
+        let text = render_introspection_text(&observed, full_introspection_render_config());
         assert!(text.contains("status: compile failed"));
         assert!(text.contains("failure_stage: sema"));
         assert!(text.contains("diagnostic_excerpt: undefined symbol: missing_value"));
@@ -9170,10 +9306,89 @@ end
         assert!(json.contains("\"diagnostic_excerpt\": \"undefined symbol: missing_value\""));
         assert!(json.contains("\"failure_stage\": \"sema\""));
 
-        let markdown = render_introspection_markdown(&observed);
+        let markdown = render_introspection_markdown(&observed, full_introspection_render_config());
         assert!(markdown.contains("status: compile failed"));
         assert!(markdown.contains("failure_stage: `sema`"));
         assert!(markdown.contains("diagnostic_excerpt: `undefined symbol: missing_value`"));
+    }
+
+    #[test]
+    fn render_introspection_summary_only_omits_artifact_bodies() {
+        let observed = ObservedProgram {
+            observation: CompilerObservation {
+                compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+                program: PathBuf::from("demo.f90"),
+                opt_level: OptLevel::O0,
+                compile_exit_code: 0,
+                artifacts: BTreeMap::from([(
+                    ArtifactKey::Extra("armfortas.tokens".into()),
+                    ArtifactValue::Text("line1\nline2\nline3".into()),
+                )]),
+                provenance: ObservationProvenance {
+                    compiler_identity: "armfortas".into(),
+                    adapter_kind: "named".into(),
+                    backend_mode: "linked".into(),
+                    backend_detail: "linked armfortas::testing capture adapter".into(),
+                    artifacts_captured: vec!["armfortas.tokens".into()],
+                    comparison_basis: None,
+                    failure_stage: None,
+                },
+            },
+            requested_artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.tokens".into())]),
+        };
+
+        let config = IntrospectionRenderConfig {
+            summary_only: true,
+            max_artifact_lines: Some(1),
+        };
+        let text = render_introspection_text(&observed, config);
+        assert!(text.contains("content_mode: summary-only"));
+        assert!(text.contains("summary: text, 3 lines, 17 chars"));
+        assert!(text.contains("[content omitted by --summary-only]"));
+        assert!(!text.contains("line2"));
+
+        let markdown = render_introspection_markdown(&observed, config);
+        assert!(markdown.contains("content_mode: `summary-only`"));
+        assert!(markdown.contains("[content omitted by --summary-only]"));
+    }
+
+    #[test]
+    fn render_introspection_truncates_large_artifacts() {
+        let observed = ObservedProgram {
+            observation: CompilerObservation {
+                compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
+                program: PathBuf::from("demo.f90"),
+                opt_level: OptLevel::O0,
+                compile_exit_code: 0,
+                artifacts: BTreeMap::from([(
+                    ArtifactKey::Asm,
+                    ArtifactValue::Text("a\nb\nc\nd".into()),
+                )]),
+                provenance: ObservationProvenance {
+                    compiler_identity: "armfortas".into(),
+                    adapter_kind: "named".into(),
+                    backend_mode: "linked".into(),
+                    backend_detail: "linked armfortas::testing capture adapter".into(),
+                    artifacts_captured: vec!["asm".into()],
+                    comparison_basis: None,
+                    failure_stage: None,
+                },
+            },
+            requested_artifacts: BTreeSet::from([ArtifactKey::Asm]),
+        };
+
+        let config = IntrospectionRenderConfig {
+            summary_only: false,
+            max_artifact_lines: Some(2),
+        };
+        let text = render_introspection_text(&observed, config);
+        assert!(text.contains("content_mode: first 2 lines per artifact"));
+        assert!(text.contains("a\nb\n... (truncated; showing first 2 of 4 lines)"));
+        assert!(!text.contains("\nc\nd"));
+
+        let markdown = render_introspection_markdown(&observed, config);
+        assert!(markdown.contains("content_mode: `first 2 lines per artifact`"));
+        assert!(markdown.contains("... (truncated; showing first 2 of 4 lines)"));
     }
 
     #[test]
