@@ -1,0 +1,17 @@
+suite "v2/generic-introspect"
+
+case "fake_compiler_runtime"
+source "../../fixtures/runtime/if_else.f90"
+compiler "../../fixtures/fake_compilers/match_42_a.sh" => asm, obj, runtime
+expect asm contains ".globl _main"
+expect run.stdout contains "42"
+expect run.exit_code equals 0
+end
+
+case "armfortas_generic_runtime"
+source "../../fixtures/runtime/if_else.f90"
+compiler armfortas => runtime, asm, armfortas.ir
+expect run.stdout check-comments
+expect asm not-contains "x18"
+expect armfortas.ir contains "@test_if"
+end
