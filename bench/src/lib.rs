@@ -12,8 +12,8 @@ use crate::compiler::{
     CliObservableCaptureBackend, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
 };
 use bencch_core::{
-    ArtifactDifference, ArtifactKey, ArtifactValue, ComparisonResult, CompilerObservation,
-    CompilerSpec, NamedCompiler, ObservationProvenance,
+    ArtifactDifference, ArtifactKey, ArtifactValue, ComparisonResult, CompilerCapabilities,
+    CompilerObservation, CompilerSpec, NamedCompiler, ObservationProvenance,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -336,6 +336,194 @@ impl ToolchainConfig {
             NamedCompiler::FlangNew => Some(self.flang_new.clone()),
         }
     }
+}
+
+fn generic_external_capabilities(spec: CompilerSpec) -> CompilerCapabilities {
+    CompilerCapabilities::new(spec).support_all([
+        ArtifactKey::Diagnostics,
+        ArtifactKey::ExitCode,
+        ArtifactKey::Stdout,
+        ArtifactKey::Stderr,
+        ArtifactKey::Asm,
+        ArtifactKey::Obj,
+        ArtifactKey::Executable,
+        ArtifactKey::Runtime,
+    ])
+}
+
+fn armfortas_capabilities(tools: &ToolchainConfig) -> CompilerCapabilities {
+    let mut capabilities =
+        generic_external_capabilities(CompilerSpec::Named(NamedCompiler::Armfortas));
+    let linked_reason = "linked armfortas capture is unavailable in this build; use scripts/bootstrap-linked-armfortas.sh or request only asm/obj/run from an external armfortas binary".to_string();
+    let capture_available = tools.armfortas_adapters().capture_mode_name() != "unavailable";
+    for stage in Stage::ALL {
+        if matches!(stage, Stage::Asm | Stage::Obj | Stage::Run) {
+            continue;
+        }
+        let artifact = ArtifactKey::Extra(format!("armfortas.{}", stage.as_str()));
+        capabilities = if capture_available {
+            capabilities.support(artifact)
+        } else {
+            capabilities.mark_unavailable(artifact, linked_reason.clone())
+        };
+    }
+    capabilities
+}
+
+fn compiler_capabilities(spec: &CompilerSpec, tools: &ToolchainConfig) -> CompilerCapabilities {
+    match spec {
+        CompilerSpec::Named(NamedCompiler::Armfortas) => armfortas_capabilities(tools),
+        CompilerSpec::Named(named) => generic_external_capabilities(CompilerSpec::Named(*named)),
+        CompilerSpec::Binary(path) => {
+            generic_external_capabilities(CompilerSpec::Binary(path.clone()))
+        }
+    }
+}
+
+fn capability_extra_summary(extras: &BTreeMap<String, Vec<String>>) -> String {
+    if extras.is_empty() {
+        return "none".to_string();
+    }
+
+    extras
+        .iter()
+        .map(|(namespace, names)| format!("{}({})", namespace, names.join(", ")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn capability_unavailable_summary(capabilities: &CompilerCapabilities) -> String {
+    if capabilities.unavailable_artifacts.is_empty() {
+        return "none".to_string();
+    }
+
+    let mut grouped = BTreeMap::<String, Vec<String>>::new();
+    for artifact in capabilities.unavailable_artifacts.keys() {
+        if let Some((namespace, local_name)) = artifact.extra_parts() {
+            grouped
+                .entry(namespace.to_string())
+                .or_insert_with(Vec::new)
+                .push(local_name.to_string());
+        } else {
+            grouped
+                .entry("generic".to_string())
+                .or_insert_with(Vec::new)
+                .push(artifact.as_str().to_string());
+        }
+    }
+
+    grouped
+        .iter()
+        .map(|(namespace, names)| format!("{}({})", namespace, names.join(", ")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn compiler_capability_backend(spec: &CompilerSpec, tools: &ToolchainConfig) -> (String, String) {
+    match spec {
+        CompilerSpec::Named(NamedCompiler::Armfortas) => {
+            let adapters = tools.armfortas_adapters();
+            (
+                adapters.capture_mode_name().to_string(),
+                adapters.capture_description().to_string(),
+            )
+        }
+        CompilerSpec::Named(named) => {
+            let binary = tools
+                .named_compiler_binary(*named)
+                .unwrap_or_else(|| named.as_str().to_string());
+            (
+                "external-driver".to_string(),
+                format!("generic external driver adapter using {}", binary),
+            )
+        }
+        CompilerSpec::Binary(path) => (
+            "external-driver".to_string(),
+            format!("generic external driver adapter using {}", path.display()),
+        ),
+    }
+}
+
+fn observation_from_capability_mismatch(
+    spec: &CompilerSpec,
+    program: &Path,
+    opt_level: OptLevel,
+    requested: BTreeSet<ArtifactKey>,
+    backend_mode: String,
+    backend_detail: String,
+    detail: String,
+) -> ObservedProgram {
+    ObservedProgram {
+        observation: CompilerObservation {
+            compiler: spec.clone(),
+            program: program.to_path_buf(),
+            opt_level,
+            compile_exit_code: 1,
+            artifacts: BTreeMap::from([(ArtifactKey::Diagnostics, ArtifactValue::Text(detail))]),
+            provenance: ObservationProvenance {
+                compiler_identity: spec.display_name(),
+                adapter_kind: match spec {
+                    CompilerSpec::Named(_) => "named".into(),
+                    CompilerSpec::Binary(_) => "explicit-path".into(),
+                },
+                backend_mode,
+                backend_detail,
+                artifacts_captured: vec!["diagnostics".into()],
+                comparison_basis: None,
+                failure_stage: None,
+            },
+        },
+        requested_artifacts: requested,
+    }
+}
+
+fn preflight_introspection_request(
+    spec: &CompilerSpec,
+    program: &Path,
+    opt_level: OptLevel,
+    requested: &BTreeSet<ArtifactKey>,
+    tools: &ToolchainConfig,
+) -> Option<ObservedProgram> {
+    let capabilities = compiler_capabilities(spec, tools);
+    let (backend_mode, backend_detail) = compiler_capability_backend(spec, tools);
+
+    let unavailable = capabilities.unavailable_requests(requested);
+    if !unavailable.is_empty() {
+        let detail = unavailable
+            .into_iter()
+            .map(|(artifact, reason)| format!("requested {}: {}", artifact, reason))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(observation_from_capability_mismatch(
+            spec,
+            program,
+            opt_level,
+            requested.clone(),
+            backend_mode,
+            backend_detail,
+            detail,
+        ));
+    }
+
+    let unsupported = capabilities.unsupported_requests(requested);
+    if !unsupported.is_empty() {
+        let detail = format!(
+            "{} does not support requested artifacts in this adapter: {}",
+            spec.display_name(),
+            unsupported.join(", ")
+        );
+        return Some(observation_from_capability_mismatch(
+            spec,
+            program,
+            opt_level,
+            requested.clone(),
+            backend_mode,
+            backend_detail,
+            detail,
+        ));
+    }
+
+    None
 }
 
 fn tool_override(var: &str, default: &str) -> String {
@@ -1082,6 +1270,15 @@ fn run_introspect(config: &IntrospectConfig) -> Result<ObservedProgram, String> 
         }
         requested
     };
+    if let Some(observed) = preflight_introspection_request(
+        &config.compiler,
+        &config.program,
+        config.opt_level,
+        &requested,
+        &config.tools,
+    ) {
+        return Ok(observed);
+    }
     Ok(ObservedProgram {
         observation: observe_compiler(
             &config.compiler,
@@ -2918,18 +3115,66 @@ fn render_doctor_report(config: &DoctorConfig) -> String {
         armfortas.cli_mode_name(),
         armfortas.capture_mode_name()
     ));
+    let armfortas_capabilities = compiler_capabilities(
+        &CompilerSpec::Named(NamedCompiler::Armfortas),
+        &config.tools,
+    );
+    lines.push(format!(
+        "  named_compiler.armfortas.generic_artifacts: {}",
+        format_artifact_name_list(&armfortas_capabilities.generic_artifacts())
+    ));
+    lines.push(format!(
+        "  named_compiler.armfortas.adapter_extras: {}",
+        capability_extra_summary(&armfortas_capabilities.adapter_extras())
+    ));
+    lines.push(format!(
+        "  named_compiler.armfortas.unavailable_artifacts: {}",
+        capability_unavailable_summary(&armfortas_capabilities)
+    ));
     lines.push(format!(
         "  named_compiler.gfortran: {}",
         tool_probe_status(&config.tools.gfortran, false)
+    ));
+    let gfortran_capabilities =
+        compiler_capabilities(&CompilerSpec::Named(NamedCompiler::Gfortran), &config.tools);
+    lines.push(format!(
+        "  named_compiler.gfortran.generic_artifacts: {}",
+        format_artifact_name_list(&gfortran_capabilities.generic_artifacts())
+    ));
+    lines.push(format!(
+        "  named_compiler.gfortran.adapter_extras: {}",
+        capability_extra_summary(&gfortran_capabilities.adapter_extras())
     ));
     lines.push(format!(
         "  named_compiler.flang-new: {}",
         tool_probe_status(&config.tools.flang_new, false)
     ));
+    let flang_capabilities =
+        compiler_capabilities(&CompilerSpec::Named(NamedCompiler::FlangNew), &config.tools);
+    lines.push(format!(
+        "  named_compiler.flang-new.generic_artifacts: {}",
+        format_artifact_name_list(&flang_capabilities.generic_artifacts())
+    ));
+    lines.push(format!(
+        "  named_compiler.flang-new.adapter_extras: {}",
+        capability_extra_summary(&flang_capabilities.adapter_extras())
+    ));
     lines.push(
         "  explicit_compiler_path: any filesystem path passed to compare/introspect uses the generic external-driver adapter"
             .to_string(),
     );
+    let explicit_capabilities = compiler_capabilities(
+        &CompilerSpec::Binary(PathBuf::from("/path/to/compiler")),
+        &config.tools,
+    );
+    lines.push(format!(
+        "  explicit_compiler_path.generic_artifacts: {}",
+        format_artifact_name_list(&explicit_capabilities.generic_artifacts())
+    ));
+    lines.push(format!(
+        "  explicit_compiler_path.adapter_extras: {}",
+        capability_extra_summary(&explicit_capabilities.adapter_extras())
+    ));
     lines.push(format!(
         "  gfortran: {}",
         tool_probe_status(&config.tools.gfortran, false)
@@ -10792,6 +11037,34 @@ mod tests {
     }
 
     #[test]
+    fn introspect_named_external_compiler_rejects_namespaced_artifacts() {
+        let config = IntrospectConfig {
+            compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+            program: runtime_fixture("if_else.f90"),
+            opt_level: OptLevel::O0,
+            artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.ir".into())]),
+            json_report: None,
+            markdown_report: None,
+            all_artifacts: false,
+            summary_only: false,
+            max_artifact_lines: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let observed = run_introspect(&config).unwrap();
+        let observation = &observed.observation;
+        assert_eq!(observation.compile_exit_code, 1);
+        assert_eq!(observation.provenance.backend_mode, "external-driver");
+        assert_eq!(observation.provenance.failure_stage, None);
+        let diagnostics = match observation.artifacts.get(&ArtifactKey::Diagnostics) {
+            Some(ArtifactValue::Text(text)) => text,
+            other => panic!("expected text diagnostics, got {:?}", other),
+        };
+        assert!(diagnostics.contains("does not support requested artifacts"));
+        assert!(diagnostics.contains("armfortas.ir"));
+    }
+
+    #[test]
     fn compose_observation_failure_detail_uses_unavailable_wording() {
         let observation = CompilerObservation {
             compiler: CompilerSpec::Named(NamedCompiler::Armfortas),
@@ -10800,9 +11073,7 @@ mod tests {
             compile_exit_code: 1,
             artifacts: BTreeMap::from([(
                 ArtifactKey::Diagnostics,
-                ArtifactValue::Text(
-                    "linked armfortas capture is unavailable in this build".into(),
-                ),
+                ArtifactValue::Text("linked armfortas capture is unavailable in this build".into()),
             )]),
             provenance: ObservationProvenance {
                 compiler_identity: "armfortas".into(),
@@ -12671,9 +12942,21 @@ end
             "primary_backend_selection: observable backend is selected for asm/obj/run-only cells"
         ));
         assert!(rendered.contains("named_compiler.armfortas: cli=external capture=linked"));
+        assert!(rendered.contains(
+            "named_compiler.armfortas.generic_artifacts: diagnostics, exit-code, stdout, stderr, asm, obj, executable, runtime"
+        ));
+        assert!(rendered.contains("named_compiler.armfortas.adapter_extras: armfortas("));
+        assert!(rendered.contains("named_compiler.armfortas.unavailable_artifacts: none"));
         assert!(rendered.contains("named_compiler.gfortran:"));
         assert!(rendered.contains(
+            "named_compiler.gfortran.generic_artifacts: diagnostics, exit-code, stdout, stderr, asm, obj, executable, runtime"
+        ));
+        assert!(rendered.contains("named_compiler.gfortran.adapter_extras: none"));
+        assert!(rendered.contains(
             "explicit_compiler_path: any filesystem path passed to compare/introspect uses the generic external-driver adapter"
+        ));
+        assert!(rendered.contains(
+            "explicit_compiler_path.generic_artifacts: diagnostics, exit-code, stdout, stderr, asm, obj, executable, runtime"
         ));
         assert!(rendered.contains(&format!(
             "configured={} resolved={}",
