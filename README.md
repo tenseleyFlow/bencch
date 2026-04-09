@@ -108,6 +108,12 @@ cargo run -p afs-tests --bin bencch -- doctor
 `doctor` now also lists the generic artifacts and namespaced adapter extras
 that each named compiler surface can provide in the current build.
 
+Write the same `doctor` snapshot to JSON and Markdown:
+
+```bash
+cargo run -p afs-tests --bin bencch -- doctor --json-report reports/doctor.json --markdown-report reports/doctor.md
+```
+
 Generate a local linked workspace against an external `armfortas` checkout:
 
 ```bash
