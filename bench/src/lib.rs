@@ -205,6 +205,13 @@ impl ConsistencyCheck {
                 | Self::CaptureRunReproducible
         )
     }
+
+    fn supports_generic_introspect(&self) -> bool {
+        matches!(
+            self,
+            Self::CliAsmReproducible | Self::CliObjReproducible | Self::CliRunReproducible
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3177,14 +3184,35 @@ impl CaseBuilder {
             ));
         };
 
-        if generic_mode_count > 0
+        if self.generic_compare.is_some()
             && (!self.reference_compilers.is_empty() || !self.consistency_checks.is_empty())
         {
             return Err(format!(
-                "{}: case '{}' uses suite-v2 syntax with differential/consistency rules; that surface is not supported yet",
+                "{}: case '{}' compare suite-v2 cases do not support differential/consistency rules",
                 suite_path.display(),
                 self.name
             ));
+        }
+
+        if self.generic_compiler.is_some() {
+            let unsupported = self
+                .consistency_checks
+                .iter()
+                .copied()
+                .filter(|check| !check.supports_generic_introspect())
+                .collect::<Vec<_>>();
+            if !unsupported.is_empty() {
+                return Err(format!(
+                    "{}: case '{}' generic compiler cases only support cli_asm_reproducible, cli_obj_reproducible, and cli_run_reproducible today (unsupported: {})",
+                    suite_path.display(),
+                    self.name,
+                    unsupported
+                        .iter()
+                        .map(ConsistencyCheck::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
 
         let needs_source_comment_resolution = self
@@ -4387,6 +4415,27 @@ fn execute_generic_introspect_case_cell(
         println!("  compiler: {}", generic.compiler.display_name());
         println!("  opt: {}", opt_level.as_str());
         println!("  artifacts: {}", artifacts);
+        if !case.reference_compilers.is_empty() {
+            println!(
+                "  refs: {}",
+                case.reference_compilers
+                    .iter()
+                    .map(ReferenceCompiler::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !case.consistency_checks.is_empty() {
+            println!(
+                "  consistency: {}",
+                case.consistency_checks
+                    .iter()
+                    .map(ConsistencyCheck::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            println!("  repeat: {}", case.repeat_count);
+        }
     }
 
     let observed = run_introspect(&IntrospectConfig {
@@ -4402,7 +4451,7 @@ fn execute_generic_introspect_case_cell(
         tools: config.tools.clone(),
     })?;
 
-    let execution = if observed.observation.compile_exit_code == 0 {
+    let mut execution = if observed.observation.compile_exit_code == 0 {
         if has_failure_expectation(case) {
             Err(format!(
                 "expected {} to fail ({}) but compilation succeeded",
@@ -4418,6 +4467,35 @@ fn execute_generic_introspect_case_cell(
         Err(compose_observation_failure_detail(&observed.observation))
     };
 
+    if execution.is_ok() && !case.reference_compilers.is_empty() {
+        execution = run_generic_differential(
+            &generic.compiler,
+            &prepared.compiler_source,
+            opt_level,
+            &case.reference_compilers,
+            &config.tools,
+        );
+    }
+
+    let mut consistency_issues = Vec::new();
+    if execution.is_ok() && !case.consistency_checks.is_empty() {
+        consistency_issues = run_generic_consistency_checks(
+            &generic.compiler,
+            case,
+            &prepared.compiler_source,
+            opt_level,
+            &config.tools,
+        );
+        if !consistency_issues.is_empty() {
+            execution = Err(format_consistency_issues(&consistency_issues));
+        }
+    }
+
+    let consistency_observations = consistency_issues
+        .iter()
+        .map(ConsistencyIssue::observation)
+        .collect::<Vec<_>>();
+
     let mut outcome = match (effective_status, execution) {
         (EffectiveStatus::Normal, Ok(())) => Outcome {
             suite: suite.name.clone(),
@@ -4427,7 +4505,7 @@ fn execute_generic_introspect_case_cell(
             detail: String::new(),
             bundle: None,
             primary_backend: None,
-            consistency_observations: Vec::new(),
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Normal, Err(detail)) => Outcome {
             suite: suite.name.clone(),
@@ -4437,7 +4515,7 @@ fn execute_generic_introspect_case_cell(
             detail,
             bundle: None,
             primary_backend: None,
-            consistency_observations: Vec::new(),
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
             suite: suite.name.clone(),
@@ -4447,7 +4525,7 @@ fn execute_generic_introspect_case_cell(
             detail: reason,
             bundle: None,
             primary_backend: None,
-            consistency_observations: Vec::new(),
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
             suite: suite.name.clone(),
@@ -4457,7 +4535,7 @@ fn execute_generic_introspect_case_cell(
             detail: format!("{}\n{}", reason, detail),
             bundle: None,
             primary_backend: None,
-            consistency_observations: Vec::new(),
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Future(reason), Ok(())) => Outcome {
             suite: suite.name.clone(),
@@ -4467,7 +4545,7 @@ fn execute_generic_introspect_case_cell(
             detail: reason,
             bundle: None,
             primary_backend: None,
-            consistency_observations: Vec::new(),
+            consistency_observations: consistency_observations.clone(),
         },
         (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
             suite: suite.name.clone(),
@@ -4477,11 +4555,12 @@ fn execute_generic_introspect_case_cell(
             detail: format!("{}\n{}", reason, detail),
             bundle: None,
             primary_backend: None,
-            consistency_observations: Vec::new(),
+            consistency_observations,
         },
     };
 
     outcome.detail = outcome.detail.trim().to_string();
+    cleanup_consistency_issues(&consistency_issues);
     Ok(outcome)
 }
 
@@ -5238,6 +5317,24 @@ fn compose_observation_failure_detail(observation: &CompilerObservation) -> Stri
     detail
 }
 
+fn run_generic_differential(
+    compiler: &CompilerSpec,
+    program: &Path,
+    opt_level: OptLevel,
+    references: &[ReferenceCompiler],
+    tools: &ToolchainConfig,
+) -> Result<(), String> {
+    let requested = default_differential_artifacts();
+    let primary = observe_compiler(compiler, program, opt_level, &requested, tools)?;
+    let references = references
+        .iter()
+        .copied()
+        .map(reference_compiler_spec)
+        .map(|reference| observe_compiler(&reference, program, opt_level, &requested, tools))
+        .collect::<Result<Vec<_>, _>>()?;
+    compare_differential(&primary, &references)
+}
+
 fn expected_artifacts_for_legacy_case(case: &CaseSpec) -> BTreeSet<ArtifactKey> {
     let mut requested = BTreeSet::new();
     for stage in &case.requested {
@@ -5421,6 +5518,474 @@ fn observed_program_from_reference_result(
         },
         requested_artifacts,
     }
+}
+
+fn reference_compiler_spec(compiler: ReferenceCompiler) -> CompilerSpec {
+    match compiler {
+        ReferenceCompiler::Gfortran => CompilerSpec::Named(NamedCompiler::Gfortran),
+        ReferenceCompiler::FlangNew => CompilerSpec::Named(NamedCompiler::FlangNew),
+    }
+}
+
+fn run_generic_consistency_checks(
+    compiler: &CompilerSpec,
+    case: &CaseSpec,
+    source: &Path,
+    opt_level: OptLevel,
+    tools: &ToolchainConfig,
+) -> Vec<ConsistencyIssue> {
+    let mut failures = Vec::new();
+    for check in &case.consistency_checks {
+        let issue = match check {
+            ConsistencyCheck::CliAsmReproducible => run_generic_cli_asm_reproducible(
+                compiler,
+                source,
+                opt_level,
+                case.repeat_count,
+                tools,
+            ),
+            ConsistencyCheck::CliObjReproducible => run_generic_cli_obj_reproducible(
+                compiler,
+                source,
+                opt_level,
+                case.repeat_count,
+                tools,
+            ),
+            ConsistencyCheck::CliRunReproducible => run_generic_cli_run_reproducible(
+                compiler,
+                source,
+                opt_level,
+                case.repeat_count,
+                tools,
+            ),
+            _ => Some(ConsistencyIssue {
+                check: *check,
+                summary: "unsupported generic consistency check".into(),
+                repeat_count: None,
+                unique_variant_count: None,
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!(
+                    "generic compiler cases do not support '{}' yet",
+                    check.as_str()
+                ),
+                temp_root: next_consistency_temp_root(opt_level),
+            }),
+        };
+        if let Some(issue) = issue {
+            failures.push(issue);
+        }
+    }
+    failures
+}
+
+fn run_generic_cli_asm_reproducible(
+    compiler: &CompilerSpec,
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    tools: &ToolchainConfig,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliAsmReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let requested = BTreeSet::from([ArtifactKey::Asm]);
+    let mut runs = Vec::new();
+    for index in 0..repeat_count {
+        let observation = match observe_compiler(compiler, source, opt_level, &requested, tools) {
+            Ok(observation) => observation,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliAsmReproducible,
+                    summary: "compiler observation failed during consistency check".into(),
+                    repeat_count: Some(repeat_count),
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let asm = match observation_text_artifact(&observation, &ArtifactKey::Asm) {
+            Ok(asm) => asm,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliAsmReproducible,
+                    summary: "missing asm artifact during consistency check".into(),
+                    repeat_count: Some(repeat_count),
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        runs.push(TextRun {
+            label: format!("run {}", index + 1),
+            command: observation_command_hint(&observation),
+            normalized: normalize_text_artifact(&asm),
+        });
+    }
+
+    let unique_variant_count = count_unique_strings(runs.iter().map(|run| run.normalized.as_str()));
+    if unique_variant_count > 1 {
+        let (left, right) = first_distinct_text_pair(&runs).unwrap();
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliAsmReproducible,
+            summary: format!(
+                "repeat_count={} unique_variants={}",
+                repeat_count, unique_variant_count
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variant_count),
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "asm output was not reproducible for {}\n{}\n{}\n{}",
+                compiler.display_name(),
+                left.command,
+                right.command,
+                describe_text_difference(
+                    &left.normalized,
+                    &right.normalized,
+                    &left.label,
+                    &right.label
+                )
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
+fn run_generic_cli_obj_reproducible(
+    compiler: &CompilerSpec,
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    tools: &ToolchainConfig,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliObjReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let requested = BTreeSet::from([ArtifactKey::Obj]);
+    let mut rendered_runs = Vec::new();
+    let mut object_runs = Vec::new();
+    let mut parseable = true;
+    for index in 0..repeat_count {
+        let observation = match observe_compiler(compiler, source, opt_level, &requested, tools) {
+            Ok(observation) => observation,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliObjReproducible,
+                    summary: "compiler observation failed during consistency check".into(),
+                    repeat_count: Some(repeat_count),
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let obj_text = match observation_text_artifact(&observation, &ArtifactKey::Obj) {
+            Ok(text) => text,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliObjReproducible,
+                    summary: "missing obj artifact during consistency check".into(),
+                    repeat_count: Some(repeat_count),
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let label = format!("run {}", index + 1);
+        let command = observation_command_hint(&observation);
+        rendered_runs.push(TextRun {
+            label: label.clone(),
+            command: command.clone(),
+            normalized: normalize_text_artifact(&obj_text),
+        });
+        match parse_object_snapshot_text(&obj_text) {
+            Ok(snapshot) => object_runs.push(ObjectRun {
+                label,
+                command,
+                snapshot,
+            }),
+            Err(_) => parseable = false,
+        }
+    }
+
+    if parseable {
+        let rendered = object_runs
+            .iter()
+            .map(|run| render_object_snapshot(&run.snapshot))
+            .collect::<Vec<_>>();
+        let unique_variant_count = count_unique_strings(rendered.iter().map(String::as_str));
+        if unique_variant_count > 1 {
+            let (left, right) = first_distinct_object_pair(&object_runs).unwrap();
+            let snapshots = object_runs
+                .iter()
+                .map(|run| &run.snapshot)
+                .collect::<Vec<_>>();
+            let varying = varying_object_components(&snapshots)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let stable = stable_object_components(&snapshots)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjReproducible,
+                summary: format!(
+                    "repeat_count={} unique_variants={} varying_components={} stable_components={}",
+                    repeat_count,
+                    unique_variant_count,
+                    join_or_none_from_strings(&varying),
+                    join_or_none_from_strings(&stable)
+                ),
+                repeat_count: Some(repeat_count),
+                unique_variant_count: Some(unique_variant_count),
+                varying_components: varying,
+                stable_components: stable,
+                detail: format!(
+                    "object output was not reproducible for {}\n{}\n{}\n{}",
+                    compiler.display_name(),
+                    left.command,
+                    right.command,
+                    describe_object_difference(
+                        &left.snapshot,
+                        &right.snapshot,
+                        &left.label,
+                        &right.label
+                    )
+                ),
+                temp_root,
+            });
+        }
+    } else {
+        let unique_variant_count =
+            count_unique_strings(rendered_runs.iter().map(|run| run.normalized.as_str()));
+        if unique_variant_count > 1 {
+            let (left, right) = first_distinct_text_pair(&rendered_runs).unwrap();
+            return Some(ConsistencyIssue {
+                check: ConsistencyCheck::CliObjReproducible,
+                summary: format!(
+                    "repeat_count={} unique_variants={}",
+                    repeat_count, unique_variant_count
+                ),
+                repeat_count: Some(repeat_count),
+                unique_variant_count: Some(unique_variant_count),
+                varying_components: Vec::new(),
+                stable_components: Vec::new(),
+                detail: format!(
+                    "object artifact text was not reproducible for {}\n{}\n{}\n{}",
+                    compiler.display_name(),
+                    left.command,
+                    right.command,
+                    describe_text_difference(
+                        &left.normalized,
+                        &right.normalized,
+                        &left.label,
+                        &right.label
+                    )
+                ),
+                temp_root,
+            });
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
+fn run_generic_cli_run_reproducible(
+    compiler: &CompilerSpec,
+    source: &Path,
+    opt_level: OptLevel,
+    repeat_count: usize,
+    tools: &ToolchainConfig,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliRunReproducible,
+            summary: "could not create consistency temp dir".into(),
+            repeat_count: None,
+            unique_variant_count: None,
+            varying_components: Vec::new(),
+            stable_components: Vec::new(),
+            detail: format!(
+                "cannot create consistency temp dir '{}': {}",
+                temp_root.display(),
+                err
+            ),
+            temp_root,
+        });
+    }
+
+    let requested = BTreeSet::from([ArtifactKey::Runtime]);
+    let mut runs = Vec::new();
+    for index in 0..repeat_count {
+        let observation = match observe_compiler(compiler, source, opt_level, &requested, tools) {
+            Ok(observation) => observation,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliRunReproducible,
+                    summary: "compiler observation failed during consistency check".into(),
+                    repeat_count: Some(repeat_count),
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        let run = match observation_run_capture(&observation) {
+            Ok(run) => run,
+            Err(detail) => {
+                return Some(ConsistencyIssue {
+                    check: ConsistencyCheck::CliRunReproducible,
+                    summary: "missing runtime artifact during consistency check".into(),
+                    repeat_count: Some(repeat_count),
+                    unique_variant_count: None,
+                    varying_components: Vec::new(),
+                    stable_components: Vec::new(),
+                    detail,
+                    temp_root,
+                })
+            }
+        };
+        runs.push(BehaviorRun {
+            label: format!("run {}", index + 1),
+            command: observation_command_hint(&observation),
+            signature: normalize_run_signature(&run),
+            run,
+        });
+    }
+
+    let unique_variant_count = count_unique_run_signatures(runs.iter().map(|run| &run.signature));
+    if unique_variant_count > 1 {
+        let (left, right) = first_distinct_behavior_pair(&runs).unwrap();
+        let signatures = runs.iter().map(|run| &run.signature).collect::<Vec<_>>();
+        let varying = varying_run_components(&signatures)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let stable = stable_run_components(&signatures)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        return Some(ConsistencyIssue {
+            check: ConsistencyCheck::CliRunReproducible,
+            summary: format!(
+                "repeat_count={} unique_variants={} varying_components={} stable_components={}",
+                repeat_count,
+                unique_variant_count,
+                join_or_none_from_strings(&varying),
+                join_or_none_from_strings(&stable)
+            ),
+            repeat_count: Some(repeat_count),
+            unique_variant_count: Some(unique_variant_count),
+            varying_components: varying,
+            stable_components: stable,
+            detail: format!(
+                "runtime behavior was not reproducible for {}\n{}\n{}\n{}",
+                compiler.display_name(),
+                left.command,
+                right.command,
+                describe_run_difference(&left.run, &right.run, &left.label, &right.label)
+            ),
+            temp_root,
+        });
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    None
+}
+
+fn observation_text_artifact(
+    observation: &CompilerObservation,
+    artifact: &ArtifactKey,
+) -> Result<String, String> {
+    match observation.artifacts.get(artifact) {
+        Some(ArtifactValue::Text(text)) => Ok(text.clone()),
+        Some(ArtifactValue::Int(_)) => Err(format!(
+            "artifact '{}' is numeric, not text",
+            artifact.as_str()
+        )),
+        Some(ArtifactValue::Run(_)) => Err(format!(
+            "artifact '{}' is structured runtime data, not text",
+            artifact.as_str()
+        )),
+        Some(ArtifactValue::Path(path)) => Err(format!(
+            "artifact '{}' is path data ('{}'), not text",
+            artifact.as_str(),
+            path.display()
+        )),
+        None => Err(format!("missing artifact '{}'", artifact.as_str())),
+    }
+}
+
+fn observation_run_capture(observation: &CompilerObservation) -> Result<RunCapture, String> {
+    if let Some(ArtifactValue::Run(run)) = observation.artifacts.get(&ArtifactKey::Runtime) {
+        return Ok(run.clone());
+    }
+
+    Ok(RunCapture {
+        exit_code: observation_run_exit_code(observation)?,
+        stdout: observation_run_stdout(observation)?.to_string(),
+        stderr: observation_run_stderr(observation)?.to_string(),
+    })
+}
+
+fn observation_command_hint(observation: &CompilerObservation) -> String {
+    format!(
+        "{} [{}; {}]",
+        observation.compiler.display_name(),
+        observation.provenance.backend_mode,
+        observation.provenance.backend_detail
+    )
 }
 
 fn run_consistency_checks(
@@ -9819,6 +10384,121 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn execute_generic_suite_case_supports_cli_consistency() {
+        let compiler = fake_compiler_fixture("match_42_a.sh");
+        ensure_fixture_executable(&compiler);
+
+        let suite = SuiteSpec {
+            name: "v2/generic-consistency".into(),
+            path: PathBuf::from("suite.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "fake-runtime-consistency".into(),
+            source: runtime_fixture("if_else.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: Some(GenericIntrospectCase {
+                compiler: CompilerSpec::Binary(compiler),
+                artifacts: BTreeSet::from([ArtifactKey::Asm, ArtifactKey::Runtime]),
+            }),
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 3,
+            reference_compilers: Vec::new(),
+            consistency_checks: vec![
+                ConsistencyCheck::CliAsmReproducible,
+                ConsistencyCheck::CliRunReproducible,
+            ],
+            expectations: vec![
+                Expectation::Contains {
+                    target: Target::Artifact(ArtifactKey::Asm),
+                    needle: ".globl _main".into(),
+                },
+                Expectation::Contains {
+                    target: Target::RunStdout,
+                    needle: "42".into(),
+                },
+            ],
+            status_rules: Vec::new(),
+        };
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let outcome = execute_case_cell(&suite, &case, OptLevel::O0, &config).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Pass);
+        assert!(outcome.detail.is_empty());
+        assert!(outcome.consistency_observations.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_generic_suite_case_supports_differential_when_available() {
+        if !command_is_available("gfortran") || !command_is_available("flang-new") {
+            return;
+        }
+
+        let suite = SuiteSpec {
+            name: "v2/generic-differential".into(),
+            path: PathBuf::from("suite.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "gfortran-vs-flang".into(),
+            source: runtime_fixture("if_else.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::new(),
+            generic_introspect: Some(GenericIntrospectCase {
+                compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+                artifacts: BTreeSet::from([ArtifactKey::Runtime]),
+            }),
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: vec![ReferenceCompiler::FlangNew],
+            consistency_checks: Vec::new(),
+            expectations: vec![
+                Expectation::Contains {
+                    target: Target::RunStdout,
+                    needle: "positive".into(),
+                },
+                Expectation::IntEquals {
+                    target: Target::RunExitCode,
+                    value: 0,
+                },
+            ],
+            status_rules: Vec::new(),
+        };
+        let config = RunConfig {
+            suite_filter: None,
+            case_filter: None,
+            opt_filter: None,
+            verbose: false,
+            fail_fast: false,
+            include_future: false,
+            all_stages: false,
+            json_report: None,
+            markdown_report: None,
+            tools: ToolchainConfig::from_env(),
+        };
+
+        let outcome = execute_case_cell(&suite, &case, OptLevel::O0, &config).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Pass);
+        assert!(outcome.detail.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn execute_generic_compare_suite_case_uses_compare_engine() {
         let left = fake_compiler_fixture("match_42_a.sh");
         let right = fake_compiler_fixture("runtime_41.sh");
@@ -9953,6 +10633,70 @@ end
         assert!(generic.artifacts.contains(&ArtifactKey::Obj));
         assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
         assert!(case.requested.is_empty());
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parses_generic_compiler_case_with_differential_and_cli_consistency() {
+        let root = std::env::temp_dir().join("bencch_generic_differential_parser_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "v2/generic-differential"
+
+case "gfortran_runtime_matrix"
+source "../../fixtures/runtime/if_else.f90"
+opts => O0, O1, O2
+repeat => 3
+compiler gfortran => runtime, asm
+differential => flang-new
+consistency => cli_asm_reproducible, cli_run_reproducible
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+"#,
+        )
+        .unwrap();
+
+        let suite = parse_suite_file(&root).unwrap();
+        let case = &suite.cases[0];
+        let generic = case.generic_introspect.as_ref().unwrap();
+        assert_eq!(
+            generic.compiler,
+            CompilerSpec::Named(NamedCompiler::Gfortran)
+        );
+        assert!(generic.artifacts.contains(&ArtifactKey::Runtime));
+        assert!(generic.artifacts.contains(&ArtifactKey::Asm));
+        assert_eq!(case.reference_compilers, vec![ReferenceCompiler::FlangNew]);
+        assert_eq!(
+            case.consistency_checks,
+            vec![
+                ConsistencyCheck::CliAsmReproducible,
+                ConsistencyCheck::CliRunReproducible,
+            ]
+        );
+        let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn rejects_capture_consistency_on_generic_compiler_case() {
+        let root = std::env::temp_dir().join("bencch_generic_capture_consistency_parser_spec.afs");
+        fs::write(
+            &root,
+            r#"suite "v2/generic-consistency"
+
+case "armfortas_capture_run"
+source "../../fixtures/runtime/if_else.f90"
+compiler armfortas => runtime
+consistency => capture_run_reproducible
+expect run.exit_code equals 0
+end
+"#,
+        )
+        .unwrap();
+
+        let err = parse_suite_file(&root).unwrap_err();
+        assert!(err.contains("generic compiler cases only support"));
+        assert!(err.contains("capture_run_reproducible"));
         let _ = fs::remove_file(&root);
     }
 
