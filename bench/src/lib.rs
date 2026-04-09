@@ -442,6 +442,7 @@ struct ExecutionArtifacts {
     armfortas_failure: Option<CaptureFailure>,
     armfortas_observation: Option<ObservedProgram>,
     references: Vec<ReferenceResult>,
+    reference_observations: Vec<ObservedProgram>,
     consistency_issues: Vec<ConsistencyIssue>,
 }
 
@@ -4070,8 +4071,21 @@ fn execute_case_cell(
         armfortas_failure: None,
         armfortas_observation: None,
         references,
+        reference_observations: Vec::new(),
         consistency_issues: Vec::new(),
     };
+    artifacts.reference_observations = artifacts
+        .references
+        .iter()
+        .map(|reference| {
+            observed_program_from_reference_result(
+                &prepared.compiler_source,
+                opt_level,
+                default_differential_artifacts(),
+                reference,
+            )
+        })
+        .collect();
 
     match execute_primary_armfortas(
         &prepared,
@@ -4102,19 +4116,10 @@ fn execute_case_cell(
                 artifacts.armfortas_observation = Some(observed.clone());
                 let mut execution = evaluate_observation_expectations(case, &observed);
                 if execution.is_ok() && !artifacts.references.is_empty() {
-                    let requested = default_differential_artifacts();
                     let references = artifacts
-                        .references
+                        .reference_observations
                         .iter()
-                        .map(|reference| {
-                            observed_program_from_reference_result(
-                                &prepared.compiler_source,
-                                opt_level,
-                                requested.clone(),
-                                reference,
-                            )
-                            .observation
-                        })
+                        .map(|observed| observed.observation.clone())
                         .collect::<Vec<_>>();
                     execution = compare_differential(&observed.observation, &references);
                 }
@@ -8917,12 +8922,13 @@ fn write_failure_bundle(
         let refs_root = bundle_root.join("references");
         fs::create_dir_all(&refs_root)
             .map_err(|e| format!("cannot create references bundle dir: {}", e))?;
-        for reference in &artifacts.references {
+        for (index, reference) in artifacts.references.iter().enumerate() {
             write_reference_bundle(
                 &refs_root,
                 &prepared.compiler_source,
                 outcome.opt_level,
                 reference,
+                artifacts.reference_observations.get(index),
             )?;
         }
     }
@@ -9144,6 +9150,7 @@ fn write_reference_bundle(
     program: &Path,
     opt_level: OptLevel,
     reference: &ReferenceResult,
+    observed: Option<&ObservedProgram>,
 ) -> Result<(), String> {
     let ref_root = root.join(sanitize_component(reference.compiler.as_str()));
     fs::create_dir_all(&ref_root)
@@ -9180,7 +9187,7 @@ fn write_reference_bundle(
         fs::write(ref_root.join("run.error.txt"), err)
             .map_err(|e| format!("cannot write reference run error bundle: {}", e))?;
     }
-    write_reference_observation_bundle(&ref_root, program, opt_level, reference)?;
+    write_reference_observation_bundle(&ref_root, program, opt_level, reference, observed)?;
     Ok(())
 }
 
@@ -9189,13 +9196,16 @@ fn write_reference_observation_bundle(
     program: &Path,
     opt_level: OptLevel,
     reference: &ReferenceResult,
+    observed: Option<&ObservedProgram>,
 ) -> Result<(), String> {
-    let observed = observed_program_from_reference_result(
-        program,
-        opt_level,
-        default_differential_artifacts(),
-        reference,
-    );
+    let observed = observed.cloned().unwrap_or_else(|| {
+        observed_program_from_reference_result(
+            program,
+            opt_level,
+            default_differential_artifacts(),
+            reference,
+        )
+    });
     let render_config = IntrospectionRenderConfig {
         summary_only: false,
         max_artifact_lines: None,
@@ -11555,6 +11565,28 @@ end
                 }),
                 run_error: None,
             }],
+            reference_observations: vec![ObservedProgram {
+                observation: CompilerObservation {
+                    compiler: CompilerSpec::Named(NamedCompiler::Gfortran),
+                    program: source.clone(),
+                    opt_level: OptLevel::O0,
+                    compile_exit_code: 0,
+                    artifacts: BTreeMap::from([(
+                        ArtifactKey::Asm,
+                        ArtifactValue::Text(".globl _main".into()),
+                    )]),
+                    provenance: ObservationProvenance {
+                        compiler_identity: "gfortran".into(),
+                        adapter_kind: "named".into(),
+                        backend_mode: "legacy-reference".into(),
+                        backend_detail: "cached reference observation".into(),
+                        artifacts_captured: vec!["asm".into()],
+                        comparison_basis: None,
+                        failure_stage: None,
+                    },
+                },
+                requested_artifacts: BTreeSet::from([ArtifactKey::Asm]),
+            }],
             consistency_issues: {
                 let asm_temp_root =
                     std::env::temp_dir().join("afs_tests_consistency_bundle_issue_asm");
@@ -11678,8 +11710,9 @@ end
         assert!(reference_observation.contains("Introspect"));
         assert!(reference_observation.contains("compiler: gfortran"));
         assert!(reference_observation.contains("status: compile ok"));
-        assert!(reference_observation.contains("requested_artifacts: diagnostics, runtime"));
-        assert!(reference_observation.contains("generic_artifacts: runtime"));
+        assert!(reference_observation.contains("requested_artifacts: asm"));
+        assert!(reference_observation.contains("generic_artifacts: asm"));
+        assert!(reference_observation.contains("cached reference observation"));
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
         assert!(consistency_summary.contains("issue_count: 2"));
@@ -11822,6 +11855,7 @@ end
             armfortas_failure: None,
             armfortas_observation: None,
             references: Vec::new(),
+            reference_observations: Vec::new(),
             consistency_issues: Vec::new(),
         };
         let prepared = PreparedInput {
@@ -11873,6 +11907,7 @@ end
                 requested_artifacts: BTreeSet::from([ArtifactKey::Extra("armfortas.sema".into())]),
             }),
             references: Vec::new(),
+            reference_observations: Vec::new(),
             consistency_issues: Vec::new(),
         };
 
@@ -12604,6 +12639,7 @@ end
             armfortas_failure: None,
             armfortas_observation: None,
             references: Vec::new(),
+            reference_observations: Vec::new(),
             consistency_issues: Vec::new(),
         };
         let failure = CaptureFailure {
@@ -12639,6 +12675,7 @@ end
             armfortas_failure: None,
             armfortas_observation: None,
             references: Vec::new(),
+            reference_observations: Vec::new(),
             consistency_issues: Vec::new(),
         };
         let failure = CaptureFailure {
@@ -12728,6 +12765,7 @@ end
             armfortas_failure: Some(failure.clone()),
             armfortas_observation: None,
             references: Vec::new(),
+            reference_observations: Vec::new(),
             consistency_issues: Vec::new(),
         };
 
@@ -12769,6 +12807,7 @@ end
             armfortas_failure: Some(failure.clone()),
             armfortas_observation: None,
             references: Vec::new(),
+            reference_observations: Vec::new(),
             consistency_issues: Vec::new(),
         };
 
