@@ -45,6 +45,22 @@ cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch 
 That mode drops linked capture entirely and keeps the generic external-driver
 surface available for `compare`, `introspect`, and external-facing `run` work.
 
+Example external-only introspection:
+
+```bash
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- introspect fixtures/fake_compilers/match_42_a.sh fixtures/runtime/if_else.f90 --artifact asm,runtime
+```
+
+Example external-only authored suite run:
+
+```bash
+cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-introspect --case fake_compiler_runtime --all
+```
+
+Legacy rich-stage suites still need linked capture. In an external-only build,
+they now fail early with a direct message telling you to use
+`scripts/bootstrap-linked-armfortas.sh`.
+
 ## Usage
 
 List suites:

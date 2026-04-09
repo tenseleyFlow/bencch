@@ -53,7 +53,27 @@ jobs:
           grep "armfortas_capture_mode: unavailable" doctor.txt
           grep "linked capture is unavailable in this build" doctor.txt
 
+      - name: Verify external-only introspect
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- introspect fixtures/fake_compilers/match_42_a.sh fixtures/runtime/if_else.f90 --artifact asm,runtime > introspect.txt
+          grep "backend_mode: external-driver" introspect.txt
+          grep "requested_artifacts: asm, runtime" introspect.txt
+
       - name: Verify external-only compare
         run: |
           cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- compare fixtures/fake_compilers/match_42_a.sh fixtures/fake_compilers/match_42_b.sh --program fixtures/runtime/if_else.f90 > compare.txt
-          grep "status: MATCH" compare.txt
+          grep "status: match" compare.txt
+
+      - name: Verify external-only generic suite run
+        run: |
+          cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite v2/generic-introspect --case fake_compiler_runtime --all > run.txt
+          grep "PASS   v2/generic-introspect::fake_compiler_runtime\\[O0\\]" run.txt
+
+      - name: Verify linked-only suite guidance
+        run: |
+          if cargo run --manifest-path .bencch-external/Cargo.toml -p afs-tests --bin bencch -- run --suite frontend --case stage_walk --all > legacy.txt 2>&1; then
+            echo "expected linked-only suite to fail in external-only build" >&2
+            exit 1
+          fi
+          grep "case requires linked armfortas capture" legacy.txt
+          grep "scripts/bootstrap-linked-armfortas.sh" legacy.txt
