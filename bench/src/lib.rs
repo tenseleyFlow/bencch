@@ -4049,6 +4049,19 @@ fn execute_case_cell(
     let selected_backend =
         select_primary_capture_backend(case, &requested, opt_level, &config.tools);
 
+    if let Some(detail) = legacy_unavailable_backend_detail(case, &selected_backend) {
+        cleanup_prepared_input(&prepared);
+        return Ok(outcome_from_status_and_execution(
+            suite,
+            case,
+            opt_level,
+            effective_status,
+            Err(detail),
+            Some(PrimaryBackendReport::from_selected(&selected_backend)),
+            Vec::new(),
+        ));
+    }
+
     if config.verbose {
         let stage_list = requested
             .iter()
@@ -4196,68 +4209,15 @@ fn execute_case_cell(
         .collect::<Vec<_>>();
     let primary_backend = Some(PrimaryBackendReport::from_selected(&selected_backend));
 
-    let mut outcome = match (effective_status, execution) {
-        (EffectiveStatus::Normal, Ok(())) => Outcome {
-            suite: suite.name.clone(),
-            case: case.name.clone(),
-            opt_level,
-            kind: OutcomeKind::Pass,
-            detail: String::new(),
-            bundle: None,
-            primary_backend: primary_backend.clone(),
-            consistency_observations: consistency_observations.clone(),
-        },
-        (EffectiveStatus::Normal, Err(detail)) => Outcome {
-            suite: suite.name.clone(),
-            case: case.name.clone(),
-            opt_level,
-            kind: OutcomeKind::Fail,
-            detail,
-            bundle: None,
-            primary_backend: primary_backend.clone(),
-            consistency_observations: consistency_observations.clone(),
-        },
-        (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
-            suite: suite.name.clone(),
-            case: case.name.clone(),
-            opt_level,
-            kind: OutcomeKind::Xpass,
-            detail: reason,
-            bundle: None,
-            primary_backend: primary_backend.clone(),
-            consistency_observations: consistency_observations.clone(),
-        },
-        (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
-            suite: suite.name.clone(),
-            case: case.name.clone(),
-            opt_level,
-            kind: OutcomeKind::Xfail,
-            detail: format!("{}\n{}", reason, detail),
-            bundle: None,
-            primary_backend: primary_backend.clone(),
-            consistency_observations: consistency_observations.clone(),
-        },
-        (EffectiveStatus::Future(reason), Ok(())) => Outcome {
-            suite: suite.name.clone(),
-            case: case.name.clone(),
-            opt_level,
-            kind: OutcomeKind::Pass,
-            detail: reason,
-            bundle: None,
-            primary_backend: primary_backend.clone(),
-            consistency_observations: consistency_observations.clone(),
-        },
-        (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
-            suite: suite.name.clone(),
-            case: case.name.clone(),
-            opt_level,
-            kind: OutcomeKind::Fail,
-            detail: format!("{}\n{}", reason, detail),
-            bundle: None,
-            primary_backend,
-            consistency_observations,
-        },
-    };
+    let mut outcome = outcome_from_status_and_execution(
+        suite,
+        case,
+        opt_level,
+        effective_status,
+        execution,
+        primary_backend,
+        consistency_observations,
+    );
 
     let should_bundle = matches!(outcome.kind, OutcomeKind::Fail | OutcomeKind::Xpass)
         || (matches!(outcome.kind, OutcomeKind::Xfail) && !artifacts.consistency_issues.is_empty());
@@ -5143,6 +5103,96 @@ fn has_failure_expectation(case: &CaseSpec) -> bool {
                 | Expectation::FailCommentPatterns(_)
         )
     })
+}
+
+fn legacy_unavailable_backend_detail(
+    case: &CaseSpec,
+    selected_backend: &SelectedPrimaryBackend,
+) -> Option<String> {
+    if selected_backend.kind == PrimaryCaptureBackendKind::Full
+        && selected_backend.backend.mode_name() == "unavailable"
+    {
+        Some(format!(
+            "case requires linked armfortas capture, but this build only provides the external-driver surface\nsource: {}\nrequired backend: {}\nuse scripts/bootstrap-linked-armfortas.sh for rich stages and legacy frontend/module suites, or run a generic suite-v2 / observable-only case instead",
+            case.source_label(),
+            selected_backend.backend.description()
+        ))
+    } else {
+        None
+    }
+}
+
+fn outcome_from_status_and_execution(
+    suite: &SuiteSpec,
+    case: &CaseSpec,
+    opt_level: OptLevel,
+    effective_status: EffectiveStatus,
+    execution: Result<(), String>,
+    primary_backend: Option<PrimaryBackendReport>,
+    consistency_observations: Vec<ConsistencyObservation>,
+) -> Outcome {
+    match (effective_status, execution) {
+        (EffectiveStatus::Normal, Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Pass,
+            detail: String::new(),
+            bundle: None,
+            primary_backend,
+            consistency_observations,
+        },
+        (EffectiveStatus::Normal, Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Fail,
+            detail,
+            bundle: None,
+            primary_backend,
+            consistency_observations,
+        },
+        (EffectiveStatus::Xfail(reason), Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xpass,
+            detail: reason,
+            bundle: None,
+            primary_backend,
+            consistency_observations,
+        },
+        (EffectiveStatus::Xfail(reason), Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Xfail,
+            detail: format!("{}\n{}", reason, detail),
+            bundle: None,
+            primary_backend,
+            consistency_observations,
+        },
+        (EffectiveStatus::Future(reason), Ok(())) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Pass,
+            detail: reason,
+            bundle: None,
+            primary_backend,
+            consistency_observations,
+        },
+        (EffectiveStatus::Future(reason), Err(detail)) => Outcome {
+            suite: suite.name.clone(),
+            case: case.name.clone(),
+            opt_level,
+            kind: OutcomeKind::Fail,
+            detail: format!("{}\n{}", reason, detail),
+            bundle: None,
+            primary_backend,
+            consistency_observations,
+        },
+    }
 }
 
 fn expected_failure_description(case: &CaseSpec) -> String {
@@ -9726,6 +9776,31 @@ fn target_uses_ir_comment_checks(target: &Target) -> bool {
 mod tests {
     use super::*;
 
+    struct DummyBackend {
+        mode: &'static str,
+        detail: &'static str,
+    }
+
+    impl CaptureBackend for DummyBackend {
+        fn mode_name(&self) -> &'static str {
+            self.mode
+        }
+
+        fn description(&self) -> &'static str {
+            self.detail
+        }
+
+        fn capture(&self, request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
+            Err(CaptureFailure {
+                input: request.input.clone(),
+                opt_level: request.opt_level,
+                stage: FailureStage::Ir,
+                detail: self.detail.to_string(),
+                stages: BTreeMap::new(),
+            })
+        }
+    }
+
     #[cfg(unix)]
     fn bencch_repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -9915,6 +9990,38 @@ mod tests {
             primary_backend_kind_for_case(&case, &asm_only_request, &external_tools),
             PrimaryCaptureBackendKind::Observable
         );
+    }
+
+    #[test]
+    fn legacy_unavailable_backend_detail_is_explicit() {
+        let case = CaseSpec {
+            name: "frontend_case".into(),
+            source: PathBuf::from("frontend.f90"),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Tokens]),
+            generic_introspect: None,
+            generic_compare: None,
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 1,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::Contains {
+                target: Target::Stage(Stage::Tokens),
+                needle: "program".into(),
+            }],
+            status_rules: Vec::new(),
+        };
+        let backend = SelectedPrimaryBackend {
+            kind: PrimaryCaptureBackendKind::Full,
+            backend: Box::new(DummyBackend {
+                mode: "unavailable",
+                detail: "unavailable without linked-armfortas feature",
+            }),
+        };
+
+        let detail = legacy_unavailable_backend_detail(&case, &backend).unwrap();
+        assert!(detail.contains("case requires linked armfortas capture"));
+        assert!(detail.contains("scripts/bootstrap-linked-armfortas.sh"));
     }
 
     #[test]
