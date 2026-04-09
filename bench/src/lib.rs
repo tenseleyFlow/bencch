@@ -4576,12 +4576,22 @@ fn evaluate_observation_expectations(
                 let text = observation_target_text(&observed.observation, target)?;
                 let source = fs::read_to_string(&case.source)
                     .map_err(|e| format!("cannot read '{}': {}", case.source.display(), e))?;
-                let checks = extract_checks(&source);
+                let checks = if target_uses_ir_comment_checks(target) {
+                    extract_ir_checks(&source)
+                } else {
+                    extract_checks(&source)
+                };
                 if checks.is_empty() {
+                    let expected_label = if target_uses_ir_comment_checks(target) {
+                        "! IR_CHECK: / ! IR_NOT:"
+                    } else {
+                        "! CHECK:"
+                    };
                     return Err(format!(
-                        "case '{}' requested check-comments but '{}' has no ! CHECK: lines",
+                        "case '{}' requested check-comments but '{}' has no {} lines",
                         case.name,
-                        case.source.display()
+                        case.source.display(),
+                        expected_label
                     ));
                 }
                 match_checks(&checks, text, &case.name)?;
@@ -8730,6 +8740,8 @@ fn print_summary(summary: &Summary) {
 struct Check {
     line_num: usize,
     pattern: String,
+    negative: bool,
+    kind: &'static str,
 }
 
 fn extract_checks(source: &str) -> Vec<Check> {
@@ -8741,7 +8753,34 @@ fn extract_checks(source: &str) -> Vec<Check> {
             trimmed.strip_prefix("! CHECK:").map(|rest| Check {
                 line_num: i + 1,
                 pattern: rest.trim().to_string(),
+                negative: false,
+                kind: "CHECK",
             })
+        })
+        .collect()
+}
+
+fn extract_ir_checks(source: &str) -> Vec<Check> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("! IR_CHECK:") {
+                Some(Check {
+                    line_num: i + 1,
+                    pattern: rest.trim().to_string(),
+                    negative: false,
+                    kind: "IR_CHECK",
+                })
+            } else {
+                trimmed.strip_prefix("! IR_NOT:").map(|rest| Check {
+                    line_num: i + 1,
+                    pattern: rest.trim().to_string(),
+                    negative: true,
+                    kind: "IR_NOT",
+                })
+            }
         })
         .collect()
 }
@@ -8751,6 +8790,16 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
     let mut output_idx = 0;
 
     for check in checks {
+        if check.negative {
+            if output.contains(&check.pattern) {
+                return Err(format!(
+                    "{}:{}: {} failed: substring '{}' appears in output\nfull output:\n{}",
+                    case_name, check.line_num, check.kind, check.pattern, output
+                ));
+            }
+            continue;
+        }
+
         let mut found = false;
         while output_idx < output_lines.len() {
             if output_lines[output_idx].trim().contains(&check.pattern) {
@@ -8762,13 +8811,21 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
         }
         if !found {
             return Err(format!(
-                "{}:{}: CHECK failed: expected '{}' not found in remaining output\nfull output:\n{}",
-                case_name, check.line_num, check.pattern, output
+                "{}:{}: {} failed: expected '{}' not found in remaining output\nfull output:\n{}",
+                case_name, check.line_num, check.kind, check.pattern, output
             ));
         }
     }
 
     Ok(())
+}
+
+fn target_uses_ir_comment_checks(target: &Target) -> bool {
+    match target {
+        Target::Stage(Stage::Ir) => true,
+        Target::Artifact(ArtifactKey::Extra(name)) => name == "armfortas.ir",
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -10141,14 +10198,42 @@ end
             Check {
                 line_num: 1,
                 pattern: "alpha".into(),
+                negative: false,
+                kind: "CHECK",
             },
             Check {
                 line_num: 2,
                 pattern: "omega".into(),
+                negative: false,
+                kind: "CHECK",
             },
         ];
         assert!(match_checks(&checks, "alpha\nmiddle\nomega\n", "demo").is_ok());
         assert!(match_checks(&checks, "omega\nalpha\n", "demo").is_err());
+    }
+
+    #[test]
+    fn ir_check_matching_supports_negative_patterns() {
+        let checks = vec![
+            Check {
+                line_num: 1,
+                pattern: "func @demo".into(),
+                negative: false,
+                kind: "IR_CHECK",
+            },
+            Check {
+                line_num: 2,
+                pattern: "zeroinit".into(),
+                negative: true,
+                kind: "IR_NOT",
+            },
+        ];
+        let ok_ir = "module main\n\n  func @demo() -> void {\n    entry():\n      ret void\n  }\n";
+        assert!(match_checks(&checks, ok_ir, "demo").is_ok());
+
+        let bad_ir = "module main\n  global @value: i32 = zeroinit\n  func @demo() -> void {\n    entry():\n      ret void\n  }\n";
+        let err = match_checks(&checks, bad_ir, "demo").unwrap_err();
+        assert!(err.contains("IR_NOT failed"));
     }
 
     fn run_only_result(stdout: &str, stderr: &str, exit_code: i32) -> CaptureResult {
