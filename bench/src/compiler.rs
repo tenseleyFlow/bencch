@@ -55,6 +55,7 @@ fn into_driver_opt_level(opt_level: OptLevel) -> armfortas::driver::OptLevel {
         OptLevel::O1 => armfortas::driver::OptLevel::O1,
         OptLevel::O2 => armfortas::driver::OptLevel::O2,
         OptLevel::O3 => armfortas::driver::OptLevel::O3,
+        OptLevel::Os => armfortas::driver::OptLevel::Os,
         OptLevel::Ofast => armfortas::driver::OptLevel::Ofast,
     }
 }
@@ -65,6 +66,7 @@ fn from_driver_opt_level(opt_level: armfortas::driver::OptLevel) -> OptLevel {
         armfortas::driver::OptLevel::O1 => OptLevel::O1,
         armfortas::driver::OptLevel::O2 => OptLevel::O2,
         armfortas::driver::OptLevel::O3 => OptLevel::O3,
+        armfortas::driver::OptLevel::Os => OptLevel::Os,
         armfortas::driver::OptLevel::Ofast => OptLevel::Ofast,
     }
 }
@@ -158,4 +160,16 @@ pub mod test_support {
     pub use armfortas::ir::types::{FloatWidth, IntWidth, IrType};
     pub use armfortas::ir::verify::verify_module;
     pub use armfortas::lexer::{Position, Span};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{from_driver_opt_level, into_driver_opt_level, OptLevel};
+
+    #[test]
+    fn driver_opt_level_round_trips_os() {
+        let driver = into_driver_opt_level(OptLevel::Os);
+        assert_eq!(driver, armfortas::driver::OptLevel::Os);
+        assert_eq!(from_driver_opt_level(driver), OptLevel::Os);
+    }
 }

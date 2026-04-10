@@ -8,6 +8,7 @@ pub enum OptLevel {
     O1,
     O2,
     O3,
+    Os,
     Ofast,
 }
 
@@ -18,6 +19,7 @@ impl OptLevel {
             "o1" => Some(Self::O1),
             "o2" => Some(Self::O2),
             "o3" => Some(Self::O3),
+            "os" => Some(Self::Os),
             "ofast" => Some(Self::Ofast),
             _ => None,
         }
@@ -29,6 +31,7 @@ impl OptLevel {
             Self::O1 => "-O1",
             Self::O2 => "-O2",
             Self::O3 => "-O3",
+            Self::Os => "-Os",
             Self::Ofast => "-Ofast",
         }
     }
@@ -39,6 +42,7 @@ impl OptLevel {
             Self::O1 => "O1",
             Self::O2 => "O2",
             Self::O3 => "O3",
+            Self::Os => "Os",
             Self::Ofast => "Ofast",
         }
     }
@@ -245,4 +249,17 @@ pub struct RunCapture {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OptLevel;
+
+    #[test]
+    fn opt_level_parses_and_renders_os() {
+        assert_eq!(OptLevel::parse_flag("Os"), Some(OptLevel::Os));
+        assert_eq!(OptLevel::parse_flag("os"), Some(OptLevel::Os));
+        assert_eq!(OptLevel::Os.as_flag(), "-Os");
+        assert_eq!(OptLevel::Os.as_str(), "Os");
+    }
 }

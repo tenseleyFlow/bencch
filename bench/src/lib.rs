@@ -1202,12 +1202,13 @@ fn parse_opt_level_list(raw: &str) -> Result<Vec<OptLevel>, String> {
     Ok(levels.into_iter().collect())
 }
 
-fn all_opt_levels() -> [OptLevel; 5] {
+fn all_opt_levels() -> [OptLevel; 6] {
     [
         OptLevel::O0,
         OptLevel::O1,
         OptLevel::O2,
         OptLevel::O3,
+        OptLevel::Os,
         OptLevel::Ofast,
     ]
 }
@@ -4944,6 +4945,21 @@ end
             EffectiveStatus::Xfail(_)
         ));
         let _ = fs::remove_file(&root);
+    }
+
+    #[test]
+    fn parses_all_opt_levels_including_os() {
+        assert_eq!(
+            parse_opt_level_list("all").unwrap(),
+            vec![
+                OptLevel::O0,
+                OptLevel::O1,
+                OptLevel::O2,
+                OptLevel::O3,
+                OptLevel::Os,
+                OptLevel::Ofast,
+            ]
+        );
     }
 
     #[test]
