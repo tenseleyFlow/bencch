@@ -27,6 +27,8 @@ pub fn compile_output(
         emit_ir: false,
         preprocess_only: false,
         opt_level: into_driver_opt_level(opt_level),
+        extra_inputs: vec![],
+        module_search_paths: vec![],
     };
 
     armfortas::driver::compile(&opts)
