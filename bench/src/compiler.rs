@@ -24,11 +24,8 @@ pub fn compile_output(
         output: Some(PathBuf::from(output)),
         emit_asm: matches!(mode, EmitMode::Asm),
         emit_obj: matches!(mode, EmitMode::Obj),
-        emit_ir: false,
-        preprocess_only: false,
         opt_level: into_driver_opt_level(opt_level),
-        extra_inputs: vec![],
-        module_search_paths: vec![],
+        ..armfortas::driver::Options::default()
     };
 
     armfortas::driver::compile(&opts)
