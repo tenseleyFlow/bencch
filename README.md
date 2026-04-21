@@ -65,6 +65,18 @@ Run differential checks with explicit reference compiler paths:
 cargo run -p afs-tests -- run --suite differential/runtime-control-flow --gfortran-bin /opt/homebrew/bin/gfortran --flang-bin /opt/homebrew/bin/flang-new
 ```
 
+List the staged real-project differential ladder:
+
+```bash
+cargo run -p afs-tests -- projects list
+```
+
+Run one real project through its native build system with `armfortas` and `flang-new`:
+
+```bash
+cargo run -p afs-tests -- projects run --project fortbite --armfortas-bin ./target/release/armfortas
+```
+
 Run one case with full stage capture:
 
 ```bash
@@ -84,6 +96,8 @@ cargo run -p afs-tests -- run --suite differential
 ```
 
 Reports are written under `bencch/reports/`.
+
+Project differential reports land under `bencch/reports/projects/`.
 
 Environment overrides work too:
 

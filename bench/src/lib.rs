@@ -1,4 +1,5 @@
 mod compiler;
+mod project_campaign;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -9,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::compiler::{
     capture_from_path, compile_output, CaptureFailure, CaptureRequest, CaptureResult,
     CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
+};
+use crate::project_campaign::{
+    handle_project_command, parse_project_cli, print_project_usage, ProjectCommand,
 };
 
 const SUITE_EXTENSION: &str = "afs";
@@ -218,6 +222,7 @@ struct ToolchainConfig {
     armfortas: ArmfortasCliAdapter,
     gfortran: String,
     flang_new: String,
+    cc: String,
     system_as: String,
     otool: String,
     nm: String,
@@ -232,6 +237,7 @@ impl ToolchainConfig {
             },
             gfortran: tool_override("BENCCH_GFORTRAN_BIN", "gfortran"),
             flang_new: tool_override("BENCCH_FLANG_BIN", "flang-new"),
+            cc: tool_override("BENCCH_CC_BIN", "cc"),
             system_as: tool_override("BENCCH_AS_BIN", "as"),
             otool: tool_override("BENCCH_OTOOL_BIN", "otool"),
             nm: tool_override("BENCCH_NM_BIN", "nm"),
@@ -261,6 +267,10 @@ impl ToolchainConfig {
 
     fn system_as_bin(&self) -> &str {
         &self.system_as
+    }
+
+    fn cc_bin(&self) -> &str {
+        &self.cc
     }
 
     fn otool_bin(&self) -> &str {
@@ -474,6 +484,25 @@ pub fn run_cli(args: &[String]) -> i32 {
                 1
             }
         },
+        Ok(CommandKind::Projects(command)) => match handle_project_command(command) {
+            Ok(outcome) => {
+                for line in &outcome.summary_lines {
+                    println!("{}", line);
+                }
+                for workdir in &outcome.kept_workdirs {
+                    println!("kept workdir: {}", workdir.display());
+                }
+                if outcome.success {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(err) => {
+                eprintln!("afs-tests: {}", err);
+                1
+            }
+        },
         Ok(CommandKind::Help) => {
             print_usage();
             0
@@ -489,6 +518,7 @@ pub fn run_cli(args: &[String]) -> i32 {
 enum CommandKind {
     List { suite_filter: Option<String> },
     Run(Box<RunConfig>),
+    Projects(ProjectCommand),
     Help,
 }
 
@@ -559,6 +589,10 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                         let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
                         config.tools.flang_new = value.clone();
                     }
+                    "--cc-bin" => {
+                        let value = queue.pop_front().ok_or("--cc-bin requires a value")?;
+                        config.tools.cc = value.clone();
+                    }
                     "--as-bin" => {
                         let value = queue.pop_front().ok_or("--as-bin requires a value")?;
                         config.tools.system_as = value.clone();
@@ -577,6 +611,10 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
             }
             Ok(CommandKind::Run(Box::new(config)))
         }
+        "projects" => Ok(CommandKind::Projects(parse_project_cli(
+            &args[1..],
+            ToolchainConfig::from_env(),
+        )?)),
         "--help" | "-h" | "help" => Ok(CommandKind::Help),
         other => Err(format!("unknown command: {}", other)),
     }
@@ -588,12 +626,13 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  cargo run -p afs-tests -- list [--suite <filter>]");
     eprintln!(
-        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
+        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--cc-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
     );
+    print_project_usage();
     eprintln!();
     eprintln!("env overrides:");
     eprintln!("  BENCCH_ARMFORTAS_BIN, BENCCH_GFORTRAN_BIN, BENCCH_FLANG_BIN");
-    eprintln!("  BENCCH_AS_BIN, BENCCH_OTOOL_BIN, BENCCH_NM_BIN");
+    eprintln!("  BENCCH_CC_BIN, BENCCH_AS_BIN, BENCCH_OTOOL_BIN, BENCCH_NM_BIN");
 }
 
 fn default_suite_root() -> PathBuf {
@@ -5050,6 +5089,8 @@ end
             "/tmp/gfortran".to_string(),
             "--flang-bin".to_string(),
             "/tmp/flang-new".to_string(),
+            "--cc-bin".to_string(),
+            "/tmp/clang".to_string(),
             "--as-bin".to_string(),
             "/tmp/as".to_string(),
             "--otool-bin".to_string(),
@@ -5074,6 +5115,7 @@ end
         );
         assert_eq!(config.tools.gfortran, "/tmp/gfortran");
         assert_eq!(config.tools.flang_new, "/tmp/flang-new");
+        assert_eq!(config.tools.cc, "/tmp/clang");
         assert_eq!(config.tools.system_as, "/tmp/as");
         assert_eq!(config.tools.otool, "/tmp/otool");
         assert_eq!(config.tools.nm, "/tmp/nm");

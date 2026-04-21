@@ -1,0 +1,89 @@
+campaign "fortrangoingonforty"
+
+project "fortbite"
+source "../../../fortbite"
+native "make"
+priority 1
+status active
+coverage => pure_semantics, performance
+library_seed => fortds
+build => make clean && make FC="{fc}" FFLAGS="-O2"
+test => make test FC="{fc}" FFLAGS="-O2"
+smoke => printf '2 + 3\nquit\n' | ./build/bin/fortbite
+note "Pure Fortran parser, AST, evaluator, and numeric semantics target."
+note "Best first differential target after fortsh because it keeps interop noise low."
+end
+
+project "ferp"
+source "../../../ferp"
+native "make"
+priority 2
+status active
+coverage => pure_semantics, system_interop, performance
+library_seed => fortargs, fortpath, fortconfig
+build => make clean && make FC="{fc}" CC="{cc}"
+test => make test FC="{fc}" CC="{cc}"
+smoke => printf 'hello world\n' | ./ferp hello
+note "Regex, CLI, and filesystem tool with light C interop."
+note "Second differential target once pure semantics are stable."
+end
+
+project "sniffert"
+source "../../../sniffert"
+native "make"
+priority 3
+status active
+coverage => system_interop, interactive, performance
+library_seed => fortterm, fortpath
+build => make clean && make FC="{fc}" CC="{cc}"
+note "First ncurses-flavored systems TUI target after fortbite and ferp."
+end
+
+project "fortress"
+source "../../../fortress"
+native "fpm"
+priority 4
+status active
+coverage => interactive, system_interop
+library_seed => fortterm, fortpath, fortproc
+build => fpm build --compiler "{fc}"
+test => fpm test --compiler "{fc}"
+note "File-explorer TUI target with ncurses and shell integration surfaces."
+end
+
+project "fit"
+source "../../../fit"
+native "make"
+priority 5
+status active
+coverage => interactive, pure_semantics
+library_seed => fortterm, fortds
+build => make clean && make FC="{fc}"
+test => make test FC="{fc}"
+note "Smaller editor-like TUI target for merge-conflict workflows."
+end
+
+project "facsimile"
+source "../../../facsimile"
+native "make"
+priority 6
+status active
+coverage => cross_tu, system_interop, interactive, performance
+library_seed => fortterm, fortpath, fortproc, fortds, fortconfig
+build => make clean && make FC="{fc}" CC="{cc}"
+smoke => ./fac --version
+note "Next flagship proof target after the smaller ladder is mostly green."
+note "Expected to expose terminal, regex, LSP, UTF-8, and cross-module ABI gaps."
+end
+
+project "fortty"
+source "../../../fortty"
+native "cmake"
+priority 7
+status later
+coverage => system_interop, interactive, performance
+library_seed => fortterm
+build => cmake -S . -B build -DCMAKE_Fortran_COMPILER="{fc}" -DCMAKE_C_COMPILER="{cc}" && cmake --build build -j1
+note "Later graphics/interoperability target with GLFW, OpenGL, and FreeType."
+note "Keep this later in the ladder so dependency noise does not mask compiler issues too early."
+end
