@@ -107,8 +107,8 @@ priority 9
 status active
 coverage => cross_tu, pure_semantics, system_interop, performance
 library_seed => fortpath
-build => fpm build --compiler "{fc}"
-test => fpm test --compiler "{fc}"
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
 note "Filesystem/path library with a dense native test surface."
 note "Good for `.amod`, library packaging, runtime I/O, and cross-unit truthfulness without app-layer noise."
 end
@@ -120,8 +120,8 @@ priority 10
 status active
 coverage => cross_tu, system_interop, performance
 library_seed => fortproc
-build => fpm build --compiler "{fc}"
-test => fpm test --compiler "{fc}"
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
 note "Process/subprocess library with sync run, capture, timeout, and shell behavior coverage."
 note "High-value ABI and runtime target for subprocess orchestration without needing a full end-user app."
 end
@@ -133,8 +133,8 @@ priority 11
 status active
 coverage => cross_tu, system_interop, interactive
 library_seed => fortterm, fortproc
-build => fpm build --compiler "{fc}"
-test => fpm test --compiler "{fc}"
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
 note "PTY/session library with resize, lifecycle, and interactive subprocess coverage."
 note "Best library-scale target for terminal I/O truthfulness before the heavier TUI/editor projects."
 end
