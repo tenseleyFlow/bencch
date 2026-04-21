@@ -87,3 +87,54 @@ build => cmake -S . -B build -DCMAKE_Fortran_COMPILER="{fc}" -DCMAKE_C_COMPILER=
 note "Later graphics/interoperability target with GLFW, OpenGL, and FreeType."
 note "Keep this later in the ladder so dependency noise does not mask compiler issues too early."
 end
+
+project "fuss"
+source "../../../fuss"
+native "make"
+priority 8
+status active
+coverage => interactive, system_interop, performance
+library_seed => fortterm, fortpath, fortproc
+build => make clean && make FC="{fc}"
+note "Smaller git-oriented TUI target with tree rendering, shell integration, and UTF-8 output."
+note "Useful backup interactive target between ferp and facsimile when we want less dependency noise than ncurses-heavy editors."
+end
+
+project "fgof-fs"
+source "../../../fgof-fs"
+native "fpm"
+priority 9
+status active
+coverage => cross_tu, pure_semantics, system_interop, performance
+library_seed => fortpath
+build => fpm build --compiler "{fc}"
+test => fpm test --compiler "{fc}"
+note "Filesystem/path library with a dense native test surface."
+note "Good for `.amod`, library packaging, runtime I/O, and cross-unit truthfulness without app-layer noise."
+end
+
+project "fgof-process"
+source "../../../fgof-process"
+native "fpm"
+priority 10
+status active
+coverage => cross_tu, system_interop, performance
+library_seed => fortproc
+build => fpm build --compiler "{fc}"
+test => fpm test --compiler "{fc}"
+note "Process/subprocess library with sync run, capture, timeout, and shell behavior coverage."
+note "High-value ABI and runtime target for subprocess orchestration without needing a full end-user app."
+end
+
+project "fgof-pty"
+source "../../../fgof-pty"
+native "fpm"
+priority 11
+status active
+coverage => cross_tu, system_interop, interactive
+library_seed => fortterm, fortproc
+build => fpm build --compiler "{fc}"
+test => fpm test --compiler "{fc}"
+note "PTY/session library with resize, lifecycle, and interactive subprocess coverage."
+note "Best library-scale target for terminal I/O truthfulness before the heavier TUI/editor projects."
+end
