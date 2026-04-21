@@ -35,7 +35,7 @@ priority 3
 status active
 coverage => system_interop, interactive, performance
 library_seed => fortterm, fortpath
-build => make clean && make FC="{fc}" CC="{cc}"
+build => make clean && make FC="{fc}" CC="{cc}" FFLAGS="-O2 -Wall"
 note "First ncurses-flavored systems TUI target after fortbite and ferp."
 end
 
@@ -58,8 +58,8 @@ priority 5
 status active
 coverage => interactive, pure_semantics
 library_seed => fortterm, fortds
-build => make clean && make FC="{fc}"
-test => make test FC="{fc}"
+build => make clean && make FC="{fc}" FFLAGS="-O2 -J build/"
+test => make test FC="{fc}" FFLAGS="-O2 -J build/"
 note "Smaller editor-like TUI target for merge-conflict workflows."
 end
 
@@ -70,7 +70,7 @@ priority 6
 status active
 coverage => cross_tu, system_interop, interactive, performance
 library_seed => fortterm, fortpath, fortproc, fortds, fortconfig
-build => make clean && make FC="{fc}" CC="{cc}"
+build => make clean && make FC="{fc}" CC="{cc}" FFLAGS="-O2 -Wall"
 smoke => ./fac --version
 note "Next flagship proof target after the smaller ladder is mostly green."
 note "Expected to expose terminal, regex, LSP, UTF-8, and cross-module ABI gaps."
@@ -95,7 +95,7 @@ priority 8
 status active
 coverage => interactive, system_interop, performance
 library_seed => fortterm, fortpath, fortproc
-build => make clean && make FC="{fc}"
+build => make clean && make FC="{fc}" FFLAGS="-O2 -Wall"
 note "Smaller git-oriented TUI target with tree rendering, shell integration, and UTF-8 output."
 note "Useful backup interactive target between ferp and facsimile when we want less dependency noise than ncurses-heavy editors."
 end
