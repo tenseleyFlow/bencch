@@ -138,3 +138,42 @@ test => fpm test --compiler "{fc}" --c-compiler "{cc}"
 note "PTY/session library with resize, lifecycle, and interactive subprocess coverage."
 note "Best library-scale target for terminal I/O truthfulness before the heavier TUI/editor projects."
 end
+
+project "fgof-termios"
+source "../../../fgof-termios"
+native "fpm"
+priority 12
+status active
+coverage => system_interop, interactive
+library_seed => fortterm
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
+note "Terminal mode helper library with raw/cbreak/echo and terminal-size coverage."
+note "Good low-noise tty truthfulness target before the heavier expect and line-edit stacks."
+end
+
+project "fgof-lineedit"
+source "../../../fgof-lineedit"
+native "fpm"
+priority 13
+status active
+coverage => pure_semantics, interactive
+library_seed => fortterm
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
+note "Line editing state/history library for shells and REPL-style tools."
+note "Good focused target for interactive editing semantics without terminal-mode noise."
+end
+
+project "fgof-watch"
+source "../../../fgof-watch"
+native "fpm"
+priority 14
+status active
+coverage => pure_semantics, system_interop, performance
+library_seed => fortpath, fortproc
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
+note "Portable file-watching library with polling backend and watch-session semantics."
+note "Good low-dependency target for filesystem change detection and library packaging behavior."
+end
