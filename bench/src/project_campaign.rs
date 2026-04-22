@@ -737,6 +737,9 @@ fn prepare_project_workdir(
             e
         )
     })?;
+    if let Some(workspace_root) = project.source.parent() {
+        localize_fgof_git_dependencies(&source_root, workspace_root, &root)?;
+    }
     Ok(source_root)
 }
 
@@ -771,6 +774,100 @@ fn copy_project_tree(source: &Path, dest: &Path) -> io::Result<()> {
         fs::set_permissions(dest, metadata.permissions())?;
     }
     Ok(())
+}
+
+fn localize_fgof_git_dependencies(
+    project_root: &Path,
+    workspace_root: &Path,
+    sandbox_root: &Path,
+) -> Result<(), String> {
+    let manifest = project_root.join("fpm.toml");
+    if !manifest.exists() {
+        return Ok(());
+    }
+
+    let original = fs::read_to_string(&manifest)
+        .map_err(|e| format!("cannot read '{}': {}", manifest.display(), e))?;
+    let mut rewritten = Vec::new();
+    let mut changed = false;
+    let deps_root = sandbox_root.join("deps");
+
+    for line in original.lines() {
+        if let Some((dep_name, repo_name)) = parse_fgof_git_dependency(line) {
+            let local_dep = workspace_root.join(&repo_name);
+            if local_dep.exists() {
+                let vendored_dep = deps_root.join(&repo_name);
+                if !vendored_dep.exists() {
+                    copy_project_tree(&local_dep, &vendored_dep).map_err(|e| {
+                        format!(
+                            "cannot vendor dependency '{}' into '{}': {}",
+                            local_dep.display(),
+                            vendored_dep.display(),
+                            e
+                        )
+                    })?;
+                    localize_fgof_git_dependencies(&vendored_dep, workspace_root, sandbox_root)?;
+                }
+                let relative = relative_path(project_root, &vendored_dep);
+                rewritten.push(format!(
+                    "{} = {{ path = \"{}\" }}",
+                    dep_name,
+                    relative.display()
+                ));
+                changed = true;
+                continue;
+            }
+        }
+        rewritten.push(line.to_string());
+    }
+
+    if changed {
+        let mut content = rewritten.join("\n");
+        if original.ends_with('\n') {
+            content.push('\n');
+        }
+        fs::write(&manifest, content)
+            .map_err(|e| format!("cannot write '{}': {}", manifest.display(), e))?;
+    }
+
+    Ok(())
+}
+
+fn parse_fgof_git_dependency(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let git_prefix = "git = \"https://github.com/FortranGoingOnForty/";
+    let git_pos = trimmed.find(git_prefix)?;
+    let dep_name = trimmed.split('=').next()?.trim();
+    let rest = &trimmed[git_pos + git_prefix.len()..];
+    let repo_name = rest.split(".git").next()?.trim();
+    if dep_name.is_empty() || repo_name.is_empty() {
+        return None;
+    }
+    Some((dep_name.to_string(), repo_name.to_string()))
+}
+
+fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
+    let from_components: Vec<_> = from_dir.components().collect();
+    let to_components: Vec<_> = to_path.components().collect();
+    let mut common = 0usize;
+    while common < from_components.len()
+        && common < to_components.len()
+        && from_components[common] == to_components[common]
+    {
+        common += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in common..from_components.len() {
+        relative.push("..");
+    }
+    for component in &to_components[common..] {
+        relative.push(component.as_os_str());
+    }
+    relative
 }
 
 fn should_skip_copy(name: &std::ffi::OsStr) -> bool {

@@ -177,3 +177,42 @@ test => fpm test --compiler "{fc}" --c-compiler "{cc}"
 note "Portable file-watching library with polling backend and watch-session semantics."
 note "Good low-dependency target for filesystem change detection and library packaging behavior."
 end
+
+project "fgof-temp"
+source "../../../fgof-temp"
+native "fpm"
+priority 15
+status active
+coverage => pure_semantics, system_interop, performance
+library_seed => fortpath
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
+note "Temp-file, temp-directory, and atomic-write library with real filesystem lifecycle coverage."
+note "Good low-noise target for ownership, cleanup, and exact-text I/O truthfulness."
+end
+
+project "fgof-cache"
+source "../../../fgof-cache"
+native "fpm"
+priority 16
+status active
+coverage => pure_semantics, cross_tu, system_interop, performance
+library_seed => fortpath, fortconfig
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
+note "Disk-cache library with sharding, stale pruning, and atomic text persistence."
+note "Good package-style target for layered library dependencies once fgof-temp stays green."
+end
+
+project "fgof-state"
+source "../../../fgof-state"
+native "fpm"
+priority 17
+status active
+coverage => pure_semantics, cross_tu, system_interop, performance
+library_seed => fortconfig, fortpath
+build => fpm build --compiler "{fc}" --c-compiler "{cc}"
+test => fpm test --compiler "{fc}" --c-compiler "{cc}"
+note "Persistent state library with versioned document load/save and atomic replacement."
+note "Good package-style target for durable app/workspace state semantics after fgof-temp."
+end
