@@ -5721,7 +5721,7 @@ end
 
     #[test]
     fn verifier_regression_detects_integer_op_on_float_values() {
-        let mut module = Module::new("verify".into());
+        let mut module = Module::new("verify".into(), armfortas::target::TargetLayout::LP64);
         let mut func = Function::new("broken".into(), vec![], IrType::Void);
         func.blocks[0].insts.push(Inst {
             id: ValueId(0),
@@ -5756,7 +5756,7 @@ end
 
     #[test]
     fn verifier_regression_detects_branch_argument_mismatch() {
-        let mut module = Module::new("verify".into());
+        let mut module = Module::new("verify".into(), armfortas::target::TargetLayout::LP64);
         let mut func = Function::new("broken_branch".into(), vec![], IrType::Void);
         let target = func.create_block("target");
         func.block_mut(target).params.push(BlockParam {
@@ -5779,7 +5779,7 @@ end
 
     #[test]
     fn verifier_regression_detects_store_to_non_pointer() {
-        let mut module = Module::new("verify".into());
+        let mut module = Module::new("verify".into(), armfortas::target::TargetLayout::LP64);
         let mut func = Function::new("broken_store".into(), vec![], IrType::Void);
         func.blocks[0].insts.push(Inst {
             id: ValueId(0),
