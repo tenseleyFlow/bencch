@@ -226,6 +226,8 @@ struct ToolchainConfig {
     system_as: String,
     otool: String,
     nm: String,
+    objdump: String,
+    readelf: String,
 }
 
 impl ToolchainConfig {
@@ -241,6 +243,8 @@ impl ToolchainConfig {
             system_as: tool_override("BENCCH_AS_BIN", "as"),
             otool: tool_override("BENCCH_OTOOL_BIN", "otool"),
             nm: tool_override("BENCCH_NM_BIN", "nm"),
+            objdump: tool_override("BENCCH_OBJDUMP_BIN", "objdump"),
+            readelf: tool_override("BENCCH_READELF_BIN", "readelf"),
         }
     }
 
@@ -279,6 +283,14 @@ impl ToolchainConfig {
 
     fn nm_bin(&self) -> &str {
         &self.nm
+    }
+
+    fn objdump_bin(&self) -> &str {
+        &self.objdump
+    }
+
+    fn readelf_bin(&self) -> &str {
+        &self.readelf
     }
 }
 
@@ -605,6 +617,14 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
                         let value = queue.pop_front().ok_or("--nm-bin requires a value")?;
                         config.tools.nm = value.clone();
                     }
+                    "--objdump-bin" => {
+                        let value = queue.pop_front().ok_or("--objdump-bin requires a value")?;
+                        config.tools.objdump = value.clone();
+                    }
+                    "--readelf-bin" => {
+                        let value = queue.pop_front().ok_or("--readelf-bin requires a value")?;
+                        config.tools.readelf = value.clone();
+                    }
                     "--help" | "-h" => return Ok(CommandKind::Help),
                     other => return Err(format!("unknown run option: {}", other)),
                 }
@@ -626,7 +646,7 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  cargo run -p afs-tests -- list [--suite <filter>]");
     eprintln!(
-        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--cc-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>]"
+        "  cargo run -p afs-tests -- run [--suite <filter>] [--case <filter>] [--opt <O0,O1,...>] [--verbose] [--fail-fast] [--include-future] [--all] [--armfortas-bin <path>] [--gfortran-bin <path>] [--flang-bin <path>] [--cc-bin <path>] [--as-bin <path>] [--otool-bin <path>] [--nm-bin <path>] [--objdump-bin <path>] [--readelf-bin <path>]"
     );
     print_project_usage();
     eprintln!();
@@ -3905,28 +3925,32 @@ struct ObjectRun {
 }
 
 fn object_snapshot(path: &Path, tools: &ToolchainConfig) -> Result<ObjectSnapshot, String> {
-    let text = normalize_tool_output(&tool_output(
-        tools.otool_bin(),
-        &["-t", path.to_str().unwrap()],
-    )?);
-    let load_commands = normalize_tool_output(&tool_output(
-        tools.otool_bin(),
-        &["-l", path.to_str().unwrap()],
-    )?);
-    let relocations = normalize_tool_output(&tool_output(
-        tools.otool_bin(),
-        &["-rv", path.to_str().unwrap()],
-    )?);
-    let symbols = normalize_tool_output(&tool_output(
-        tools.nm_bin(),
-        &["-m", path.to_str().unwrap()],
-    )?);
+    // Dispatch on the host's object format (sprint x01): otool/nm -m on
+    // Mach-O; objdump/readelf/plain nm on ELF (`-m` is Apple-nm-only).
+    // Snapshots are compared within a single host run, never across
+    // tools, so cross-tool formatting differences are harmless.
+    let p = path.to_str().unwrap();
+    let (text, load_commands, relocations, symbols) =
+        match armfortas::target::TargetSpec::host().object_format() {
+            armfortas::target::ObjectFormat::MachO => (
+                tool_output(tools.otool_bin(), &["-t", p])?,
+                tool_output(tools.otool_bin(), &["-l", p])?,
+                tool_output(tools.otool_bin(), &["-rv", p])?,
+                tool_output(tools.nm_bin(), &["-m", p])?,
+            ),
+            armfortas::target::ObjectFormat::Elf => (
+                tool_output(tools.objdump_bin(), &["-d", p])?,
+                tool_output(tools.readelf_bin(), &["-lSW", p])?,
+                tool_output(tools.objdump_bin(), &["-r", p])?,
+                tool_output(tools.nm_bin(), &[p])?,
+            ),
+        };
 
     Ok(ObjectSnapshot {
-        text,
-        load_commands,
-        relocations,
-        symbols,
+        text: normalize_tool_output(&text),
+        load_commands: normalize_tool_output(&load_commands),
+        relocations: normalize_tool_output(&relocations),
+        symbols: normalize_tool_output(&symbols),
     })
 }
 
@@ -5097,6 +5121,10 @@ end
             "/tmp/otool".to_string(),
             "--nm-bin".to_string(),
             "/tmp/nm".to_string(),
+            "--objdump-bin".to_string(),
+            "/tmp/objdump".to_string(),
+            "--readelf-bin".to_string(),
+            "/tmp/readelf".to_string(),
         ];
 
         let command = parse_cli(&args).unwrap();
@@ -5119,6 +5147,8 @@ end
         assert_eq!(config.tools.system_as, "/tmp/as");
         assert_eq!(config.tools.otool, "/tmp/otool");
         assert_eq!(config.tools.nm, "/tmp/nm");
+        assert_eq!(config.tools.objdump, "/tmp/objdump");
+        assert_eq!(config.tools.readelf, "/tmp/readelf");
     }
 
     #[test]
