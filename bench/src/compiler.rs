@@ -13,12 +13,69 @@ pub enum EmitMode {
     Binary,
 }
 
+/// Extract `! FLAGS:` extra compiler flags from a fixture. One
+/// dialect with the root harness (tests/run_programs.rs): at most one
+/// line, non-empty, and harness-owned flags (-o/-S/-c/-O*) rejected.
+fn fixture_flags(input: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {}", input.display(), e))?;
+    let mut flags: Option<Vec<String>> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("! FLAGS:") {
+            if flags.is_some() {
+                return Err(format!(
+                    "{}: multiple FLAGS annotations; combine into one line",
+                    input.display()
+                ));
+            }
+            let toks: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+            if toks.is_empty() {
+                return Err(format!(
+                    "{}: FLAGS annotation with no flags",
+                    input.display()
+                ));
+            }
+            for t in &toks {
+                if t == "-o" || t == "-S" || t == "-c" || t.starts_with("-O") {
+                    return Err(format!(
+                        "{}: FLAGS may not contain harness-owned flag '{}'",
+                        input.display(),
+                        t
+                    ));
+                }
+            }
+            flags = Some(toks);
+        }
+    }
+    Ok(flags.unwrap_or_default())
+}
+
 pub fn compile_output(
     input: &Path,
     opt_level: OptLevel,
     mode: EmitMode,
     output: &Path,
 ) -> Result<(), String> {
+    // Apply the fixture's `! FLAGS:` line (x09, one-dialect rule):
+    // route through the driver's CLI parser so textual flags mean
+    // exactly what they mean on the command line.
+    let flags = fixture_flags(input)?;
+    if !flags.is_empty() {
+        let mut argv: Vec<String> = flags;
+        argv.push(into_driver_opt_level(opt_level).as_flag().to_string());
+        match mode {
+            EmitMode::Asm => argv.push("-S".into()),
+            EmitMode::Obj => argv.push("-c".into()),
+            EmitMode::Binary => {}
+        }
+        argv.push(input.to_string_lossy().into_owned());
+        argv.push("-o".into());
+        argv.push(output.to_string_lossy().into_owned());
+        let opts = armfortas::driver::Options::from_args(&argv)?;
+        return armfortas::driver::compile(&opts);
+    }
+
     let opts = armfortas::driver::Options {
         input: input.to_path_buf(),
         output: Some(PathBuf::from(output)),
@@ -32,6 +89,26 @@ pub fn compile_output(
 }
 
 pub fn capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, CaptureFailure> {
+    // The capture surface has no flags channel; a FLAGS-carrying
+    // fixture compiled without its flags could silently diverge from
+    // the root harness. Refuse loudly (x09, one-dialect rule).
+    let input_path = request.input.clone();
+    match fixture_flags(&input_path) {
+        Ok(flags) if !flags.is_empty() => {
+            return Err(CaptureFailure {
+                input: input_path,
+                opt_level: request.opt_level,
+                stage: FailureStage::Ir,
+                detail: format!(
+                    "fixture carries `! FLAGS: {}` which the bencch capture path does not apply; \
+                     use compile_output or extend CaptureRequest with a flags channel",
+                    flags.join(" ")
+                ),
+                stages: BTreeMap::new(),
+            });
+        }
+        _ => {}
+    }
     let arm_request = armfortas::testing::CaptureRequest {
         input: request.input.clone(),
         requested: request
