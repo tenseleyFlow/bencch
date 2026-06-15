@@ -50,7 +50,7 @@ struct ProjectSpec {
     status: ProjectStatus,
     coverage: Vec<String>,
     library_seed: Vec<String>,
-    build_command: String,
+    build_command: Option<String>,
     test_command: Option<String>,
     smoke_command: Option<String>,
     notes: Vec<String>,
@@ -83,7 +83,7 @@ impl ProjectStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectCompiler {
+pub(crate) enum ProjectCompiler {
     Armfortas,
     FlangNew,
     Gfortran,
@@ -473,9 +473,10 @@ impl ProjectBuilder {
             status: self.status.unwrap_or(ProjectStatus::Active),
             coverage: self.coverage,
             library_seed: self.library_seed,
-            build_command: self.build_command.ok_or_else(|| {
-                format!("{}: project missing build command", catalog_path.display())
-            })?,
+            // Optional: a ladder rung can be declared (and listed) before
+            // its build command is engineered and validated. `run` errors
+            // clearly if you try to run such a rung.
+            build_command: self.build_command,
             test_command: self.test_command,
             smoke_command: self.smoke_command,
             notes: self.notes,
@@ -699,14 +700,14 @@ fn run_for_compiler(
     compiler_bin: &str,
     cc_bin: &str,
 ) -> Result<ProjectExecution, String> {
+    let build_command = project.build_command.as_deref().ok_or_else(|| {
+        format!(
+            "project '{}' has no build command yet (deprioritized rung — not validated)",
+            project.name
+        )
+    })?;
     let workdir = prepare_project_workdir(catalog, project, compiler)?;
-    let build = run_step(
-        "build",
-        &project.build_command,
-        &workdir,
-        compiler_bin,
-        cc_bin,
-    )?;
+    let build = run_step("build", build_command, &workdir, compiler_bin, cc_bin)?;
     let test = if build.succeeded() {
         match &project.test_command {
             Some(command) => Some(run_step("test", command, &workdir, compiler_bin, cc_bin)?),
@@ -922,8 +923,18 @@ fn run_step(
 ) -> Result<StepExecution, String> {
     let command = expand_command_template(template, compiler_bin, cc_bin);
     let start = Instant::now();
-    let output = Command::new("/bin/zsh")
-        .arg("-lc")
+    // Shell per host: macOS ships zsh as the login shell; the ELF
+    // targets (Linux, FreeBSD) may not have /bin/zsh, but POSIX
+    // /bin/sh is always present and handles `&&`/`||` the same way.
+    // Both inherit the parent environment, so PATH for make/fpm carries
+    // through; the build commands use absolute {fc}/CC anyway.
+    let (shell, shell_flag) = if cfg!(target_os = "macos") {
+        ("/bin/zsh", "-lc")
+    } else {
+        ("/bin/sh", "-c")
+    };
+    let output = Command::new(shell)
+        .arg(shell_flag)
         .arg(&command)
         .current_dir(workdir)
         .env("FC", compiler_bin)
@@ -1007,7 +1018,7 @@ fn compare_step_outcome(
         findings.push(DifferentialFinding {
             step,
             detail: format!(
-                "{} success diverged: armfortas={} flang-new={}",
+                "{} success diverged: armfortas={} reference={}",
                 step,
                 left.succeeded(),
                 right.succeeded()
@@ -1021,7 +1032,7 @@ fn compare_step_outcome(
             findings.push(DifferentialFinding {
                 step,
                 detail: format!(
-                    "{} exit code diverged: armfortas={} flang-new={}",
+                    "{} exit code diverged: armfortas={} reference={}",
                     step, left.exit_code, right.exit_code
                 ),
             });
@@ -1030,7 +1041,7 @@ fn compare_step_outcome(
             findings.push(DifferentialFinding {
                 step,
                 detail: format!(
-                    "{} stdout diverged (armfortas {} bytes vs flang-new {} bytes)",
+                    "{} stdout diverged (armfortas {} bytes vs reference {} bytes)",
                     step,
                     left.stdout.len(),
                     right.stdout.len()
@@ -1041,7 +1052,7 @@ fn compare_step_outcome(
             findings.push(DifferentialFinding {
                 step,
                 detail: format!(
-                    "{} stderr diverged (armfortas {} bytes vs flang-new {} bytes)",
+                    "{} stderr diverged (armfortas {} bytes vs reference {} bytes)",
                     step,
                     left.stderr.len(),
                     right.stderr.len()
@@ -1115,7 +1126,8 @@ fn write_project_report(
     if findings.is_empty() {
         writeln!(
             &mut report,
-            "- No armfortas-vs-flang-new step outcome differences were observed."
+            "- No armfortas-vs-{} step outcome differences were observed.",
+            flang.compiler.as_str()
         )
         .unwrap();
     } else {
@@ -1203,7 +1215,7 @@ fn render_console_summary(
         armfortas.smoke.as_ref(),
     ));
     lines.push(step_console_line(
-        "flang-new",
+        flang.compiler.as_str(),
         &flang.build,
         flang.test.as_ref(),
         flang.smoke.as_ref(),
@@ -1300,7 +1312,10 @@ end
         assert_eq!(project.status, ProjectStatus::Active);
         assert_eq!(project.coverage, vec!["pure_semantics", "performance"]);
         assert_eq!(project.library_seed, vec!["fortargs", "fortds"]);
-        assert_eq!(project.build_command, "make clean && make FC=\"{fc}\"");
+        assert_eq!(
+            project.build_command.as_deref(),
+            Some("make clean && make FC=\"{fc}\"")
+        );
         assert_eq!(project.notes, vec!["Pure Fortran calculator target."]);
 
         let _ = fs::remove_dir_all(&root);

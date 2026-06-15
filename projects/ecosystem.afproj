@@ -1,0 +1,56 @@
+campaign "ecosystem"
+
+# x12 real-project campaign on x86_64 (FreeBSD + Linux), diffed against
+# gfortran. Ladder order is smallest-dependency-surface first so a
+# dependency-heavy target can't hide a compiler bug. A rung stays
+# `deprioritized` until its build+test are validated under armfortas and
+# differentially against gfortran, then it is promoted to `active`.
+# Builds are direct compiler invocations (no fpm/CMake masquerade) so
+# armfortas and gfortran run the identical command — a fair diff.
+
+project "test-drive"
+source "../../.docs/refs/targets/test-drive"
+native "fpm"
+priority 1
+status active
+coverage => pure_semantics
+build => {fc} -c src/testdrive_version.f90 && {fc} -c src/testdrive.F90
+test => {fc} -c src/testdrive_version.f90 && {fc} -c src/testdrive.F90 && {fc} -c test/test_check.F90 && {fc} -c test/test_select.F90 && {fc} -c test/main.f90 && {fc} *.o -o tester && ./tester
+note "Small pure-Fortran test framework; test/toml-f's own test dependency, so green first."
+end
+
+project "toml-f"
+source "../../.docs/refs/targets/toml-f"
+native "fpm"
+priority 2
+status deprioritized
+coverage => pure_semantics
+note "Mid-size library, dense test suite. Rung pending validation."
+end
+
+project "stdlib"
+source "../../.docs/refs/targets/stdlib"
+native "cmake"
+priority 3
+status deprioritized
+coverage => pure_semantics, cross_tu
+note "Large, fypp-preprocessed, submodule-heavy; gated on l07-l09 (now landed). Rung pending validation; needs python3+fypp on the host."
+end
+
+project "fpm"
+source "../../.docs/refs/targets/fpm"
+native "make"
+priority 4
+status deprioritized
+coverage => pure_semantics, system_interop
+note "Self-hosting build (bootstrap stage-0, then fpm builds fpm). Rung pending validation."
+end
+
+project "fortsh"
+source "../../../fortsh"
+native "make"
+priority 5
+status deprioritized
+coverage => pure_semantics, interactive
+note "Flagship interactive program; smoke with piped scripted input. Rung pending validation."
+end
