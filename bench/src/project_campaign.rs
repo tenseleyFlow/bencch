@@ -24,6 +24,7 @@ pub(crate) struct ProjectRunConfig {
     pub(crate) project_filter: Option<String>,
     pub(crate) keep_workdir: bool,
     pub(crate) tools: ToolchainConfig,
+    pub(crate) reference: ProjectCompiler,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ impl ProjectStatus {
 enum ProjectCompiler {
     Armfortas,
     FlangNew,
+    Gfortran,
 }
 
 impl ProjectCompiler {
@@ -92,7 +94,20 @@ impl ProjectCompiler {
         match self {
             Self::Armfortas => "armfortas",
             Self::FlangNew => "flang-new",
+            Self::Gfortran => "gfortran",
         }
+    }
+}
+
+/// The reference compiler the campaign diffs armfortas against. Chosen
+/// per host, not per catalog: flang-new on macOS, gfortran on the ELF
+/// targets (Linux, FreeBSD), where flang-new is not the ecosystem
+/// reference. Overridable with `--reference`.
+fn default_reference_compiler() -> ProjectCompiler {
+    if cfg!(target_os = "macos") {
+        ProjectCompiler::FlangNew
+    } else {
+        ProjectCompiler::Gfortran
     }
 }
 
@@ -163,6 +178,7 @@ pub(crate) fn parse_project_cli(
                 project_filter: None,
                 keep_workdir: false,
                 tools,
+                reference: default_reference_compiler(),
             };
             let mut queue: std::collections::VecDeque<&String> = args[1..].iter().collect();
             while let Some(arg) = queue.pop_front() {
@@ -186,9 +202,26 @@ pub(crate) fn parse_project_cli(
                         let value = queue.pop_front().ok_or("--flang-bin requires a value")?;
                         config.tools.flang_new = value.clone();
                     }
+                    "--gfortran-bin" => {
+                        let value = queue.pop_front().ok_or("--gfortran-bin requires a value")?;
+                        config.tools.gfortran = value.clone();
+                    }
                     "--cc-bin" => {
                         let value = queue.pop_front().ok_or("--cc-bin requires a value")?;
                         config.tools.cc = value.clone();
+                    }
+                    "--reference" => {
+                        let value = queue.pop_front().ok_or("--reference requires a value")?;
+                        config.reference = match value.as_str() {
+                            "gfortran" => ProjectCompiler::Gfortran,
+                            "flang-new" | "flang" => ProjectCompiler::FlangNew,
+                            other => {
+                                return Err(format!(
+                                    "unknown --reference '{}' (expected gfortran or flang-new)",
+                                    other
+                                ))
+                            }
+                        };
                     }
                     other => return Err(format!("unknown projects run option: {}", other)),
                 }
@@ -205,7 +238,7 @@ pub(crate) fn parse_project_cli(
 pub(crate) fn print_project_usage() {
     eprintln!("  cargo run -p afs-tests -- projects list [--catalog <filter>] [--all]");
     eprintln!(
-        "  cargo run -p afs-tests -- projects run --project <name> [--catalog <filter>] [--keep-workdir] [--armfortas-bin <path>] [--flang-bin <path>] [--cc-bin <path>]"
+        "  cargo run -p afs-tests -- projects run --project <name> [--catalog <filter>] [--keep-workdir] [--armfortas-bin <path>] [--flang-bin <path>] [--gfortran-bin <path>] [--cc-bin <path>] [--reference <gfortran|flang-new>]"
     );
     eprintln!();
     eprintln!("project env overrides:");
@@ -568,10 +601,13 @@ fn run_project(config: ProjectRunConfig) -> Result<ProjectRunOutcome, String> {
 
     let (catalog, project) = matches.pop().unwrap();
     let armfortas_bin = resolve_armfortas_bin(&config.tools)?;
-    let flang_bin = config
-        .tools
-        .reference_binary(crate::ReferenceCompiler::FlangNew)
-        .to_string();
+    let reference = config.reference;
+    let reference_ref = match reference {
+        ProjectCompiler::Gfortran => crate::ReferenceCompiler::Gfortran,
+        // Armfortas is never a reference; treat anything else as flang.
+        _ => crate::ReferenceCompiler::FlangNew,
+    };
+    let flang_bin = config.tools.reference_binary(reference_ref).to_string();
     let cc_bin = config.tools.cc_bin().to_string();
 
     let mut kept_workdirs = Vec::new();
@@ -582,13 +618,7 @@ fn run_project(config: ProjectRunConfig) -> Result<ProjectRunOutcome, String> {
         &armfortas_bin,
         &cc_bin,
     )?;
-    let flang_run = run_for_compiler(
-        &catalog,
-        &project,
-        ProjectCompiler::FlangNew,
-        &flang_bin,
-        &cc_bin,
-    )?;
+    let flang_run = run_for_compiler(&catalog, &project, reference, &flang_bin, &cc_bin)?;
 
     let findings = compare_executions(&arm_run, &flang_run);
     let success = findings.is_empty()
