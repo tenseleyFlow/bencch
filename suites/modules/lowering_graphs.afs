@@ -8,7 +8,6 @@ file "../../fixtures/modules/module_chain/main.f90"
 armfortas => ir
 expect ir not-contains "global @math_seed::seed: i32 = zeroinit"
 expect ir not-contains "global @math_values::doubled: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "module_procedure_ir"
@@ -29,7 +28,6 @@ file "../../fixtures/modules/reexport_chain/main.f90"
 armfortas => ir
 expect ir not-contains "global @relay_values::lifted: i32 = zeroinit"
 expect ir not-contains "global @consumer_values::final_value: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "diamond_merge_ir_values"
@@ -43,7 +41,6 @@ armfortas => ir
 expect ir not-contains "global @left_branch::left: i32 = zeroinit"
 expect ir not-contains "global @right_branch::right: i32 = zeroinit"
 expect ir not-contains "global @merged_total::total: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "rename_hops_ir_values"
@@ -54,7 +51,6 @@ file "../../fixtures/modules/rename_hops/main_alias.f90"
 armfortas => ir
 expect ir not-contains "global @base_values::payload: i32 = zeroinit"
 expect ir not-contains "global @bridge_aliases::lifted: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "mixed_only_ir_values"
@@ -65,7 +61,6 @@ file "../../fixtures/modules/mixed_only/main_alias.f90"
 armfortas => ir
 expect ir not-contains "global @mixed_only_values::alpha: i32 = zeroinit"
 expect ir not-contains "global @mixed_only_values::beta: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "collision_alias_ir_values"
@@ -76,7 +71,6 @@ file "../../fixtures/modules/collision_shadow/main_aliases.f90"
 armfortas => ir
 expect ir not-contains "global @collision_left_values::payload: i32 = zeroinit"
 expect ir not-contains "global @collision_right_values::payload: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "layered_total_ir_values"
@@ -91,7 +85,6 @@ expect ir not-contains "global @layered_root_seed::seed: i32 = zeroinit"
 expect ir not-contains "global @layered_left_metrics::doubled: i32 = zeroinit"
 expect ir not-contains "global @layered_right_metrics::shifted: i32 = zeroinit"
 expect ir not-contains "global @layered_total_metrics::total: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "layered_gap_ir_values"
@@ -106,5 +99,4 @@ expect ir not-contains "global @layered_root_seed::seed: i32 = zeroinit"
 expect ir not-contains "global @layered_left_metrics::doubled: i32 = zeroinit"
 expect ir not-contains "global @layered_right_metrics::shifted: i32 = zeroinit"
 expect ir not-contains "global @layered_delta_metrics::gap: i32 = zeroinit"
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
