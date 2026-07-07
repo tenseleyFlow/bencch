@@ -4,7 +4,6 @@ case "io_internal"
 source "../../../test_programs/future/io_internal.f90"
 armfortas => ir, run
 expect run.stdout check-comments
-xfail "Internal I/O support is not complete on this branch yet."
 end
 
 case "io_backspace"

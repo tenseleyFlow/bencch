@@ -49,7 +49,6 @@ file "../../fixtures/modules/visibility/visible_values.f90"
 file "../../fixtures/modules/visibility/main_hidden.f90"
 armfortas => sema
 expect-fail sema contains "private"
-xfail "Private module names are still importable through USE ONLY in graphs."
 end
 
 case "fanin_frontend"
@@ -111,7 +110,6 @@ file "../../fixtures/modules/rename_hops/bridge_aliases.f90"
 file "../../fixtures/modules/rename_hops/main_payload.f90"
 armfortas => sema
 expect-fail sema contains "payload"
-xfail "Original names still leak through renamed re-export graphs."
 end
 
 case "mixed_only_frontend"
@@ -134,7 +132,6 @@ file "../../fixtures/modules/mixed_only/bridge_values.f90"
 file "../../fixtures/modules/mixed_only/main_hidden.f90"
 armfortas => sema
 expect-fail sema contains "alpha"
-xfail "Original names still leak through mixed ONLY graphs."
 end
 
 case "collision_alias_frontend"

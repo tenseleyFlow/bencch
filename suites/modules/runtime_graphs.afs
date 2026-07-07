@@ -48,7 +48,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Module procedures are called, but the lowered graph does not emit the callee body."
 end
 
 case "visibility_runtime"
@@ -59,7 +58,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "fanin_runtime"
@@ -72,7 +70,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "reexport_chain_runtime"
@@ -85,7 +82,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "diamond_merge_runtime"
@@ -99,7 +95,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "rename_hops_runtime"
@@ -111,7 +106,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "mixed_only_runtime"
@@ -123,7 +117,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "collision_alias_runtime"
@@ -135,7 +128,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "layered_total_runtime"
@@ -149,7 +141,6 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "layered_gap_runtime"
@@ -163,5 +154,4 @@ opts => O0, O1, O2
 armfortas => run
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
