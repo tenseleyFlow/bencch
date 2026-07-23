@@ -48,7 +48,7 @@ entry "../../fixtures/modules/visibility/main_hidden.f90"
 file "../../fixtures/modules/visibility/visible_values.f90"
 file "../../fixtures/modules/visibility/main_hidden.f90"
 armfortas => sema
-expect-fail sema contains "private"
+expect-fail sema contains "not exported"
 end
 
 case "fanin_frontend"
@@ -153,7 +153,6 @@ file "../../fixtures/modules/collision_shadow/right_values.f90"
 file "../../fixtures/modules/collision_shadow/main_ambiguous.f90"
 armfortas => sema
 expect-fail sema contains "ambiguous"
-xfail "Ambiguous USE imports are not rejected in graph cases yet."
 end
 
 case "layered_total_frontend"

@@ -123,7 +123,8 @@ expect run.exit_code equals 0
 end
 ```
 
-Graph cases use `entry` plus ordered `file` lines:
+Graph cases use `entry` plus `file` lines in reference-compilation dependency
+order:
 
 ```text
 suite "modules/runtime-graphs"
@@ -139,9 +140,15 @@ expect run.stdout check-comments
 end
 ```
 
-Today the armfortas adapter materializes graph cases into one generated source
-in declared file order before capture/compile. The authored files still stay in
-the failure bundle.
+Graph members remain separate translation units. The armfortas adapter
+preprocesses and captures each authored file independently, resolves module
+dependencies with the compiler's graph scanner, exchanges real `.amod`/`.mod`
+artifacts through an isolated case directory, emits one object per source, and
+links those objects for `obj`/`run` checks. Reference compilers compile the
+listed files in authored dependency order and then link their distinct objects;
+they do not reuse armfortas dependency decisions. Failure bundles store the
+entry source as `source.f90` and preserve every authored member under
+`sources/`.
 
 Common things the runner understands:
 

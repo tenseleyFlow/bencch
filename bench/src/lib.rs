@@ -8,8 +8,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compiler::{
-    capture_from_path, compile_output, CaptureFailure, CaptureRequest, CaptureResult,
-    CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
+    capture_from_path, capture_graph, compile_graph_output, compile_output, CaptureFailure,
+    CaptureRequest, CaptureResult, CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture,
+    Stage,
 };
 use crate::project_campaign::{
     handle_project_command, parse_project_cli, print_project_usage, ProjectCommand,
@@ -61,8 +62,22 @@ impl CaseSpec {
 #[derive(Debug, Clone)]
 struct PreparedInput {
     compiler_source: PathBuf,
-    generated_source: Option<PathBuf>,
+    graph_sources: Vec<PathBuf>,
     temp_root: Option<PathBuf>,
+}
+
+impl PreparedInput {
+    fn is_graph(&self) -> bool {
+        !self.graph_sources.is_empty()
+    }
+
+    fn compiler_sources(&self) -> &[PathBuf] {
+        if self.is_graph() {
+            &self.graph_sources
+        } else {
+            std::slice::from_ref(&self.compiler_source)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1410,7 +1425,7 @@ fn execute_case_cell(
             for file in &case.graph_files {
                 println!("  file: {}", file.display());
             }
-            println!("  compiled_as: {}", prepared.compiler_source.display());
+            println!("  compiled_as: separate translation units");
         }
         println!("  opt: {}", opt_level.as_str());
         println!("  stages: {}", stage_list);
@@ -1420,22 +1435,16 @@ fn execute_case_cell(
         }
     }
 
-    let request = CaptureRequest {
-        input: prepared.compiler_source.clone(),
-        requested: requested.clone(),
-        opt_level,
-    };
-
     let references = run_reference_compilers(&prepared, case, opt_level, &config.tools);
     let mut artifacts = ExecutionArtifacts {
-        requested,
+        requested: requested.clone(),
         armfortas: None,
         armfortas_failure: None,
         references,
         consistency_issues: Vec::new(),
     };
 
-    match capture_from_path(&request) {
+    match capture_prepared_input(&prepared, &requested, opt_level) {
         Ok(result) => artifacts.armfortas = Some(result),
         Err(failure) => artifacts.armfortas_failure = Some(failure),
     }
@@ -1570,6 +1579,33 @@ fn execute_case_cell(
     Ok(outcome)
 }
 
+fn capture_prepared_input(
+    prepared: &PreparedInput,
+    requested: &BTreeSet<Stage>,
+    opt_level: OptLevel,
+) -> Result<CaptureResult, CaptureFailure> {
+    if prepared.is_graph() {
+        let work_root = prepared
+            .temp_root
+            .as_deref()
+            .expect("prepared graph input must own a work directory");
+        capture_graph(
+            &prepared.compiler_source,
+            &prepared.graph_sources,
+            requested,
+            opt_level,
+            work_root,
+        )
+    } else {
+        let request = CaptureRequest {
+            input: prepared.compiler_source.clone(),
+            requested: requested.clone(),
+            opt_level,
+        };
+        capture_from_path(&request)
+    }
+}
+
 fn prepare_case_input(
     case: &CaseSpec,
     suite: &SuiteSpec,
@@ -1578,7 +1614,7 @@ fn prepare_case_input(
     if case.graph_files.is_empty() {
         return Ok(PreparedInput {
             compiler_source: case.source.clone(),
-            generated_source: None,
+            graph_sources: Vec::new(),
             temp_root: None,
         });
     }
@@ -1597,42 +1633,14 @@ fn prepare_case_input(
         )
     })?;
 
-    let extension = case
-        .source
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .filter(|ext| !ext.is_empty())
-        .unwrap_or("f90");
-    let generated_source = temp_root.join(format!(
-        "{}_graph.{}",
-        sanitize_component(&case.name),
-        extension
-    ));
-
-    let mut combined = String::new();
-    for (index, file) in case.graph_files.iter().enumerate() {
-        let text = fs::read_to_string(file)
-            .map_err(|e| format!("cannot read graph file '{}': {}", file.display(), e))?;
-        if index > 0 {
-            combined.push('\n');
-        }
-        combined.push_str(&text);
-        if !text.ends_with('\n') {
-            combined.push('\n');
-        }
+    for file in &case.graph_files {
+        fs::metadata(file)
+            .map_err(|e| format!("cannot inspect graph file '{}': {}", file.display(), e))?;
     }
 
-    fs::write(&generated_source, combined).map_err(|e| {
-        format!(
-            "cannot write generated graph input '{}': {}",
-            generated_source.display(),
-            e
-        )
-    })?;
-
     Ok(PreparedInput {
-        compiler_source: generated_source.clone(),
-        generated_source: Some(generated_source),
+        compiler_source: case.source.clone(),
+        graph_sources: case.graph_files.clone(),
         temp_root: Some(temp_root),
     })
 }
@@ -1978,76 +1986,103 @@ fn run_consistency_checks(
 ) -> Vec<ConsistencyIssue> {
     let mut failures = Vec::new();
     for check in &case.consistency_checks {
-        let issue = match check {
-            ConsistencyCheck::CliObjVsSystemAs => {
-                run_cli_obj_vs_system_as(&prepared.compiler_source, opt_level, tools)
+        let issue = if prepared.is_graph()
+            && !matches!(
+                check,
+                ConsistencyCheck::CliRunReproducible
+                    | ConsistencyCheck::CaptureRunVsCliRun
+                    | ConsistencyCheck::CaptureRunReproducible
+            ) {
+            unsupported_graph_consistency_issue(*check, opt_level)
+        } else {
+            match check {
+                ConsistencyCheck::CliObjVsSystemAs => {
+                    run_cli_obj_vs_system_as(&prepared.compiler_source, opt_level, tools)
+                }
+                ConsistencyCheck::CliAsmReproducible => run_cli_asm_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    tools,
+                ),
+                ConsistencyCheck::CliObjReproducible => run_cli_obj_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    tools,
+                ),
+                ConsistencyCheck::CliRunReproducible => {
+                    run_cli_run_reproducible(prepared, opt_level, case.repeat_count, tools)
+                }
+                ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
+                    prepared,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
+                    prepared,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
             }
-            ConsistencyCheck::CliAsmReproducible => run_cli_asm_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                tools,
-            ),
-            ConsistencyCheck::CliObjReproducible => run_cli_obj_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                tools,
-            ),
-            ConsistencyCheck::CliRunReproducible => run_cli_run_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                tools,
-            ),
-            ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
         };
         if let Some(issue) = issue {
             failures.push(issue);
         }
     }
     failures
+}
+
+fn unsupported_graph_consistency_issue(
+    check: ConsistencyCheck,
+    opt_level: OptLevel,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    Some(ConsistencyIssue {
+        check,
+        summary: "consistency check has no graph-aware artifact contract".into(),
+        repeat_count: None,
+        unique_variant_count: None,
+        varying_components: Vec::new(),
+        stable_components: Vec::new(),
+        detail: format!(
+            "consistency check '{}' cannot be applied to a graph as if its entry source were the whole program",
+            check.as_str()
+        ),
+        temp_root,
+    })
 }
 
 fn format_consistency_issues(issues: &[ConsistencyIssue]) -> String {
@@ -2445,7 +2480,7 @@ fn run_cli_obj_reproducible(
 }
 
 fn run_cli_run_reproducible(
-    source: &Path,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     repeat_count: usize,
     tools: &ToolchainConfig,
@@ -2471,8 +2506,8 @@ fn run_cli_run_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
-        let build_command = match compile_with_driver(
-            source,
+        let build_command = match compile_prepared_with_driver(
+            prepared,
             opt_level,
             DriverEmitMode::Binary,
             &binary_path,
@@ -2908,7 +2943,7 @@ fn run_capture_obj_vs_cli_obj(
 }
 
 fn run_capture_run_vs_cli_run(
-    source: &Path,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
@@ -2932,7 +2967,7 @@ fn run_capture_run_vs_cli_run(
         });
     }
 
-    let capture_command = render_capture_command(source, opt_level, Stage::Run);
+    let capture_command = render_prepared_capture_command(prepared, opt_level, Stage::Run);
     let capture_run = match capture_run_stage(capture_result) {
         Ok(run) => run.clone(),
         Err(detail) => {
@@ -2968,8 +3003,8 @@ fn run_capture_run_vs_cli_run(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
-        let build_command = match compile_with_driver(
-            source,
+        let build_command = match compile_prepared_with_driver(
+            prepared,
             opt_level,
             DriverEmitMode::Binary,
             &binary_path,
@@ -3388,7 +3423,7 @@ fn run_capture_obj_reproducible(
 }
 
 fn run_capture_run_reproducible(
-    source: &Path,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
@@ -3412,7 +3447,7 @@ fn run_capture_run_reproducible(
         });
     }
 
-    let command = render_capture_command(source, opt_level, Stage::Run);
+    let command = render_prepared_capture_command(prepared, opt_level, Stage::Run);
     let initial_run = match capture_run_stage(capture_result) {
         Ok(run) => run.clone(),
         Err(detail) => {
@@ -3450,7 +3485,11 @@ fn run_capture_run_reproducible(
     }];
 
     for index in 1..repeat_count {
-        let run = match capture_run_from_testing(source, opt_level) {
+        let run = match capture_prepared_run(
+            prepared,
+            opt_level,
+            &temp_root.join(format!("capture_graph_{:02}", index)),
+        ) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3539,8 +3578,175 @@ fn run_reference_compilers(
     case.reference_compilers
         .iter()
         .copied()
-        .map(|compiler| run_reference_case(&prepared.compiler_source, opt_level, compiler, tools))
+        .map(|compiler| {
+            if prepared.is_graph() {
+                run_reference_graph(&prepared.graph_sources, opt_level, compiler, tools)
+            } else {
+                run_reference_case(&prepared.compiler_source, opt_level, compiler, tools)
+            }
+        })
         .collect()
+}
+
+fn run_reference_graph(
+    sources: &[PathBuf],
+    opt_level: OptLevel,
+    compiler: ReferenceCompiler,
+    tools: &ToolchainConfig,
+) -> ReferenceResult {
+    let temp_root = next_report_temp_root(compiler, opt_level);
+    let binary = temp_root.join("reference.out");
+    let compiler_bin = tools.reference_binary(compiler);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return ReferenceResult::infrastructure_error(
+            compiler,
+            compiler_bin.to_string(),
+            format!("cannot create temp dir '{}': {}", temp_root.display(), err),
+        );
+    }
+
+    let mut commands = Vec::new();
+    let mut compile_stdout = String::new();
+    let mut compile_stderr = String::new();
+    let mut objects = vec![None; sources.len()];
+    for index in 0..sources.len() {
+        let source = &sources[index];
+        let object = temp_root.join(format!("unit_{:04}.o", index));
+        let mut args = vec![opt_level.as_flag().to_string(), "-c".to_string()];
+        if source_uses_cpp(source) {
+            args.push("-cpp".to_string());
+        }
+        args.push("-I".to_string());
+        args.push(temp_root.display().to_string());
+        args.push("-J".to_string());
+        args.push(temp_root.display().to_string());
+        args.push(source.display().to_string());
+        args.push("-o".to_string());
+        args.push(object.display().to_string());
+        let command = render_command(compiler_bin, &args);
+        commands.push(command.clone());
+        let output = match Command::new(compiler_bin)
+            .current_dir(&temp_root)
+            .args(&args)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return ReferenceResult::infrastructure_error(
+                    compiler,
+                    commands.join("\n"),
+                    format!("cannot run {}: {}", compiler_bin, err),
+                );
+            }
+        };
+        append_command_output(&mut compile_stdout, index, source, &output.stdout);
+        append_command_output(&mut compile_stderr, index, source, &output.stderr);
+        if !output.status.success() {
+            let result = ReferenceResult {
+                compiler,
+                compile_command: commands.join("\n"),
+                compile_exit_code: output.status.code().unwrap_or(-1),
+                compile_stdout,
+                compile_stderr,
+                run: None,
+                run_error: None,
+            };
+            let _ = fs::remove_dir_all(&temp_root);
+            return result;
+        }
+        objects[index] = Some(object);
+    }
+
+    let mut link_args = Vec::with_capacity(objects.len() + 2);
+    for (index, object) in objects.into_iter().enumerate() {
+        let Some(object) = object else {
+            let _ = fs::remove_dir_all(&temp_root);
+            return ReferenceResult::infrastructure_error(
+                compiler,
+                commands.join("\n"),
+                format!(
+                    "graph source [{}] '{}' did not produce an object",
+                    index,
+                    sources[index].display()
+                ),
+            );
+        };
+        link_args.push(object.display().to_string());
+    }
+    link_args.push("-o".to_string());
+    link_args.push(binary.display().to_string());
+    let link_command = render_command(compiler_bin, &link_args);
+    commands.push(link_command);
+    let link = match Command::new(compiler_bin)
+        .current_dir(&temp_root)
+        .args(&link_args)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return ReferenceResult::infrastructure_error(
+                compiler,
+                commands.join("\n"),
+                format!("cannot run {}: {}", compiler_bin, err),
+            );
+        }
+    };
+    append_command_output(
+        &mut compile_stdout,
+        sources.len(),
+        Path::new("<link>"),
+        &link.stdout,
+    );
+    append_command_output(
+        &mut compile_stderr,
+        sources.len(),
+        Path::new("<link>"),
+        &link.stderr,
+    );
+
+    let mut result = ReferenceResult {
+        compiler,
+        compile_command: commands.join("\n"),
+        compile_exit_code: link.status.code().unwrap_or(-1),
+        compile_stdout,
+        compile_stderr,
+        run: None,
+        run_error: None,
+    };
+    if link.status.success() {
+        match Command::new(&binary).current_dir(&temp_root).output() {
+            Ok(output) => {
+                result.run = Some(RunCapture {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+            Err(err) => {
+                result.run_error = Some(format!("cannot run '{}': {}", binary.display(), err));
+            }
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    result
+}
+
+fn append_command_output(destination: &mut String, index: usize, source: &Path, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    if !destination.is_empty() {
+        destination.push('\n');
+    }
+    destination.push_str(&format!(
+        "===== graph command [{:04}] {} =====\n",
+        index,
+        source.display()
+    ));
+    destination.push_str(&String::from_utf8_lossy(bytes));
 }
 
 fn run_reference_case(
@@ -3668,6 +3874,71 @@ fn compile_with_driver(
     Ok(command)
 }
 
+fn compile_prepared_with_driver(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+    tools: &ToolchainConfig,
+) -> Result<String, String> {
+    if !prepared.is_graph() {
+        return compile_with_driver(&prepared.compiler_source, opt_level, mode, output, tools);
+    }
+    if mode != DriverEmitMode::Binary {
+        return Err(format!(
+            "graph CLI adapter does not define a single '{}' artifact",
+            match mode {
+                DriverEmitMode::Asm => "assembly",
+                DriverEmitMode::Obj => "object",
+                DriverEmitMode::Binary => unreachable!(),
+            }
+        ));
+    }
+
+    let module_output_dir = graph_module_output_dir(output);
+    let command = render_prepared_armfortas_command(prepared, opt_level, mode, output, tools);
+    if let Some(binary) = tools.armfortas_external_bin() {
+        let mut args = vec![opt_level.as_flag().to_string()];
+        args.push("-J".to_string());
+        args.push(module_output_dir.display().to_string());
+        args.extend(
+            prepared
+                .compiler_sources()
+                .iter()
+                .map(|source| source.display().to_string()),
+        );
+        args.push("-o".to_string());
+        args.push(output.display().to_string());
+        let compile = Command::new(binary)
+            .args(&args)
+            .output()
+            .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
+        if !compile.status.success() {
+            return Err(format!(
+                "{} failed:\n{}",
+                command,
+                String::from_utf8_lossy(&compile.stderr).trim_end()
+            ));
+        }
+    } else {
+        compile_graph_output(
+            prepared.compiler_sources(),
+            opt_level,
+            output,
+            module_output_dir,
+        )
+        .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
+    }
+    Ok(command)
+}
+
+fn graph_module_output_dir(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 fn render_armfortas_command(
     source: &Path,
     opt_level: OptLevel,
@@ -3687,6 +3958,35 @@ fn render_armfortas_command(
     render_command(tools.armfortas_command_name(), &args)
 }
 
+fn render_prepared_armfortas_command(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+    tools: &ToolchainConfig,
+) -> String {
+    if !prepared.is_graph() {
+        return render_armfortas_command(&prepared.compiler_source, opt_level, mode, output, tools);
+    }
+    let mut args = vec![opt_level.as_flag().to_string()];
+    match mode {
+        DriverEmitMode::Asm => args.push("-S".to_string()),
+        DriverEmitMode::Obj => args.push("-c".to_string()),
+        DriverEmitMode::Binary => {}
+    }
+    args.push("-J".to_string());
+    args.push(graph_module_output_dir(output).display().to_string());
+    args.extend(
+        prepared
+            .compiler_sources()
+            .iter()
+            .map(|source| source.display().to_string()),
+    );
+    args.push("-o".to_string());
+    args.push(output.display().to_string());
+    render_command(tools.armfortas_command_name(), &args)
+}
+
 fn render_binary_run_command(binary: &Path) -> String {
     render_command(&binary.display().to_string(), &[])
 }
@@ -3697,6 +3997,27 @@ fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> S
         opt_level.as_flag(),
         stage.as_str(),
         quote_arg(&source.display().to_string())
+    )
+}
+
+fn render_prepared_capture_command(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    stage: Stage,
+) -> String {
+    if !prepared.is_graph() {
+        return render_capture_command(&prepared.compiler_source, opt_level, stage);
+    }
+    format!(
+        "armfortas::testing graph capture {} --stage {} {}",
+        opt_level.as_flag(),
+        stage.as_str(),
+        prepared
+            .compiler_sources()
+            .iter()
+            .map(|source| quote_arg(&source.display().to_string()))
+            .collect::<Vec<_>>()
+            .join(" ")
     )
 }
 
@@ -3725,6 +4046,25 @@ fn capture_run_from_testing(source: &Path, opt_level: OptLevel) -> Result<RunCap
     };
     let result = capture_from_path(&request)
         .map_err(|failure| format!("{} failed:\n{}", command, failure))?;
+    capture_run_stage(&result).cloned()
+}
+
+fn capture_prepared_run(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    graph_work_root: &Path,
+) -> Result<RunCapture, String> {
+    if !prepared.is_graph() {
+        return capture_run_from_testing(&prepared.compiler_source, opt_level);
+    }
+    let result = capture_graph(
+        &prepared.compiler_source,
+        &prepared.graph_sources,
+        &BTreeSet::from([Stage::Run]),
+        opt_level,
+        graph_work_root,
+    )
+    .map_err(|failure| failure.to_string())?;
     capture_run_stage(&result).cloned()
 }
 
@@ -4515,21 +4855,15 @@ fn write_case_sources_bundle(
         return Ok(());
     }
 
-    let generated_source = prepared.generated_source.as_ref().ok_or_else(|| {
+    let entry_text = fs::read_to_string(&prepared.compiler_source).map_err(|e| {
         format!(
-            "graph case '{}' was missing a generated compiler source",
-            case.name
-        )
-    })?;
-    let generated_text = fs::read_to_string(generated_source).map_err(|e| {
-        format!(
-            "cannot read generated graph source '{}': {}",
-            generated_source.display(),
+            "cannot read graph entry source '{}': {}",
+            prepared.compiler_source.display(),
             e
         )
     })?;
-    fs::write(bundle_root.join("source.f90"), generated_text)
-        .map_err(|e| format!("cannot write generated bundle source copy: {}", e))?;
+    fs::write(bundle_root.join("source.f90"), entry_text)
+        .map_err(|e| format!("cannot write graph entry bundle source copy: {}", e))?;
 
     let sources_root = bundle_root.join("sources");
     fs::create_dir_all(&sources_root)
@@ -5370,7 +5704,7 @@ end
         };
         let prepared = PreparedInput {
             compiler_source: source.clone(),
-            generated_source: None,
+            graph_sources: Vec::new(),
             temp_root: None,
         };
 
@@ -5429,7 +5763,7 @@ end
     }
 
     #[test]
-    fn materializes_graph_input_in_declared_file_order() {
+    fn preserves_graph_translation_units_as_authored_inputs() {
         let root = std::env::temp_dir().join("afs_tests_graph_materialize");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -5457,14 +5791,186 @@ end
         };
 
         let prepared = prepare_case_input(&case, &suite, OptLevel::O0).unwrap();
-        let generated = fs::read_to_string(&prepared.compiler_source).unwrap();
-        assert!(generated.contains("module math_values"));
-        assert!(generated.contains("program main"));
-        assert!(
-            generated.find("module math_values").unwrap() < generated.find("program main").unwrap()
-        );
+        assert_eq!(prepared.compiler_source, main);
+        assert_eq!(prepared.graph_sources, vec![module, main]);
+        assert!(prepared.temp_root.is_some());
 
         cleanup_prepared_input(&prepared);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_capture_compiles_modules_separately_and_links_all_objects() {
+        if armfortas::testing::native_e2e_level_support("-O0").is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_graph_multitu_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let module = root.join("answer_values.f90");
+        let main = root.join("main.f90");
+        fs::write(
+            &module,
+            "module answer_values\n  implicit none\ncontains\n  integer function answer() result(value)\n    value = 42\n  end function answer\nend module answer_values\n",
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            "program main\n  use answer_values, only : answer\n  implicit none\n  print *, answer()\nend program main\n",
+        )
+        .unwrap();
+
+        let suite = SuiteSpec {
+            name: "modules/separate-graph".into(),
+            path: root.join("graph.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "module_use".into(),
+            source: main.clone(),
+            // Deliberately put the consumer first. The graph adapter must use
+            // the real dependency scan, not declaration order or concatenation.
+            graph_files: vec![main.clone(), module.clone()],
+            requested: BTreeSet::from([Stage::Ast, Stage::Sema, Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+
+        let prepared = prepare_case_input(&case, &suite, OptLevel::O0).unwrap();
+        let result = capture_prepared_input(&prepared, &case.requested, OptLevel::O0).unwrap();
+        let run = capture_run_stage(&result).unwrap();
+        assert_eq!(run.exit_code, 0);
+        assert!(
+            run.stdout.split_whitespace().any(|field| field == "42"),
+            "graph binary did not execute the separately compiled module: {:?}",
+            run.stdout
+        );
+
+        let ast = capture_text_stage(&result, Stage::Ast).unwrap();
+        assert!(ast.contains(&format!("[0000] {}", main.display())));
+        assert!(ast.contains(&format!("[0001] {}", module.display())));
+
+        let work_root = prepared.temp_root.as_ref().unwrap();
+        assert!(work_root.join("answer_values.amod").is_file());
+        assert!(work_root.join("answer_values.mod").is_file());
+        assert!(work_root.join("unit_0000.o").is_file());
+        assert!(work_root.join("unit_0001.o").is_file());
+
+        cleanup_prepared_input(&prepared);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_cli_build_keeps_module_artifacts_out_of_the_process_cwd() {
+        if armfortas::testing::native_e2e_level_support("-O0").is_err() {
+            return;
+        }
+        let suffix = next_report_suffix(OptLevel::O0).replace('-', "_");
+        let module_name = format!("bencch_hc004_{}", suffix);
+        let root = std::env::temp_dir().join(format!("afs_tests_graph_cli_{}", suffix));
+        let source_root = root.join("src");
+        let output_root = root.join("out");
+        let module = source_root.join("provider.f90");
+        let main = source_root.join("main.f90");
+        let binary = output_root.join("graph.out");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&output_root).unwrap();
+        fs::write(
+            &module,
+            format!(
+                "module {module_name}\n  implicit none\ncontains\n  integer function answer() result(value)\n    value = 42\n  end function answer\nend module {module_name}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            format!(
+                "program main\n  use {module_name}, only : answer\n  implicit none\n  print *, answer()\nend program main\n"
+            ),
+        )
+        .unwrap();
+
+        let current_dir = std::env::current_dir().unwrap();
+        let leaked_amod = current_dir.join(format!("{module_name}.amod"));
+        let leaked_mod = current_dir.join(format!("{module_name}.mod"));
+        assert!(!leaked_amod.exists());
+        assert!(!leaked_mod.exists());
+
+        compile_graph_output(&[main, module], OptLevel::O0, &binary, &output_root).unwrap();
+
+        assert!(binary.is_file());
+        assert!(output_root.join(format!("{module_name}.amod")).is_file());
+        assert!(output_root.join(format!("{module_name}.mod")).is_file());
+        assert!(!leaked_amod.exists());
+        assert!(!leaked_mod.exists());
+
+        let run = Command::new(&binary).output().unwrap();
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stdout)
+            .split_whitespace()
+            .any(|field| field == "42"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reference_graph_compiles_each_source_then_links_distinct_objects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_reference_graph_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let module = root.join("provider.f90");
+        let main = root.join("main.f90");
+        let log = root.join("commands.log");
+        let fake_compiler = root.join("fake-gfortran");
+        fs::write(&module, "module provider\nend module provider\n").unwrap();
+        fs::write(&main, "program main\nuse provider\nend program main\n").unwrap();
+        fs::write(
+            &fake_compiler,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nout=''\ncompile=0\nwant_output=0\nfor arg in \"$@\"; do\n  if [ \"$want_output\" -eq 1 ]; then out=\"$arg\"; want_output=0; continue; fi\n  case \"$arg\" in\n    -c) compile=1 ;;\n    -o) want_output=1 ;;\n  esac\ndone\nif [ -z \"$out\" ]; then exit 64; fi\nif [ \"$compile\" -eq 1 ]; then\n  : > \"$out\"\nelse\n  printf '#!/bin/sh\\nprintf \"42\\\\n\"\\n' > \"$out\"\n  chmod +x \"$out\"\nfi\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_compiler).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_compiler, permissions).unwrap();
+
+        let mut tools = ToolchainConfig::from_env();
+        tools.gfortran = fake_compiler.display().to_string();
+        let result = run_reference_graph(
+            &[module.clone(), main.clone()],
+            OptLevel::O0,
+            ReferenceCompiler::Gfortran,
+            &tools,
+        );
+        assert_eq!(result.compile_exit_code, 0, "{}", result.compile_stderr);
+        assert_eq!(result.run.unwrap().stdout, "42\n");
+
+        let commands = fs::read_to_string(&log).unwrap();
+        let commands = commands.lines().collect::<Vec<_>>();
+        assert_eq!(commands.len(), 3, "{commands:#?}");
+        assert!(commands[0].contains(&module.display().to_string()));
+        assert!(!commands[0].contains(&main.display().to_string()));
+        assert!(commands[1].contains(&main.display().to_string()));
+        assert!(!commands[1].contains(&module.display().to_string()));
+        assert!(commands[2].contains("unit_0000.o"));
+        assert!(commands[2].contains("unit_0001.o"));
+        assert!(!commands[2].contains(".f90"));
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -5475,7 +5981,6 @@ end
         fs::create_dir_all(&root).unwrap();
         let module = root.join("math_values.f90");
         let main = root.join("main.f90");
-        let generated = root.join("generated.f90");
         fs::write(
             &module,
             "module math_values\n integer :: answer = 42\nend module\n",
@@ -5486,7 +5991,6 @@ end
             "program main\n use math_values\n print *, answer\nend program\n",
         )
         .unwrap();
-        fs::write(&generated, "module math_values\n integer :: answer = 42\nend module\n\nprogram main\n use math_values\n print *, answer\nend program\n").unwrap();
 
         let suite = SuiteSpec {
             name: "modules/bundles".into(),
@@ -5522,13 +6026,17 @@ end
             consistency_issues: Vec::new(),
         };
         let prepared = PreparedInput {
-            compiler_source: generated.clone(),
-            generated_source: Some(generated.clone()),
+            compiler_source: main.clone(),
+            graph_sources: vec![module.clone(), main.clone()],
             temp_root: None,
         };
 
         let bundle = write_failure_bundle(&suite, &case, &prepared, &outcome, &artifacts).unwrap();
         assert!(bundle.join("source.f90").exists());
+        assert_eq!(
+            fs::read_to_string(bundle.join("source.f90")).unwrap(),
+            fs::read_to_string(&main).unwrap()
+        );
         assert!(bundle.join("sources").join("00_math_values.f90").exists());
         assert!(bundle.join("sources").join("01_main.f90").exists());
 
