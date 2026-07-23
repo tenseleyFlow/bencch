@@ -168,6 +168,10 @@ The suite DSL is for orchestration:
 - reporting and bundles
 
 Leaf assertions should come from shared source directives whenever possible.
+`expect run.stdout check-comments` enforces ordered `! CHECK:` lines together
+with `! FILE_CHECK:` and `! FILE_NOT:` against the captured run sandbox.
+Other `! FILE_*` directives fail closed until bencch implements their exact
+root-harness semantics.
 
 ## Notes
 

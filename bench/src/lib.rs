@@ -1696,14 +1696,45 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 let source = fs::read_to_string(&case.source)
                     .map_err(|e| format!("cannot read '{}': {}", case.source.display(), e))?;
                 let checks = extract_checks(&source);
-                if checks.is_empty() {
+                let file_checks = extract_file_checks(&source, &case.source)?;
+                if checks.is_empty() && file_checks.is_empty() {
                     return Err(format!(
-                        "case '{}' requested check-comments but '{}' has no ! CHECK: lines",
+                        "case '{}' requested check-comments but '{}' has no supported \
+                         ! CHECK:, ! FILE_CHECK:, or ! FILE_NOT: lines",
                         case.name,
                         case.source.display()
                     ));
                 }
-                match_checks(&checks, text, &case.name)?;
+                if !checks.is_empty() {
+                    match_checks(&checks, text, &case.name)?;
+                }
+                if !file_checks.is_empty() {
+                    if !matches!(*target, Target::RunStdout) {
+                        return Err(format!(
+                            "case '{}' uses FILE_CHECK/FILE_NOT but applies check-comments to {}; \
+                             file directives require run.stdout check-comments",
+                            case.name,
+                            target_name(*target)
+                        ));
+                    }
+                    let run = result
+                        .get(Stage::Run)
+                        .and_then(CapturedStage::as_run)
+                        .ok_or_else(|| {
+                            format!(
+                                "case '{}' uses FILE_CHECK/FILE_NOT but has no captured run stage",
+                                case.name
+                            )
+                        })?;
+                    let files = run.files.as_ref().ok_or_else(|| {
+                        format!(
+                            "case '{}' uses FILE_CHECK/FILE_NOT but this run path did not \
+                             snapshot sandbox files",
+                            case.name
+                        )
+                    })?;
+                    match_file_checks(&file_checks, files, &case.source)?;
+                }
             }
             Expectation::Contains { target, needle } => {
                 let text = target_text(result, target)?;
@@ -3722,6 +3753,7 @@ fn run_reference_graph(
                     exit_code: output.status.code().unwrap_or(-1),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    files: None,
                 });
             }
             Err(err) => {
@@ -3810,6 +3842,7 @@ fn run_reference_case(
                     exit_code: output.status.code().unwrap_or(-1),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    files: None,
                 });
             }
             Err(err) => {
@@ -4112,6 +4145,7 @@ fn run_binary_capture(
         exit_code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        files: None,
     })
 }
 
@@ -5215,6 +5249,14 @@ struct Check {
     pattern: String,
 }
 
+#[derive(Debug, Clone)]
+struct FileCheck {
+    line_num: usize,
+    relative_path: String,
+    pattern: String,
+    negative: bool,
+}
+
 fn extract_checks(source: &str) -> Vec<Check> {
     source
         .lines()
@@ -5227,6 +5269,65 @@ fn extract_checks(source: &str) -> Vec<Check> {
             })
         })
         .collect()
+}
+
+fn extract_file_checks(source: &str, source_path: &Path) -> Result<Vec<FileCheck>, String> {
+    let mut checks = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        let (rest, negative) = if let Some(rest) = trimmed.strip_prefix("! FILE_CHECK:") {
+            (rest.trim(), false)
+        } else if let Some(rest) = trimmed.strip_prefix("! FILE_NOT:") {
+            (rest.trim(), true)
+        } else if trimmed.starts_with("! FILE_") {
+            let directive = trimmed
+                .split_once(':')
+                .map(|(name, _)| name)
+                .unwrap_or(trimmed);
+            return Err(format!(
+                "{}:{}: unsupported {} directive in bencch check-comments; \
+                     supported file directives are FILE_CHECK and FILE_NOT",
+                source_path.display(),
+                index + 1,
+                directive
+            ));
+        } else {
+            continue;
+        };
+
+        let Some((raw_path, raw_pattern)) = rest.split_once("=>") else {
+            return Err(format!(
+                "{}:{}: {} must be written as <relative-path> => <substring>",
+                source_path.display(),
+                index + 1,
+                if negative { "FILE_NOT" } else { "FILE_CHECK" }
+            ));
+        };
+        let relative_path = raw_path.trim();
+        if relative_path.is_empty() {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT path cannot be empty",
+                source_path.display(),
+                index + 1
+            ));
+        }
+        if Path::new(relative_path).is_absolute() {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT path must be relative, got '{}'",
+                source_path.display(),
+                index + 1,
+                relative_path
+            ));
+        }
+
+        checks.push(FileCheck {
+            line_num: index + 1,
+            relative_path: relative_path.to_string(),
+            pattern: raw_pattern.trim().to_string(),
+            negative,
+        });
+    }
+    Ok(checks)
 }
 
 fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), String> {
@@ -5251,6 +5352,58 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
         }
     }
 
+    Ok(())
+}
+
+fn match_file_checks(
+    checks: &[FileCheck],
+    files: &BTreeMap<String, Vec<u8>>,
+    source_path: &Path,
+) -> Result<(), String> {
+    let mut search_offsets: BTreeMap<&str, usize> = BTreeMap::new();
+    for check in checks {
+        let Some(bytes) = files.get(&check.relative_path) else {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT expected sandbox file '{}' to exist",
+                source_path.display(),
+                check.line_num,
+                check.relative_path
+            ));
+        };
+        let text = String::from_utf8_lossy(bytes);
+        if check.negative {
+            if text.contains(&check.pattern) {
+                return Err(format!(
+                    "{}:{}: FILE_CHECK/FILE_NOT failed: substring '{}' appears in sandbox file '{}'\n\
+                     Full file contents:\n{}",
+                    source_path.display(),
+                    check.line_num,
+                    check.pattern,
+                    check.relative_path,
+                    text
+                ));
+            }
+            continue;
+        }
+
+        let search_offset = search_offsets
+            .entry(check.relative_path.as_str())
+            .or_insert(0);
+        if let Some(relative_offset) = text[*search_offset..].find(&check.pattern) {
+            *search_offset += relative_offset + check.pattern.len();
+        } else {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT failed: substring '{}' not found in sandbox file '{}' from offset {}\n\
+                 Full file contents:\n{}",
+                source_path.display(),
+                check.line_num,
+                check.pattern,
+                check.relative_path,
+                *search_offset,
+                text
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -5524,6 +5677,105 @@ end
         assert!(match_checks(&checks, "omega\nalpha\n", "demo").is_err());
     }
 
+    #[test]
+    fn file_check_comments_reject_wrong_file_contents() {
+        let root = next_report_temp_root(ReferenceCompiler::Gfortran, OptLevel::O0);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("file_contract.f90");
+        fs::write(
+            &source,
+            r#"program file_contract
+  implicit none
+  open(unit=10, file='artifact.txt', status='replace', action='write')
+  write(10, '(I0)') 99
+  close(10)
+  print '(I0)', 42
+end program file_contract
+! CHECK: 42
+! FILE_CHECK: artifact.txt => 42
+! FILE_NOT: artifact.txt => 99
+"#,
+        )
+        .unwrap();
+
+        let case = CaseSpec {
+            name: "file_contract".into(),
+            source: source.clone(),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::CheckComments(Target::RunStdout)],
+            status_rules: Vec::new(),
+        };
+        let request = CaptureRequest {
+            input: source,
+            requested: BTreeSet::from([Stage::Run]),
+            opt_level: OptLevel::O0,
+        };
+        let result = capture_from_path(&request).unwrap();
+        let evaluation = evaluate_positive_expectations(&case, &result);
+
+        let _ = fs::remove_dir_all(&root);
+        let error = evaluation.expect_err("FILE_CHECK mismatch must fail the case");
+        assert!(error.contains("FILE_CHECK/FILE_NOT failed"), "{error}");
+        assert!(error.contains("artifact.txt"), "{error}");
+    }
+
+    #[test]
+    fn file_checks_preserve_order_and_enforce_negative_patterns() {
+        let source_path = Path::new("ordered_file_checks.f90");
+        let checks = extract_file_checks(
+            "! FILE_CHECK: artifact.txt => alpha\n\
+             ! FILE_CHECK: artifact.txt => omega\n\
+             ! FILE_NOT: artifact.txt => forbidden\n",
+            source_path,
+        )
+        .unwrap();
+        let files = BTreeMap::from([(
+            "artifact.txt".to_string(),
+            b"alpha\nmiddle\nomega\n".to_vec(),
+        )]);
+        assert!(match_file_checks(&checks, &files, source_path).is_ok());
+
+        let out_of_order = BTreeMap::from([(
+            "artifact.txt".to_string(),
+            b"omega\nmiddle\nalpha\n".to_vec(),
+        )]);
+        assert!(match_file_checks(&checks, &out_of_order, source_path).is_err());
+
+        let forbidden = BTreeMap::from([(
+            "artifact.txt".to_string(),
+            b"alpha\nomega\nforbidden\n".to_vec(),
+        )]);
+        let error = match_file_checks(&checks, &forbidden, source_path).unwrap_err();
+        assert!(error.contains("substring 'forbidden' appears"), "{error}");
+    }
+
+    #[test]
+    fn malformed_and_unsupported_file_directives_fail_closed() {
+        let source_path = Path::new("invalid_file_checks.f90");
+        let malformed =
+            extract_file_checks("! FILE_CHECK: artifact.txt\n", source_path).unwrap_err();
+        assert!(
+            malformed.contains("<relative-path> => <substring>"),
+            "{malformed}"
+        );
+
+        let unsupported =
+            extract_file_checks("! FILE_EXISTS: artifact.txt\n", source_path).unwrap_err();
+        assert!(
+            unsupported.contains("unsupported ! FILE_EXISTS"),
+            "{unsupported}"
+        );
+        assert!(
+            unsupported.contains("FILE_CHECK and FILE_NOT"),
+            "{unsupported}"
+        );
+    }
+
     fn run_only_result(stdout: &str, stderr: &str, exit_code: i32) -> CaptureResult {
         CaptureResult {
             input: PathBuf::from("demo.f90"),
@@ -5534,6 +5786,7 @@ end
                     exit_code,
                     stdout: stdout.into(),
                     stderr: stderr.into(),
+                    files: None,
                 }),
             )]),
         }
@@ -5555,6 +5808,7 @@ end
                 exit_code,
                 stdout: stdout.into(),
                 stderr: stderr.into(),
+                files: None,
             }),
             run_error: None,
         }
@@ -5629,6 +5883,7 @@ end
                 exit_code: 1,
                 stdout: "oops\n".into(),
                 stderr: "broken\n".into(),
+                files: None,
             }),
         );
         let artifacts = ExecutionArtifacts {
@@ -5651,6 +5906,7 @@ end
                     exit_code: 0,
                     stdout: "hello\n".into(),
                     stderr: String::new(),
+                    files: None,
                 }),
                 run_error: None,
             }],
@@ -6178,11 +6434,13 @@ end
             exit_code: 0,
             stdout: "alpha\nbeta\n".into(),
             stderr: String::new(),
+            files: None,
         };
         let right = RunCapture {
             exit_code: 0,
             stdout: "alpha\ngamma\n".into(),
             stderr: String::new(),
+            files: None,
         };
 
         let detail = describe_run_difference(&left, &right, "capture run", "cli run 2");

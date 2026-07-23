@@ -249,6 +249,10 @@ pub struct RunCapture {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// Files created in the isolated run directory, when this capture path
+    /// records filesystem evidence. `None` means the path did not snapshot
+    /// files; it is distinct from an observed empty sandbox.
+    pub files: Option<BTreeMap<String, Vec<u8>>>,
 }
 
 #[cfg(test)]
