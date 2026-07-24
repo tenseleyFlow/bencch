@@ -377,8 +377,8 @@ pub fn capture_graph(
                 Stage::Run,
                 CapturedStage::Run(RunCapture {
                     exit_code: output.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
                     files: Some(files),
                 }),
             );

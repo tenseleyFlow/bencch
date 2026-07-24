@@ -247,12 +247,22 @@ impl CapturedStage {
 #[derive(Debug, Clone)]
 pub struct RunCapture {
     pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
     /// Files created in the isolated run directory, when this capture path
     /// records filesystem evidence. `None` means the path did not snapshot
     /// files; it is distinct from an observed empty sandbox.
     pub files: Option<BTreeMap<String, Vec<u8>>>,
+}
+
+impl RunCapture {
+    pub fn stdout_text(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.stdout)
+    }
+
+    pub fn stderr_text(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.stderr)
+    }
 }
 
 #[cfg(test)]

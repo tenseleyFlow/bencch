@@ -2,6 +2,7 @@ mod compiler;
 mod project_campaign;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -483,8 +484,8 @@ impl ReferenceResult {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RunSignature {
     exit_code: i32,
-    stdout: String,
-    stderr: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -1888,17 +1889,26 @@ fn target_text<'a>(result: &'a CaptureResult, target: &Target) -> Result<&'a str
             None => Err(format!("missing captured stage '{}'", stage.as_str())),
         },
         Target::RunStdout => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stdout),
+            Some(run) => captured_output_text(&run.stdout, "run.stdout"),
             None => Err("missing captured run stage".into()),
         },
         Target::RunStderr => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stderr),
+            Some(run) => captured_output_text(&run.stderr, "run.stderr"),
             None => Err("missing captured run stage".into()),
         },
         Target::RunExitCode => {
             Err("run.exit_code is numeric; use 'expect run.exit_code equals <int>'".into())
         }
     }
+}
+
+fn captured_output_text<'a>(bytes: &'a [u8], target: &str) -> Result<&'a str, String> {
+    std::str::from_utf8(bytes).map_err(|error| {
+        format!(
+            "{target} is not valid UTF-8 (first invalid byte at offset {})",
+            error.valid_up_to()
+        )
+    })
 }
 
 fn target_int(result: &CaptureResult, target: &Target) -> Result<i32, String> {
@@ -3759,8 +3769,8 @@ fn run_reference_graph(
             Ok(output) => {
                 result.run = Some(RunCapture {
                     exit_code: output.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
                     files: None,
                 });
             }
@@ -3854,8 +3864,8 @@ fn run_reference_case(
             Ok(output) => {
                 result.run = Some(RunCapture {
                     exit_code: output.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
                     files: None,
                 });
             }
@@ -4162,8 +4172,8 @@ fn run_binary_capture(
     })?;
     Ok(RunCapture {
         exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: output.stdout,
+        stderr: output.stderr,
         files: None,
     })
 }
@@ -4171,8 +4181,15 @@ fn run_binary_capture(
 fn normalize_run_signature(run: &RunCapture) -> RunSignature {
     RunSignature {
         exit_code: run.exit_code,
-        stdout: normalize_behavior_text(&run.stdout),
-        stderr: normalize_behavior_text(&run.stderr),
+        stdout: normalize_behavior_bytes(&run.stdout),
+        stderr: normalize_behavior_bytes(&run.stderr),
+    }
+}
+
+fn normalize_behavior_bytes(bytes: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => normalize_behavior_text(text).into_bytes(),
+        Err(_) => bytes.to_vec(),
     }
 }
 
@@ -4254,16 +4271,8 @@ fn format_reference_result(reference: &ReferenceResult) -> String {
 }
 
 fn format_run_capture(run: &RunCapture) -> String {
-    let stdout = if run.stdout.is_empty() {
-        "<empty>".to_string()
-    } else {
-        run.stdout.trim_end().to_string()
-    };
-    let stderr = if run.stderr.is_empty() {
-        "<empty>".to_string()
-    } else {
-        run.stderr.trim_end().to_string()
-    };
+    let stdout = format_captured_output(&run.stdout);
+    let stderr = format_captured_output(&run.stderr);
     format!(
         "exit: {}\nstdout:\n{}\nstderr:\n{}",
         run.exit_code, stdout, stderr
@@ -4271,20 +4280,41 @@ fn format_run_capture(run: &RunCapture) -> String {
 }
 
 fn format_run_signature(signature: &RunSignature) -> String {
-    let stdout = if signature.stdout.is_empty() {
-        "<empty>".to_string()
-    } else {
-        signature.stdout.clone()
-    };
-    let stderr = if signature.stderr.is_empty() {
-        "<empty>".to_string()
-    } else {
-        signature.stderr.clone()
-    };
+    let stdout = format_captured_output(&signature.stdout);
+    let stderr = format_captured_output(&signature.stderr);
     format!(
         "exit: {}\nstdout:\n{}\nstderr:\n{}",
         signature.exit_code, stdout, stderr
     )
+}
+
+fn format_captured_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.trim_end().to_string(),
+        Err(_) => {
+            const DISPLAY_LIMIT: usize = 256;
+            let mut rendered = format!("<non-UTF-8 output: {} bytes> ", bytes.len());
+            for &byte in bytes.iter().take(DISPLAY_LIMIT) {
+                match byte {
+                    b'\\' => rendered.push_str("\\\\"),
+                    b'\n' => rendered.push_str("\\n"),
+                    b'\r' => rendered.push_str("\\r"),
+                    b'\t' => rendered.push_str("\\t"),
+                    0x20..=0x7e => rendered.push(char::from(byte)),
+                    _ => write!(rendered, "\\x{byte:02x}").expect("writing to String cannot fail"),
+                }
+            }
+            if bytes.len() > DISPLAY_LIMIT {
+                write!(rendered, "... <{} more bytes>", bytes.len() - DISPLAY_LIMIT)
+                    .expect("writing to String cannot fail");
+            }
+            rendered
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4564,15 +4594,45 @@ fn describe_run_difference(
         "stdout" => format!(
             "differing runtime components: {}\nfirst differing component: stdout\n{}",
             component_list,
-            describe_text_difference(&expected.stdout, &actual.stdout, left_label, right_label)
+            describe_output_difference(&expected.stdout, &actual.stdout, left_label, right_label)
         ),
         "stderr" => format!(
             "differing runtime components: {}\nfirst differing component: stderr\n{}",
             component_list,
-            describe_text_difference(&expected.stderr, &actual.stderr, left_label, right_label)
+            describe_output_difference(&expected.stderr, &actual.stderr, left_label, right_label)
         ),
         _ => unreachable!("only known runtime components are compared"),
     }
+}
+
+fn describe_output_difference(
+    expected: &[u8],
+    actual: &[u8],
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    if let (Ok(expected), Ok(actual)) = (std::str::from_utf8(expected), std::str::from_utf8(actual))
+    {
+        return describe_text_difference(expected, actual, left_label, right_label);
+    }
+
+    let differing_offset = expected
+        .iter()
+        .zip(actual)
+        .position(|(left, right)| left != right)
+        .unwrap_or_else(|| expected.len().min(actual.len()));
+    let byte_label = |bytes: &[u8]| match bytes.get(differing_offset) {
+        Some(byte) => format!("0x{byte:02x}"),
+        None => "<end-of-output>".to_string(),
+    };
+
+    format!(
+        "first differing byte offset: {differing_offset}\n{left_label}: {} ({} bytes)\n{right_label}: {} ({} bytes)",
+        byte_label(expected),
+        expected.len(),
+        byte_label(actual),
+        actual.len()
+    )
 }
 
 fn varying_object_components(snapshots: &[&ObjectSnapshot]) -> Vec<&'static str> {
@@ -4648,29 +4708,34 @@ fn run_components_by_variation(
             "exit_code",
             signatures
                 .iter()
-                .map(|signature| signature.exit_code.to_string())
-                .collect::<Vec<_>>(),
+                .map(|signature| signature.exit_code)
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
         ),
         (
             "stdout",
             signatures
                 .iter()
-                .map(|signature| signature.stdout.clone())
-                .collect::<Vec<_>>(),
+                .map(|signature| signature.stdout.as_slice())
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
         ),
         (
             "stderr",
             signatures
                 .iter()
-                .map(|signature| signature.stderr.clone())
-                .collect::<Vec<_>>(),
+                .map(|signature| signature.stderr.as_slice())
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
         ),
     ];
 
     components
         .into_iter()
-        .filter_map(|(name, values)| {
-            let varies = count_unique_strings(values.iter().map(String::as_str)) > 1;
+        .filter_map(|(name, varies)| {
             if varies == want_varying {
                 Some(name)
             } else {
@@ -5801,8 +5866,8 @@ end program file_contract
                 Stage::Run,
                 CapturedStage::Run(RunCapture {
                     exit_code,
-                    stdout: stdout.into(),
-                    stderr: stderr.into(),
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: stderr.as_bytes().to_vec(),
                     files: None,
                 }),
             )]),
@@ -5823,8 +5888,8 @@ end program file_contract
             compile_stderr: String::new(),
             run: Some(RunCapture {
                 exit_code,
-                stdout: stdout.into(),
-                stderr: stderr.into(),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
                 files: None,
             }),
             run_error: None,
@@ -5898,8 +5963,8 @@ end program file_contract
             Stage::Run,
             CapturedStage::Run(RunCapture {
                 exit_code: 1,
-                stdout: "oops\n".into(),
-                stderr: "broken\n".into(),
+                stdout: b"oops\n".to_vec(),
+                stderr: b"broken\n".to_vec(),
                 files: None,
             }),
         );
@@ -5921,8 +5986,8 @@ end program file_contract
                 compile_stderr: String::new(),
                 run: Some(RunCapture {
                     exit_code: 0,
-                    stdout: "hello\n".into(),
-                    stderr: String::new(),
+                    stdout: b"hello\n".to_vec(),
+                    stderr: Vec::new(),
                     files: None,
                 }),
                 run_error: None,
@@ -6120,10 +6185,10 @@ end program file_contract
         let result = capture_prepared_input(&prepared, &case.requested, OptLevel::O0).unwrap();
         let run = capture_run_stage(&result).unwrap();
         assert_eq!(run.exit_code, 0);
+        let stdout = run.stdout_text().expect("graph stdout should be UTF-8");
         assert!(
-            run.stdout.split_whitespace().any(|field| field == "42"),
-            "graph binary did not execute the separately compiled module: {:?}",
-            run.stdout
+            stdout.split_whitespace().any(|field| field == "42"),
+            "graph binary did not execute the separately compiled module: {stdout:?}"
         );
 
         let ast = capture_text_stage(&result, Stage::Ast).unwrap();
@@ -6231,7 +6296,7 @@ end program file_contract
             &tools,
         );
         assert_eq!(result.compile_exit_code, 0, "{}", result.compile_stderr);
-        assert_eq!(result.run.unwrap().stdout, "42\n");
+        assert_eq!(result.run.unwrap().stdout, b"42\n");
 
         let commands = fs::read_to_string(&log).unwrap();
         let commands = commands.lines().collect::<Vec<_>>();
@@ -6449,14 +6514,14 @@ end program file_contract
     fn run_diff_reports_changed_components() {
         let left = RunCapture {
             exit_code: 0,
-            stdout: "alpha\nbeta\n".into(),
-            stderr: String::new(),
+            stdout: b"alpha\nbeta\n".to_vec(),
+            stderr: Vec::new(),
             files: None,
         };
         let right = RunCapture {
             exit_code: 0,
-            stdout: "alpha\ngamma\n".into(),
-            stderr: String::new(),
+            stdout: b"alpha\ngamma\n".to_vec(),
+            stderr: Vec::new(),
             files: None,
         };
 
@@ -6467,17 +6532,90 @@ end program file_contract
         assert!(detail.contains("cli run 2: gamma"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_capture_distinguishes_invalid_utf8_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_invalid_utf8_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ff = root.join("emit_ff");
+        let fe = root.join("emit_fe");
+        fs::write(&ff, "#!/bin/sh\nprintf '\\377'\n").unwrap();
+        fs::write(&fe, "#!/bin/sh\nprintf '\\376'\n").unwrap();
+        fs::set_permissions(&ff, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&fe, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let ff_run = run_binary_capture(&ff, &root, "emit ff").unwrap();
+        let fe_run = run_binary_capture(&fe, &root, "emit fe").unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(ff_run.exit_code, 0);
+        assert_eq!(fe_run.exit_code, 0);
+        assert_eq!(ff_run.stdout, vec![0xff]);
+        assert_eq!(fe_run.stdout, vec![0xfe]);
+        assert_ne!(
+            normalize_run_signature(&ff_run),
+            normalize_run_signature(&fe_run),
+            "distinct invalid UTF-8 byte streams must not compare equal"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_run_output_fails_text_checks_and_renders_exact_bytes() {
+        let result = CaptureResult {
+            input: PathBuf::from("invalid-output.f90"),
+            opt_level: OptLevel::O0,
+            stages: BTreeMap::from([(
+                Stage::Run,
+                CapturedStage::Run(RunCapture {
+                    exit_code: 0,
+                    stdout: vec![0xff],
+                    stderr: Vec::new(),
+                    files: None,
+                }),
+            )]),
+        };
+
+        let error = target_text(&result, &Target::RunStdout).unwrap_err();
+        assert!(error.contains("run.stdout is not valid UTF-8"), "{error}");
+        assert!(error.contains("offset 0"), "{error}");
+
+        let left = result
+            .get(Stage::Run)
+            .and_then(CapturedStage::as_run)
+            .unwrap();
+        let right = RunCapture {
+            exit_code: 0,
+            stdout: vec![0xfe],
+            stderr: Vec::new(),
+            files: None,
+        };
+        assert!(format_run_capture(left).contains("\\xff"));
+        let detail = describe_run_difference(left, &right, "left", "right");
+        assert!(
+            detail.contains("first differing byte offset: 0"),
+            "{detail}"
+        );
+        assert!(detail.contains("left: 0xff"), "{detail}");
+        assert!(detail.contains("right: 0xfe"), "{detail}");
+        assert!(!detail.contains('\u{fffd}'), "{detail}");
+    }
+
     #[test]
     fn run_component_variation_classifies_stdout_only_instability() {
         let first = RunSignature {
             exit_code: 0,
-            stdout: "alpha".into(),
-            stderr: String::new(),
+            stdout: b"alpha".to_vec(),
+            stderr: Vec::new(),
         };
         let second = RunSignature {
             exit_code: 0,
-            stdout: "beta".into(),
-            stderr: String::new(),
+            stdout: b"beta".to_vec(),
+            stderr: Vec::new(),
         };
         let signatures = vec![&first, &second];
 
