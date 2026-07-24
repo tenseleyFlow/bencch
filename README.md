@@ -105,6 +105,27 @@ Environment overrides work too:
 BENCCH_ARMFORTAS_BIN=./target/debug/armfortas cargo run -p afs-tests -- run --suite consistency/object
 ```
 
+Every compiler, generated program, inspection tool, and project command runs in
+a managed process group. The runner drains both output streams concurrently,
+retains at most 16 MiB per stream, and treats timeout, cancellation, incomplete
+capture, and output truncation as hard harness failures. On Unix, expiry
+terminates the command's entire process group, including descendants that
+inherited the capture pipes, and reaps the direct child.
+
+The conservative defaults can be overridden with positive integer values:
+
+- `BENCCH_COMPILE_TIMEOUT_SECS` (default `120`)
+- `BENCCH_RUN_TIMEOUT_SECS` (default `30`)
+- `BENCCH_TOOL_TIMEOUT_SECS` (default `60`)
+- `BENCCH_PROJECT_TIMEOUT_SECS` (default `1800`)
+- `BENCCH_KILL_GRACE_MS` (default `1000`)
+- `BENCCH_OUTPUT_LIMIT_BYTES` (default `16777216`, independently for stdout and
+  stderr)
+
+Malformed, zero, and excessive limit values fail closed before the command is
+launched. Project reports record `TIMEOUT`, `CANCELLED`, `OUTPUT_LIMIT`, and
+`HARNESS_FAILURE` separately and retain the bounded partial output.
+
 ## Suite Format
 
 Suites are plain text files under `suites/`.

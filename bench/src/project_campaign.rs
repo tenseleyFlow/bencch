@@ -6,6 +6,10 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::{sanitize_component, ArmfortasCliAdapter, ToolchainConfig};
+use armfortas::testing::managed_process::{
+    run_with_limits as run_managed_with_limits, CapturedStreams, CommandClass, CommandLimits,
+    ManagedCommandError,
+};
 
 const CATALOG_EXTENSION: &str = "afproj";
 
@@ -127,14 +131,74 @@ struct StepExecution {
     label: &'static str,
     command: String,
     duration_ms: u128,
-    exit_code: i32,
+    outcome: StepOutcome,
     stdout: String,
     stderr: String,
 }
 
 impl StepExecution {
     fn succeeded(&self) -> bool {
-        self.exit_code == 0
+        self.outcome == StepOutcome::Exited(0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StepOutcome {
+    Exited(i32),
+    TimedOut {
+        deadline_ms: u128,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    },
+    Cancelled {
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    },
+    OutputLimitExceeded {
+        limit: usize,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    },
+    HarnessFailure(String),
+}
+
+impl StepOutcome {
+    fn report_text(&self) -> String {
+        match self {
+            Self::Exited(code) => format!("exited with code {code}"),
+            Self::TimedOut {
+                deadline_ms,
+                stdout_truncated,
+                stderr_truncated,
+            } => format!(
+                "TIMEOUT after {deadline_ms} ms (stdout_truncated={stdout_truncated}, stderr_truncated={stderr_truncated})"
+            ),
+            Self::Cancelled {
+                stdout_truncated,
+                stderr_truncated,
+            } => format!(
+                "CANCELLED (stdout_truncated={stdout_truncated}, stderr_truncated={stderr_truncated})"
+            ),
+            Self::OutputLimitExceeded {
+                limit,
+                stdout_truncated,
+                stderr_truncated,
+            } => format!(
+                "OUTPUT_LIMIT exceeded ({limit} bytes per stream; stdout_truncated={stdout_truncated}, stderr_truncated={stderr_truncated})"
+            ),
+            Self::HarnessFailure(detail) => format!("HARNESS_FAILURE: {detail}"),
+        }
+    }
+
+    fn console_word(&self) -> &'static str {
+        match self {
+            Self::Exited(0) => "PASS",
+            Self::Exited(_) => "FAIL",
+            Self::TimedOut { .. } => "TIMEOUT",
+            Self::Cancelled { .. } => "CANCELLED",
+            Self::OutputLimitExceeded { .. } => "OUTPUT_LIMIT",
+            Self::HarnessFailure(_) => "HARNESS_FAILURE",
+        }
     }
 }
 
@@ -707,20 +771,20 @@ fn run_for_compiler(
         )
     })?;
     let workdir = prepare_project_workdir(catalog, project, compiler)?;
-    let build = run_step("build", build_command, &workdir, compiler_bin, cc_bin)?;
+    let build = run_step("build", build_command, &workdir, compiler_bin, cc_bin);
     let test = if build.succeeded() {
-        match &project.test_command {
-            Some(command) => Some(run_step("test", command, &workdir, compiler_bin, cc_bin)?),
-            None => None,
-        }
+        project
+            .test_command
+            .as_ref()
+            .map(|command| run_step("test", command, &workdir, compiler_bin, cc_bin))
     } else {
         None
     };
     let smoke = if build.succeeded() && test.as_ref().map(|step| step.succeeded()).unwrap_or(true) {
-        match &project.smoke_command {
-            Some(command) => Some(run_step("smoke", command, &workdir, compiler_bin, cc_bin)?),
-            None => None,
-        }
+        project
+            .smoke_command
+            .as_ref()
+            .map(|command| run_step("smoke", command, &workdir, compiler_bin, cc_bin))
     } else {
         None
     };
@@ -920,7 +984,30 @@ fn run_step(
     workdir: &Path,
     compiler_bin: &str,
     cc_bin: &str,
-) -> Result<StepExecution, String> {
+) -> StepExecution {
+    match CommandLimits::for_class(CommandClass::Project) {
+        Ok(limits) => run_step_with_limits(label, template, workdir, compiler_bin, cc_bin, limits),
+        Err(detail) => StepExecution {
+            label,
+            command: expand_command_template(template, compiler_bin, cc_bin),
+            duration_ms: 0,
+            outcome: StepOutcome::HarnessFailure(format!(
+                "managed command configuration error: {detail}"
+            )),
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+    }
+}
+
+fn run_step_with_limits(
+    label: &'static str,
+    template: &str,
+    workdir: &Path,
+    compiler_bin: &str,
+    cc_bin: &str,
+    limits: CommandLimits,
+) -> StepExecution {
     let command = expand_command_template(template, compiler_bin, cc_bin);
     let start = Instant::now();
     // Shell per host: macOS ships zsh as the login shell; the ELF
@@ -933,34 +1020,104 @@ fn run_step(
     } else {
         ("/bin/sh", "-c")
     };
-    let output = Command::new(shell)
-        .arg(shell_flag)
-        .arg(&command)
-        .current_dir(workdir)
-        .env("FC", compiler_bin)
-        .env("CC", cc_bin)
-        .env("ARMFORTAS", compiler_bin)
-        .output()
-        .map_err(|e| {
-            format!(
-                "cannot run {} command '{}' in '{}': {}",
-                label,
-                command,
-                workdir.display(),
-                e
-            )
-        })?;
+    let result = run_managed_with_limits(
+        Command::new(shell)
+            .arg(shell_flag)
+            .arg(&command)
+            .current_dir(workdir)
+            .env("FC", compiler_bin)
+            .env("CC", cc_bin)
+            .env("ARMFORTAS", compiler_bin),
+        limits,
+        None,
+    );
     let duration_ms = start.elapsed().as_millis();
-    let exit_code = output.status.code().unwrap_or(-1);
+    match result {
+        Ok(output) => StepExecution {
+            label,
+            command,
+            duration_ms,
+            outcome: StepOutcome::Exited(output.status.code().unwrap_or(-1)),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(error) => step_from_managed_error(label, command, duration_ms, error),
+    }
+}
 
-    Ok(StepExecution {
+fn step_from_managed_error(
+    label: &'static str,
+    command: String,
+    duration_ms: u128,
+    error: ManagedCommandError,
+) -> StepExecution {
+    let (outcome, captured) = match error {
+        ManagedCommandError::TimedOut { timeout, captured } => {
+            let outcome = StepOutcome::TimedOut {
+                deadline_ms: timeout.as_millis(),
+                stdout_truncated: captured.stdout.truncated,
+                stderr_truncated: captured.stderr.truncated,
+            };
+            (outcome, Some(captured))
+        }
+        ManagedCommandError::Cancelled { captured } => {
+            let outcome = StepOutcome::Cancelled {
+                stdout_truncated: captured.stdout.truncated,
+                stderr_truncated: captured.stderr.truncated,
+            };
+            (outcome, Some(captured))
+        }
+        ManagedCommandError::OutputLimitExceeded {
+            limit, captured, ..
+        } => {
+            let outcome = StepOutcome::OutputLimitExceeded {
+                limit,
+                stdout_truncated: captured.stdout.truncated,
+                stderr_truncated: captured.stderr.truncated,
+            };
+            (outcome, Some(captured))
+        }
+        ManagedCommandError::Monitor { error, captured } => (
+            StepOutcome::HarnessFailure(format!("cannot monitor managed command: {error}")),
+            Some(captured),
+        ),
+        ManagedCommandError::CaptureIncomplete {
+            status,
+            detail,
+            captured,
+        } => (
+            StepOutcome::HarnessFailure(format!(
+                "output capture did not close after status {status}: {detail}"
+            )),
+            Some(captured),
+        ),
+        ManagedCommandError::Configuration(detail) => (
+            StepOutcome::HarnessFailure(format!("managed command configuration error: {detail}")),
+            None,
+        ),
+        ManagedCommandError::Spawn(error) => (
+            StepOutcome::HarnessFailure(format!("cannot spawn managed command: {error}")),
+            None,
+        ),
+    };
+    let (stdout, stderr) = captured
+        .map(captured_text)
+        .unwrap_or_else(|| (String::new(), String::new()));
+    StepExecution {
         label,
         command,
         duration_ms,
-        exit_code,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+        outcome,
+        stdout,
+        stderr,
+    }
+}
+
+fn captured_text(captured: CapturedStreams) -> (String, String) {
+    (
+        String::from_utf8_lossy(&captured.stdout.bytes).into_owned(),
+        String::from_utf8_lossy(&captured.stderr.bytes).into_owned(),
+    )
 }
 
 fn expand_command_template(template: &str, compiler_bin: &str, cc_bin: &str) -> String {
@@ -1014,29 +1171,20 @@ fn compare_step_outcome(
     compare_output: bool,
     findings: &mut Vec<DifferentialFinding>,
 ) {
-    if left.succeeded() != right.succeeded() {
+    if left.outcome != right.outcome {
         findings.push(DifferentialFinding {
             step,
             detail: format!(
-                "{} success diverged: armfortas={} reference={}",
+                "{} outcome diverged: armfortas={} reference={}",
                 step,
-                left.succeeded(),
-                right.succeeded()
+                left.outcome.report_text(),
+                right.outcome.report_text()
             ),
         });
         return;
     }
 
     if compare_output && left.succeeded() {
-        if left.exit_code != right.exit_code {
-            findings.push(DifferentialFinding {
-                step,
-                detail: format!(
-                    "{} exit code diverged: armfortas={} reference={}",
-                    step, left.exit_code, right.exit_code
-                ),
-            });
-        }
         if left.stdout != right.stdout {
             findings.push(DifferentialFinding {
                 step,
@@ -1172,7 +1320,7 @@ fn append_step_report(report: &mut String, step: &StepExecution) {
     writeln!(report).unwrap();
     writeln!(report, "- Command: `{}`", step.command).unwrap();
     writeln!(report, "- Duration: `{}` ms", step.duration_ms).unwrap();
-    writeln!(report, "- Exit code: `{}`", step.exit_code).unwrap();
+    writeln!(report, "- Outcome: `{}`", step.outcome.report_text()).unwrap();
     writeln!(report).unwrap();
     writeln!(report, "```text").unwrap();
     if !step.stdout.is_empty() {
@@ -1241,32 +1389,24 @@ fn step_console_line(
     let mut parts = Vec::new();
     parts.push(format!(
         "build={}({}ms)",
-        status_word(build.succeeded()),
+        build.outcome.console_word(),
         build.duration_ms
     ));
     if let Some(step) = test {
         parts.push(format!(
             "test={}({}ms)",
-            status_word(step.succeeded()),
+            step.outcome.console_word(),
             step.duration_ms
         ));
     }
     if let Some(step) = smoke {
         parts.push(format!(
             "smoke={}({}ms)",
-            status_word(step.succeeded()),
+            step.outcome.console_word(),
             step.duration_ms
         ));
     }
     format!("{} {}", compiler, parts.join(" "))
-}
-
-fn status_word(ok: bool) -> &'static str {
-    if ok {
-        "PASS"
-    } else {
-        "FAIL"
-    }
 }
 
 fn cleanup_workdir(path: &Path) {
@@ -1329,5 +1469,80 @@ end
             "/usr/bin/clang",
         );
         assert_eq!(expanded, "make FC=\"/tmp/armfortas\" CC=\"/usr/bin/clang\"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_steps_are_time_bounded() {
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_project_timeout_{}",
+            next_project_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let started = Instant::now();
+        let step = run_step_with_limits(
+            "test",
+            "printf 'started\\n'; sleep 2",
+            &root,
+            "/bin/false",
+            "/bin/false",
+            CommandLimits {
+                timeout: std::time::Duration::from_millis(100),
+                kill_grace: std::time::Duration::from_millis(50),
+                capture_limit: 1024,
+            },
+        );
+        let elapsed = started.elapsed();
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "project step exceeded its required bound: {elapsed:?}"
+        );
+        assert_eq!(step.stdout, "started\n");
+        assert!(matches!(
+            step.outcome,
+            StepOutcome::TimedOut {
+                deadline_ms: 100,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_output_limit_is_reported_as_a_hard_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_project_output_limit_{}",
+            next_project_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let step = run_step_with_limits(
+            "build",
+            "while :; do printf '0123456789abcdef'; done",
+            &root,
+            "/bin/false",
+            "/bin/false",
+            CommandLimits {
+                timeout: std::time::Duration::from_secs(2),
+                kill_grace: std::time::Duration::from_millis(50),
+                capture_limit: 8,
+            },
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(step.stdout, "01234567");
+        assert!(matches!(
+            step.outcome,
+            StepOutcome::OutputLimitExceeded {
+                limit: 8,
+                stdout_truncated: true,
+                stderr_truncated: false,
+            }
+        ));
+        assert!(!step.succeeded());
     }
 }

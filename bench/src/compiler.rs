@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use armfortas::testing::managed_process::{run as run_managed, CommandClass};
+
 pub use bencch_core::{
     CaptureFailure, CaptureRequest, CaptureResult, CapturedStage, FailureStage, OptLevel,
     RunCapture, Stage,
@@ -349,16 +351,17 @@ pub fn capture_graph(
                     stages.clone(),
                 )
             })?;
-            let output = Command::new(&binary)
-                .current_dir(&sandbox)
-                .output()
-                .map_err(|error| {
-                    failure(
-                        FailureStage::Run,
-                        format!("cannot run graph binary '{}': {}", binary.display(), error),
-                        stages.clone(),
-                    )
-                })?;
+            let output = run_managed(
+                Command::new(&binary).current_dir(&sandbox),
+                CommandClass::Run,
+            )
+            .map_err(|error| {
+                failure(
+                    FailureStage::Run,
+                    format!("cannot run graph binary '{}': {}", binary.display(), error),
+                    stages.clone(),
+                )
+            })?;
             let files = snapshot_sandbox_files(&sandbox)
                 .map_err(|detail| failure(FailureStage::Run, detail, stages.clone()))?;
             stages.insert(

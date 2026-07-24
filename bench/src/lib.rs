@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use armfortas::testing::managed_process::{run as run_managed, CommandClass};
+
 use crate::compiler::{
     capture_from_path, capture_graph, compile_graph_output, compile_output, CaptureFailure,
     CaptureRequest, CaptureResult, CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture,
@@ -2186,14 +2188,14 @@ fn run_cli_obj_vs_system_as(
         asm_path.display().to_string(),
     ];
     let as_command = render_command(tools.system_as_bin(), &as_args);
-    let as_output = match Command::new(tools.system_as_bin())
-        .args([
+    let as_output = match run_managed(
+        Command::new(tools.system_as_bin()).args([
             "-o",
             asm_obj_path.to_str().unwrap(),
             asm_path.to_str().unwrap(),
-        ])
-        .output()
-    {
+        ]),
+        CommandClass::Tool,
+    ) {
         Ok(output) => output,
         Err(err) => {
             return Some(ConsistencyIssue {
@@ -3635,6 +3637,7 @@ fn run_reference_graph(
             format!("cannot create temp dir '{}': {}", temp_root.display(), err),
         );
     }
+    let _temp_cleanup = ReferenceTempCleanup(temp_root.clone());
 
     let mut commands = Vec::new();
     let mut compile_stdout = String::new();
@@ -3656,11 +3659,12 @@ fn run_reference_graph(
         args.push(object.display().to_string());
         let command = render_command(compiler_bin, &args);
         commands.push(command.clone());
-        let output = match Command::new(compiler_bin)
-            .current_dir(&temp_root)
-            .args(&args)
-            .output()
-        {
+        let output = match run_managed(
+            Command::new(compiler_bin)
+                .current_dir(&temp_root)
+                .args(&args),
+            CommandClass::Compile,
+        ) {
             Ok(output) => output,
             Err(err) => {
                 let _ = fs::remove_dir_all(&temp_root);
@@ -3709,11 +3713,12 @@ fn run_reference_graph(
     link_args.push(binary.display().to_string());
     let link_command = render_command(compiler_bin, &link_args);
     commands.push(link_command);
-    let link = match Command::new(compiler_bin)
-        .current_dir(&temp_root)
-        .args(&link_args)
-        .output()
-    {
+    let link = match run_managed(
+        Command::new(compiler_bin)
+            .current_dir(&temp_root)
+            .args(&link_args),
+        CommandClass::Compile,
+    ) {
         Ok(output) => output,
         Err(err) => {
             let _ = fs::remove_dir_all(&temp_root);
@@ -3747,7 +3752,10 @@ fn run_reference_graph(
         run_error: None,
     };
     if link.status.success() {
-        match Command::new(&binary).current_dir(&temp_root).output() {
+        match run_managed(
+            Command::new(&binary).current_dir(&temp_root),
+            CommandClass::Run,
+        ) {
             Ok(output) => {
                 result.run = Some(RunCapture {
                     exit_code: output.status.code().unwrap_or(-1),
@@ -3809,14 +3817,17 @@ fn run_reference_case(
             format!("cannot create temp dir '{}': {}", temp_root.display(), err),
         );
     }
+    let _temp_cleanup = ReferenceTempCleanup(temp_root.clone());
 
-    let compile = match Command::new(compiler_bin)
-        .current_dir(&temp_root)
-        .args(&args)
-        .output()
-    {
+    let compile = match run_managed(
+        Command::new(compiler_bin)
+            .current_dir(&temp_root)
+            .args(&args),
+        CommandClass::Compile,
+    ) {
         Ok(output) => output,
         Err(err) => {
+            let _ = fs::remove_dir_all(&temp_root);
             return ReferenceResult::infrastructure_error(
                 compiler,
                 command_string,
@@ -3836,7 +3847,10 @@ fn run_reference_case(
     };
 
     if compile.status.success() {
-        match Command::new(&binary).current_dir(&temp_root).output() {
+        match run_managed(
+            Command::new(&binary).current_dir(&temp_root),
+            CommandClass::Run,
+        ) {
             Ok(output) => {
                 result.run = Some(RunCapture {
                     exit_code: output.status.code().unwrap_or(-1),
@@ -3859,6 +3873,14 @@ fn source_uses_cpp(source: &Path) -> bool {
     fs::read_to_string(source)
         .map(|text| text.lines().any(|line| line.trim_start().starts_with('#')))
         .unwrap_or(false)
+}
+
+struct ReferenceTempCleanup(PathBuf);
+
+impl Drop for ReferenceTempCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3887,9 +3909,7 @@ fn compile_with_driver(
         args.push("-o".to_string());
         args.push(output.display().to_string());
 
-        let compile = Command::new(binary)
-            .args(&args)
-            .output()
+        let compile = run_managed(Command::new(binary).args(&args), CommandClass::Compile)
             .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
         if !compile.status.success() {
             let stderr = String::from_utf8_lossy(&compile.stderr);
@@ -3942,9 +3962,7 @@ fn compile_prepared_with_driver(
         );
         args.push("-o".to_string());
         args.push(output.display().to_string());
-        let compile = Command::new(binary)
-            .args(&args)
-            .output()
+        let compile = run_managed(Command::new(binary).args(&args), CommandClass::Compile)
             .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
         if !compile.status.success() {
             return Err(format!(
@@ -4130,17 +4148,18 @@ fn run_binary_capture(
     current_dir: &Path,
     command: &str,
 ) -> Result<RunCapture, String> {
-    let output = Command::new(binary)
-        .current_dir(current_dir)
-        .output()
-        .map_err(|err| {
-            format!(
-                "{} failed:\ncannot run '{}': {}",
-                command,
-                binary.display(),
-                err
-            )
-        })?;
+    let output = run_managed(
+        Command::new(binary).current_dir(current_dir),
+        CommandClass::Run,
+    )
+    .map_err(|err| {
+        format!(
+            "{} failed:\ncannot run '{}': {}",
+            command,
+            binary.display(),
+            err
+        )
+    })?;
     Ok(RunCapture {
         exit_code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -4329,9 +4348,7 @@ fn object_snapshot(path: &Path, tools: &ToolchainConfig) -> Result<ObjectSnapsho
 }
 
 fn tool_output(tool: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(tool)
-        .args(args)
-        .output()
+    let output = run_managed(Command::new(tool).args(args), CommandClass::Tool)
         .map_err(|e| format!("cannot run {}: {}", tool, e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -6167,7 +6184,7 @@ end program file_contract
         assert!(!leaked_amod.exists());
         assert!(!leaked_mod.exists());
 
-        let run = Command::new(&binary).output().unwrap();
+        let run = run_managed(&mut Command::new(&binary), CommandClass::Run).unwrap();
         assert!(run.status.success());
         assert!(String::from_utf8_lossy(&run.stdout)
             .split_whitespace()
