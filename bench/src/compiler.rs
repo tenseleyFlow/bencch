@@ -137,7 +137,8 @@ pub fn capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, Capt
     // the root harness. Refuse loudly (x09, one-dialect rule).
     let input_path = request.input.clone();
     match fixture_flags(&input_path) {
-        Ok(flags) if !flags.is_empty() => {
+        Ok(flags) if flags.is_empty() => {}
+        Ok(flags) => {
             return Err(CaptureFailure {
                 input: input_path,
                 opt_level: request.opt_level,
@@ -150,7 +151,15 @@ pub fn capture_from_path(request: &CaptureRequest) -> Result<CaptureResult, Capt
                 stages: BTreeMap::new(),
             });
         }
-        _ => {}
+        Err(detail) => {
+            return Err(CaptureFailure {
+                input: input_path,
+                opt_level: request.opt_level,
+                stage: FailureStage::Preprocess,
+                detail,
+                stages: BTreeMap::new(),
+            });
+        }
     }
     let arm_request = armfortas::testing::CaptureRequest {
         input: request.input.clone(),
@@ -641,12 +650,113 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{from_driver_opt_level, into_driver_opt_level, OptLevel};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{
+        capture_from_path, from_driver_opt_level, into_driver_opt_level, CaptureRequest,
+        FailureStage, OptLevel, Stage,
+    };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn driver_opt_level_round_trips_os() {
         let driver = into_driver_opt_level(OptLevel::Os);
         assert_eq!(driver, armfortas::driver::OptLevel::Os);
         assert_eq!(from_driver_opt_level(driver), OptLevel::Os);
+    }
+
+    #[test]
+    fn capture_rejects_malformed_flags_before_compilation() {
+        for (name, annotations, expected) in [
+            (
+                "duplicate",
+                "! FLAGS: -fdefault-integer-8\n! FLAGS: -fdefault-real-8\n",
+                "multiple FLAGS annotations",
+            ),
+            ("empty", "! FLAGS:\n", "FLAGS annotation with no flags"),
+            (
+                "harness_owned",
+                "! FLAGS: -O2\n",
+                "FLAGS may not contain harness-owned flag '-O2'",
+            ),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "bencch_malformed_flags_{}_{}_{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+                name
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let source = root.join("case.f90");
+            fs::write(
+                &source,
+                format!(
+                    "program malformed_flags\n  print *, 1\nend program malformed_flags\n{annotations}"
+                ),
+            )
+            .unwrap();
+            let request = CaptureRequest {
+                input: source,
+                requested: BTreeSet::from([Stage::Ir]),
+                opt_level: OptLevel::O0,
+            };
+
+            let result = capture_from_path(&request);
+            let _ = fs::remove_dir_all(&root);
+            let failure = result.expect_err("malformed FLAGS must fail before compilation");
+            assert_eq!(failure.stage, FailureStage::Preprocess);
+            assert!(failure.stages.is_empty());
+            assert!(
+                failure.detail.contains(expected),
+                "unexpected failure for {name}: {}",
+                failure.detail
+            );
+        }
+    }
+
+    #[test]
+    fn capture_distinguishes_absent_and_well_formed_flags() {
+        let root = std::env::temp_dir().join(format!(
+            "bencch_valid_flags_{}_{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let plain_source = root.join("plain.f90");
+        let flagged_source = root.join("flagged.f90");
+        let program = "program flags_contract\nend program flags_contract\n";
+        fs::write(&plain_source, program).unwrap();
+        fs::write(
+            &flagged_source,
+            format!("{program}! FLAGS: -fdefault-integer-8\n"),
+        )
+        .unwrap();
+
+        let plain = capture_from_path(&CaptureRequest {
+            input: plain_source,
+            requested: BTreeSet::from([Stage::Ir]),
+            opt_level: OptLevel::O0,
+        });
+        let flagged = capture_from_path(&CaptureRequest {
+            input: flagged_source,
+            requested: BTreeSet::from([Stage::Ir]),
+            opt_level: OptLevel::O0,
+        });
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(plain.is_ok(), "a fixture without FLAGS must still capture");
+        let failure = flagged.expect_err("well-formed FLAGS need an explicit capture channel");
+        assert_eq!(failure.stage, FailureStage::Ir);
+        assert!(failure.stages.is_empty());
+        assert!(
+            failure
+                .detail
+                .contains("bencch capture path does not apply"),
+            "{}",
+            failure.detail
+        );
     }
 }
