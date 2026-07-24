@@ -486,6 +486,7 @@ struct RunSignature {
     exit_code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    files: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -1729,14 +1730,7 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                                 case.name
                             )
                         })?;
-                    let files = run.files.as_ref().ok_or_else(|| {
-                        format!(
-                            "case '{}' uses FILE_CHECK/FILE_NOT but this run path did not \
-                             snapshot sandbox files",
-                            case.name
-                        )
-                    })?;
-                    match_file_checks(&file_checks, files, &case.source)?;
+                    match_file_checks(&file_checks, &run.files, &case.source)?;
                 }
             }
             Expectation::Contains { target, needle } => {
@@ -2572,7 +2566,8 @@ fn run_cli_run_reproducible(
             }
         };
         let run_command = render_binary_run_command(&binary_path);
-        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+        let run_sandbox = temp_root.join(format!("cli_run_{:02}.sandbox", index));
+        let run = match run_binary_capture(&binary_path, &run_sandbox, &run_command) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3069,7 +3064,8 @@ fn run_capture_run_vs_cli_run(
             }
         };
         let run_command = render_binary_run_command(&binary_path);
-        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+        let run_sandbox = temp_root.join(format!("cli_run_{:02}.sandbox", index));
+        let run = match run_binary_capture(&binary_path, &run_sandbox, &run_command) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3762,20 +3758,11 @@ fn run_reference_graph(
         run_error: None,
     };
     if link.status.success() {
-        match run_managed(
-            Command::new(&binary).current_dir(&temp_root),
-            CommandClass::Run,
-        ) {
-            Ok(output) => {
-                result.run = Some(RunCapture {
-                    exit_code: output.status.code().unwrap_or(-1),
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    files: None,
-                });
-            }
+        let run_command = render_binary_run_command(&binary);
+        match run_binary_capture(&binary, &temp_root.join("run_sandbox"), &run_command) {
+            Ok(run) => result.run = Some(run),
             Err(err) => {
-                result.run_error = Some(format!("cannot run '{}': {}", binary.display(), err));
+                result.run_error = Some(err);
             }
         }
     }
@@ -3857,20 +3844,11 @@ fn run_reference_case(
     };
 
     if compile.status.success() {
-        match run_managed(
-            Command::new(&binary).current_dir(&temp_root),
-            CommandClass::Run,
-        ) {
-            Ok(output) => {
-                result.run = Some(RunCapture {
-                    exit_code: output.status.code().unwrap_or(-1),
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    files: None,
-                });
-            }
+        let run_command = render_binary_run_command(&binary);
+        match run_binary_capture(&binary, &temp_root.join("run_sandbox"), &run_command) {
+            Ok(run) => result.run = Some(run),
             Err(err) => {
-                result.run_error = Some(format!("cannot run '{}': {}", binary.display(), err));
+                result.run_error = Some(err);
             }
         }
     }
@@ -4153,28 +4131,31 @@ fn capture_run_stage(result: &CaptureResult) -> Result<&RunCapture, String> {
     }
 }
 
-fn run_binary_capture(
-    binary: &Path,
-    current_dir: &Path,
-    command: &str,
-) -> Result<RunCapture, String> {
-    let output = run_managed(
-        Command::new(binary).current_dir(current_dir),
-        CommandClass::Run,
-    )
-    .map_err(|err| {
+fn run_binary_capture(binary: &Path, sandbox: &Path, command: &str) -> Result<RunCapture, String> {
+    fs::create_dir(sandbox).map_err(|error| {
         format!(
-            "{} failed:\ncannot run '{}': {}",
+            "{} failed:\ncannot create isolated run sandbox '{}': {}",
             command,
-            binary.display(),
-            err
+            sandbox.display(),
+            error
         )
     })?;
+    let output = run_managed(Command::new(binary).current_dir(sandbox), CommandClass::Run)
+        .map_err(|err| {
+            format!(
+                "{} failed:\ncannot run '{}': {}",
+                command,
+                binary.display(),
+                err
+            )
+        })?;
+    let files = armfortas::testing::snapshot_sandbox_files(sandbox)
+        .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
     Ok(RunCapture {
         exit_code: output.status.code().unwrap_or(-1),
         stdout: output.stdout,
         stderr: output.stderr,
-        files: None,
+        files,
     })
 }
 
@@ -4183,6 +4164,7 @@ fn normalize_run_signature(run: &RunCapture) -> RunSignature {
         exit_code: run.exit_code,
         stdout: normalize_behavior_bytes(&run.stdout),
         stderr: normalize_behavior_bytes(&run.stderr),
+        files: run.files.clone(),
     }
 }
 
@@ -4273,18 +4255,60 @@ fn format_reference_result(reference: &ReferenceResult) -> String {
 fn format_run_capture(run: &RunCapture) -> String {
     let stdout = format_captured_output(&run.stdout);
     let stderr = format_captured_output(&run.stderr);
+    let files = format_file_snapshot(&run.files);
     format!(
-        "exit: {}\nstdout:\n{}\nstderr:\n{}",
-        run.exit_code, stdout, stderr
+        "exit: {}\nstdout:\n{}\nstderr:\n{}\nfiles:\n{}",
+        run.exit_code, stdout, stderr, files
     )
 }
 
 fn format_run_signature(signature: &RunSignature) -> String {
     let stdout = format_captured_output(&signature.stdout);
     let stderr = format_captured_output(&signature.stderr);
+    let files = format_file_snapshot(&signature.files);
     format!(
-        "exit: {}\nstdout:\n{}\nstderr:\n{}",
-        signature.exit_code, stdout, stderr
+        "exit: {}\nstdout:\n{}\nstderr:\n{}\nfiles:\n{}",
+        signature.exit_code, stdout, stderr, files
+    )
+}
+
+fn format_file_snapshot(files: &BTreeMap<String, Vec<u8>>) -> String {
+    if files.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    files
+        .iter()
+        .map(|(path, bytes)| {
+            format!(
+                "{} ({} bytes):\n{}",
+                path,
+                bytes.len(),
+                format_file_preview(bytes)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_file_preview(bytes: &[u8]) -> String {
+    const PREVIEW_LIMIT: usize = 256;
+
+    if bytes.len() <= PREVIEW_LIMIT {
+        return format_captured_output(bytes);
+    }
+
+    let mut preview_len = PREVIEW_LIMIT;
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        while !text.is_char_boundary(preview_len) {
+            preview_len -= 1;
+        }
+    }
+
+    format!(
+        "{}\n... <{} more bytes>",
+        format_captured_output(&bytes[..preview_len]),
+        bytes.len() - preview_len
     )
 }
 
@@ -4576,6 +4600,9 @@ fn describe_run_difference(
     if expected.stderr != actual.stderr {
         differing.push("stderr");
     }
+    if expected.files != actual.files {
+        differing.push("files");
+    }
 
     if differing.is_empty() {
         return "runtime behavior matched".to_string();
@@ -4601,7 +4628,54 @@ fn describe_run_difference(
             component_list,
             describe_output_difference(&expected.stderr, &actual.stderr, left_label, right_label)
         ),
+        "files" => format!(
+            "differing runtime components: {}\nfirst differing component: files\n{}",
+            component_list,
+            describe_file_snapshot_difference(
+                &expected.files,
+                &actual.files,
+                left_label,
+                right_label
+            )
+        ),
         _ => unreachable!("only known runtime components are compared"),
+    }
+}
+
+fn describe_file_snapshot_difference(
+    expected: &BTreeMap<String, Vec<u8>>,
+    actual: &BTreeMap<String, Vec<u8>>,
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    let paths = expected
+        .keys()
+        .chain(actual.keys())
+        .collect::<BTreeSet<_>>();
+    let path = paths
+        .into_iter()
+        .find(|path| expected.get(*path) != actual.get(*path))
+        .expect("different file snapshots have a differing path");
+
+    match (expected.get(path), actual.get(path)) {
+        (Some(expected), Some(actual)) => format!(
+            "file '{}' differs\n{}",
+            path,
+            describe_byte_difference(expected, actual, left_label, right_label)
+        ),
+        (Some(expected), None) => format!(
+            "file '{}' is present only in {} ({} bytes)",
+            path,
+            left_label,
+            expected.len()
+        ),
+        (None, Some(actual)) => format!(
+            "file '{}' is present only in {} ({} bytes)",
+            path,
+            right_label,
+            actual.len()
+        ),
+        (None, None) => unreachable!("path came from at least one snapshot"),
     }
 }
 
@@ -4616,6 +4690,15 @@ fn describe_output_difference(
         return describe_text_difference(expected, actual, left_label, right_label);
     }
 
+    describe_byte_difference(expected, actual, left_label, right_label)
+}
+
+fn describe_byte_difference(
+    expected: &[u8],
+    actual: &[u8],
+    left_label: &str,
+    right_label: &str,
+) -> String {
     let differing_offset = expected
         .iter()
         .zip(actual)
@@ -4731,6 +4814,15 @@ fn run_components_by_variation(
                 .len()
                 > 1,
         ),
+        (
+            "files",
+            signatures
+                .iter()
+                .map(|signature| &signature.files)
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
+        ),
     ];
 
     components
@@ -4828,6 +4920,36 @@ fn write_behavior_run_artifacts(
         root.join(format!("{}.normalized.txt", prefix)),
         format_run_signature(&signature),
     )?;
+    write_file_snapshot(&root.join(format!("{}.files", prefix)), &run.files)?;
+    Ok(())
+}
+
+fn write_file_snapshot(
+    root: &Path,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), std::io::Error> {
+    fs::create_dir_all(root)?;
+    for (relative, bytes) in files {
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "sandbox snapshot contains unsafe path '{}'",
+                    relative.display()
+                ),
+            ));
+        }
+        let target = root.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(target, bytes)?;
+    }
     Ok(())
 }
 
@@ -5016,6 +5138,8 @@ fn write_capture_result(root: &Path, result: &CaptureResult) -> Result<(), Strin
                     format!("{}\n", run.exit_code),
                 )
                 .map_err(|e| format!("cannot write run exit-code bundle: {}", e))?;
+                write_file_snapshot(&root.join("run.files"), &run.files)
+                    .map_err(|e| format!("cannot write run file snapshot bundle: {}", e))?;
             }
         }
     }
@@ -5053,6 +5177,8 @@ fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<()
             format!("{}\n", run.exit_code),
         )
         .map_err(|e| format!("cannot write reference run exit-code bundle: {}", e))?;
+        write_file_snapshot(&ref_root.join("run.files"), &run.files)
+            .map_err(|e| format!("cannot write reference run file snapshot bundle: {}", e))?;
     }
     if let Some(err) = &reference.run_error {
         fs::write(ref_root.join("run.error.txt"), err)
@@ -5868,7 +5994,7 @@ end program file_contract
                     exit_code,
                     stdout: stdout.as_bytes().to_vec(),
                     stderr: stderr.as_bytes().to_vec(),
-                    files: None,
+                    files: BTreeMap::new(),
                 }),
             )]),
         }
@@ -5890,7 +6016,7 @@ end program file_contract
                 exit_code,
                 stdout: stdout.as_bytes().to_vec(),
                 stderr: stderr.as_bytes().to_vec(),
-                files: None,
+                files: BTreeMap::new(),
             }),
             run_error: None,
         }
@@ -5965,7 +6091,10 @@ end program file_contract
                 exit_code: 1,
                 stdout: b"oops\n".to_vec(),
                 stderr: b"broken\n".to_vec(),
-                files: None,
+                files: BTreeMap::from([(
+                    "nested/armfortas.bin".to_string(),
+                    vec![0x00, 0xff, 0x7f],
+                )]),
             }),
         );
         let artifacts = ExecutionArtifacts {
@@ -5988,7 +6117,10 @@ end program file_contract
                     exit_code: 0,
                     stdout: b"hello\n".to_vec(),
                     stderr: Vec::new(),
-                    files: None,
+                    files: BTreeMap::from([(
+                        "reference.txt".to_string(),
+                        b"reference bytes\n".to_vec(),
+                    )]),
                 }),
                 run_error: None,
             }],
@@ -6052,12 +6184,34 @@ end program file_contract
         assert!(bundle.join("source.f90").exists());
         assert!(bundle.join("armfortas").join("ir.txt").exists());
         assert!(bundle.join("armfortas").join("run.stdout.txt").exists());
+        assert_eq!(
+            fs::read(
+                bundle
+                    .join("armfortas")
+                    .join("run.files")
+                    .join("nested")
+                    .join("armfortas.bin")
+            )
+            .unwrap(),
+            vec![0x00, 0xff, 0x7f]
+        );
         assert!(bundle.join("armfortas").join("error.txt").exists());
         assert!(bundle
             .join("references")
             .join("gfortran")
             .join("run.stdout.txt")
             .exists());
+        assert_eq!(
+            fs::read(
+                bundle
+                    .join("references")
+                    .join("gfortran")
+                    .join("run.files")
+                    .join("reference.txt")
+            )
+            .unwrap(),
+            b"reference bytes\n"
+        );
         assert!(bundle.join("consistency").join("summary.txt").exists());
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
@@ -6098,6 +6252,27 @@ end program file_contract
         let _ =
             fs::remove_dir_all(std::env::temp_dir().join("afs_tests_consistency_bundle_issue_obj"));
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn file_snapshot_artifact_writer_rejects_parent_traversal() {
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_snapshot_path_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        let snapshot_root = root.join("snapshot");
+        let escaped = root.join("escaped.bin");
+        fs::create_dir_all(&root).unwrap();
+
+        let error = write_file_snapshot(
+            &snapshot_root,
+            &BTreeMap::from([("../escaped.bin".to_string(), b"escape".to_vec())]),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!escaped.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6458,6 +6633,42 @@ end program file_contract
     }
 
     #[test]
+    fn differential_rejects_filesystem_side_effect_mismatch() {
+        let mut result = run_only_result("same output\n", "", 0);
+        let arm_files =
+            BTreeMap::from([("artifact.txt".to_string(), b"armfortas bytes\n".to_vec())]);
+        result
+            .stages
+            .get_mut(&Stage::Run)
+            .and_then(|stage| match stage {
+                CapturedStage::Run(run) => Some(run),
+                CapturedStage::Text(_) => None,
+            })
+            .unwrap()
+            .files = arm_files.clone();
+
+        let mut references = vec![reference_run(
+            ReferenceCompiler::Gfortran,
+            "same output\n",
+            "",
+            0,
+        )];
+        references[0].run.as_mut().unwrap().files =
+            BTreeMap::from([("artifact.txt".to_string(), b"gfortran bytes\n".to_vec())]);
+
+        let error = compare_differential(&result, &references).unwrap_err();
+        assert!(error.contains("files"), "{error}");
+        assert!(error.contains("artifact.txt"), "{error}");
+
+        references[0].run.as_mut().unwrap().files = arm_files;
+        assert!(compare_differential(&result, &references).is_ok());
+
+        references[0].run.as_mut().unwrap().files.clear();
+        let missing_error = compare_differential(&result, &references).unwrap_err();
+        assert!(missing_error.contains("artifact.txt"), "{missing_error}");
+    }
+
+    #[test]
     fn consistency_diff_reports_first_mismatch() {
         let detail = describe_text_difference("alpha\nbeta\n", "alpha\ngamma\n", "left", "right");
         assert!(detail.contains("first differing line: 2"));
@@ -6516,13 +6727,13 @@ end program file_contract
             exit_code: 0,
             stdout: b"alpha\nbeta\n".to_vec(),
             stderr: Vec::new(),
-            files: None,
+            files: BTreeMap::new(),
         };
         let right = RunCapture {
             exit_code: 0,
             stdout: b"alpha\ngamma\n".to_vec(),
             stderr: Vec::new(),
-            files: None,
+            files: BTreeMap::new(),
         };
 
         let detail = describe_run_difference(&left, &right, "capture run", "cli run 2");
@@ -6530,6 +6741,55 @@ end program file_contract
         assert!(detail.contains("first differing component: stdout"));
         assert!(detail.contains("capture run: beta"));
         assert!(detail.contains("cli run 2: gamma"));
+    }
+
+    #[test]
+    fn run_diff_reports_exact_file_content_and_presence_changes() {
+        let left = RunCapture {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x00, 0xff])]),
+        };
+        let right = RunCapture {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x00, 0xfe])]),
+        };
+
+        let detail = describe_run_difference(&left, &right, "capture run", "cli run");
+        assert!(
+            detail.contains("first differing component: files"),
+            "{detail}"
+        );
+        assert!(detail.contains("file 'artifact.bin' differs"), "{detail}");
+        assert!(
+            detail.contains("first differing byte offset: 1"),
+            "{detail}"
+        );
+        assert!(detail.contains("capture run: 0xff"), "{detail}");
+        assert!(detail.contains("cli run: 0xfe"), "{detail}");
+
+        let mut missing = right;
+        missing.files.clear();
+        let presence = describe_run_difference(&left, &missing, "capture run", "cli run");
+        assert!(
+            presence.contains("file 'artifact.bin' is present only in capture run"),
+            "{presence}"
+        );
+    }
+
+    #[test]
+    fn file_snapshot_preview_is_bounded_without_splitting_utf8() {
+        let mut bytes = vec![b'a'; 255];
+        bytes.extend_from_slice("é".as_bytes());
+        bytes.extend_from_slice(b"tail");
+
+        let preview = format_file_preview(&bytes);
+        assert!(!preview.contains("<non-UTF-8 output"), "{preview}");
+        assert!(preview.contains("<6 more bytes>"), "{preview}");
+        assert!(!preview.contains("tail"), "{preview}");
     }
 
     #[cfg(unix)]
@@ -6549,8 +6809,8 @@ end program file_contract
         fs::set_permissions(&ff, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&fe, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let ff_run = run_binary_capture(&ff, &root, "emit ff").unwrap();
-        let fe_run = run_binary_capture(&fe, &root, "emit fe").unwrap();
+        let ff_run = run_binary_capture(&ff, &root.join("ff-run"), "emit ff").unwrap();
+        let fe_run = run_binary_capture(&fe, &root.join("fe-run"), "emit fe").unwrap();
         let _ = fs::remove_dir_all(&root);
 
         assert_eq!(ff_run.exit_code, 0);
@@ -6561,6 +6821,37 @@ end program file_contract
             normalize_run_signature(&ff_run),
             normalize_run_signature(&fe_run),
             "distinct invalid UTF-8 byte streams must not compare equal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_capture_snapshots_nested_binary_side_effects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_file_snapshot_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let writer = root.join("write_file");
+        let staged_writer = root.join("write_file.staged");
+        fs::write(
+            &staged_writer,
+            "#!/bin/sh\nmkdir nested\nprintf '\\000\\377\\177' > nested/artifact.bin\n",
+        )
+        .unwrap();
+        fs::set_permissions(&staged_writer, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(staged_writer, &writer).unwrap();
+
+        let run =
+            run_binary_capture(&writer, &root.join("run-sandbox"), "write binary file").unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(
+            run.files,
+            BTreeMap::from([("nested/artifact.bin".to_string(), vec![0x00, 0xff, 0x7f])])
         );
     }
 
@@ -6575,7 +6866,7 @@ end program file_contract
                     exit_code: 0,
                     stdout: vec![0xff],
                     stderr: Vec::new(),
-                    files: None,
+                    files: BTreeMap::new(),
                 }),
             )]),
         };
@@ -6592,7 +6883,7 @@ end program file_contract
             exit_code: 0,
             stdout: vec![0xfe],
             stderr: Vec::new(),
-            files: None,
+            files: BTreeMap::new(),
         };
         assert!(format_run_capture(left).contains("\\xff"));
         let detail = describe_run_difference(left, &right, "left", "right");
@@ -6611,18 +6902,43 @@ end program file_contract
             exit_code: 0,
             stdout: b"alpha".to_vec(),
             stderr: Vec::new(),
+            files: BTreeMap::new(),
         };
         let second = RunSignature {
             exit_code: 0,
             stdout: b"beta".to_vec(),
             stderr: Vec::new(),
+            files: BTreeMap::new(),
         };
         let signatures = vec![&first, &second];
 
         assert_eq!(varying_run_components(&signatures), vec!["stdout"]);
         assert_eq!(
             stable_run_components(&signatures),
-            vec!["exit_code", "stderr"]
+            vec!["exit_code", "stderr", "files"]
+        );
+    }
+
+    #[test]
+    fn run_component_variation_classifies_file_only_instability() {
+        let first = RunSignature {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x00])]),
+        };
+        let second = RunSignature {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x01])]),
+        };
+        let signatures = vec![&first, &second];
+
+        assert_eq!(varying_run_components(&signatures), vec!["files"]);
+        assert_eq!(
+            stable_run_components(&signatures),
+            vec!["exit_code", "stdout", "stderr"]
         );
     }
 

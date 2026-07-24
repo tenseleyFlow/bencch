@@ -371,7 +371,7 @@ pub fn capture_graph(
                     stages.clone(),
                 )
             })?;
-            let files = snapshot_sandbox_files(&sandbox)
+            let files = armfortas::testing::snapshot_sandbox_files(&sandbox)
                 .map_err(|detail| failure(FailureStage::Run, detail, stages.clone()))?;
             stages.insert(
                 Stage::Run,
@@ -379,7 +379,7 @@ pub fn capture_graph(
                     exit_code: output.status.code().unwrap_or(-1),
                     stdout: output.stdout,
                     stderr: output.stderr,
-                    files: Some(files),
+                    files,
                 }),
             );
         }
@@ -412,34 +412,6 @@ fn capture_from_path_with_module_search_paths(
     )
     .map(into_bench_capture_result)
     .map_err(into_bench_capture_failure)
-}
-
-fn snapshot_sandbox_files(sandbox: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    fn collect(
-        root: &Path,
-        directory: &Path,
-        files: &mut BTreeMap<String, Vec<u8>>,
-    ) -> std::io::Result<()> {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                collect(root, &path, files)?;
-            } else {
-                let relative = path.strip_prefix(root).expect("entry is below sandbox");
-                files.insert(
-                    relative.to_string_lossy().replace('\\', "/"),
-                    fs::read(&path)?,
-                );
-            }
-        }
-        Ok(())
-    }
-
-    let mut files = BTreeMap::new();
-    collect(sandbox, sandbox, &mut files)
-        .map_err(|error| format!("cannot snapshot sandbox '{}': {}", sandbox.display(), error))?;
-    Ok(files)
 }
 
 fn graph_compilation_order(inputs: &[PathBuf], work_root: &Path) -> Result<Vec<usize>, String> {
@@ -607,7 +579,7 @@ fn from_arm_captured_stage(stage: armfortas::testing::CapturedStage) -> Captured
             exit_code: run.exit_code,
             stdout: run.stdout,
             stderr: run.stderr,
-            files: Some(run.files),
+            files: run.files,
         }),
     }
 }

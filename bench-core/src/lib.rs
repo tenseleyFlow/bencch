@@ -249,10 +249,11 @@ pub struct RunCapture {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// Files created in the isolated run directory, when this capture path
-    /// records filesystem evidence. `None` means the path did not snapshot
-    /// files; it is distinct from an observed empty sandbox.
-    pub files: Option<BTreeMap<String, Vec<u8>>>,
+    /// Files created in the isolated run directory.
+    ///
+    /// Every run path snapshots its sandbox. An empty map therefore means the
+    /// program created no files; an unavailable observation is an error.
+    pub files: BTreeMap<String, Vec<u8>>,
 }
 
 impl RunCapture {
