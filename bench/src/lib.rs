@@ -515,7 +515,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 1
             }
         },
-        Ok(CommandKind::Projects(command)) => match handle_project_command(command) {
+        Ok(CommandKind::Projects(command)) => match handle_project_command(*command) {
             Ok(outcome) => {
                 for line in &outcome.summary_lines {
                     println!("{}", line);
@@ -549,7 +549,7 @@ pub fn run_cli(args: &[String]) -> i32 {
 enum CommandKind {
     List { suite_filter: Option<String> },
     Run(Box<RunConfig>),
-    Projects(ProjectCommand),
+    Projects(Box<ProjectCommand>),
     Help,
 }
 
@@ -650,10 +650,10 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
             }
             Ok(CommandKind::Run(Box::new(config)))
         }
-        "projects" => Ok(CommandKind::Projects(parse_project_cli(
+        "projects" => Ok(CommandKind::Projects(Box::new(parse_project_cli(
             &args[1..],
             ToolchainConfig::from_env(),
-        )?)),
+        )?))),
         "--help" | "-h" | "help" => Ok(CommandKind::Help),
         other => Err(format!("unknown command: {}", other)),
     }

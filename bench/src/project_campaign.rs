@@ -19,7 +19,7 @@ pub(crate) enum ProjectCommand {
         catalog_filter: Option<String>,
         include_deprioritized: bool,
     },
-    Run(ProjectRunConfig),
+    Run(Box<ProjectRunConfig>),
 }
 
 #[derive(Debug, Clone)]
@@ -293,7 +293,7 @@ pub(crate) fn parse_project_cli(
             if config.project_filter.is_none() {
                 return Err("projects run requires --project <name>".into());
             }
-            Ok(ProjectCommand::Run(config))
+            Ok(ProjectCommand::Run(Box::new(config)))
         }
         other => Err(format!("unknown projects subcommand: {}", other)),
     }
@@ -323,7 +323,7 @@ pub(crate) fn handle_project_command(command: ProjectCommand) -> Result<ProjectR
                 success: true,
             })
         }
-        ProjectCommand::Run(config) => run_project(config),
+        ProjectCommand::Run(config) => run_project(*config),
     }
 }
 
