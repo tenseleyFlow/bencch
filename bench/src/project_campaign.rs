@@ -1010,16 +1010,12 @@ fn run_step_with_limits(
 ) -> StepExecution {
     let command = expand_command_template(template, compiler_bin, cc_bin);
     let start = Instant::now();
-    // Shell per host: macOS ships zsh as the login shell; the ELF
-    // targets (Linux, FreeBSD) may not have /bin/zsh, but POSIX
-    // /bin/sh is always present and handles `&&`/`||` the same way.
-    // Both inherit the parent environment, so PATH for make/fpm carries
-    // through; the build commands use absolute {fc}/CC anyway.
-    let (shell, shell_flag) = if cfg!(target_os = "macos") {
-        ("/bin/zsh", "-lc")
-    } else {
-        ("/bin/sh", "-c")
-    };
+    // Use the same non-login POSIX shell on every Unix host. A login shell
+    // reads host-specific startup files, which can write to the captured
+    // streams and make otherwise identical campaign steps nondeterministic.
+    // The command inherits PATH from the parent process, while {fc} and CC
+    // are supplied explicitly.
+    let (shell, shell_flag) = ("/bin/sh", "-c");
     let result = run_managed_with_limits(
         Command::new(shell)
             .arg(shell_flag)
