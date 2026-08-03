@@ -12,7 +12,6 @@ differential => gfortran, flang-new
 consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "rename_only_runtime"
@@ -26,7 +25,6 @@ differential => gfortran, flang-new
 consistency => cli_run_reproducible, capture_run_vs_cli_run, capture_run_reproducible
 expect run.stdout check-comments
 expect run.exit_code equals 0
-xfail "Imported module values currently lower as zeroinit in multi-file graphs."
 end
 
 case "submodule_future"

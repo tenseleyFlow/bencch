@@ -2,14 +2,18 @@ mod compiler;
 mod project_campaign;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use armfortas::testing::managed_process::{run as run_managed, CommandClass};
+
 use crate::compiler::{
-    capture_from_path, compile_output, CaptureFailure, CaptureRequest, CaptureResult,
-    CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture, Stage,
+    capture_from_path, capture_graph, compile_graph_output, compile_output, CaptureFailure,
+    CaptureRequest, CaptureResult, CapturedStage, EmitMode, FailureStage, OptLevel, RunCapture,
+    Stage,
 };
 use crate::project_campaign::{
     handle_project_command, parse_project_cli, print_project_usage, ProjectCommand,
@@ -61,8 +65,22 @@ impl CaseSpec {
 #[derive(Debug, Clone)]
 struct PreparedInput {
     compiler_source: PathBuf,
-    generated_source: Option<PathBuf>,
+    graph_sources: Vec<PathBuf>,
     temp_root: Option<PathBuf>,
+}
+
+impl PreparedInput {
+    fn is_graph(&self) -> bool {
+        !self.graph_sources.is_empty()
+    }
+
+    fn compiler_sources(&self) -> &[PathBuf] {
+        if self.is_graph() {
+            &self.graph_sources
+        } else {
+            std::slice::from_ref(&self.compiler_source)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -466,8 +484,9 @@ impl ReferenceResult {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RunSignature {
     exit_code: i32,
-    stdout: String,
-    stderr: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    files: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -496,7 +515,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 1
             }
         },
-        Ok(CommandKind::Projects(command)) => match handle_project_command(command) {
+        Ok(CommandKind::Projects(command)) => match handle_project_command(*command) {
             Ok(outcome) => {
                 for line in &outcome.summary_lines {
                     println!("{}", line);
@@ -530,7 +549,7 @@ pub fn run_cli(args: &[String]) -> i32 {
 enum CommandKind {
     List { suite_filter: Option<String> },
     Run(Box<RunConfig>),
-    Projects(ProjectCommand),
+    Projects(Box<ProjectCommand>),
     Help,
 }
 
@@ -631,10 +650,10 @@ fn parse_cli(args: &[String]) -> Result<CommandKind, String> {
             }
             Ok(CommandKind::Run(Box::new(config)))
         }
-        "projects" => Ok(CommandKind::Projects(parse_project_cli(
+        "projects" => Ok(CommandKind::Projects(Box::new(parse_project_cli(
             &args[1..],
             ToolchainConfig::from_env(),
-        )?)),
+        )?))),
         "--help" | "-h" | "help" => Ok(CommandKind::Help),
         other => Err(format!("unknown command: {}", other)),
     }
@@ -1410,7 +1429,7 @@ fn execute_case_cell(
             for file in &case.graph_files {
                 println!("  file: {}", file.display());
             }
-            println!("  compiled_as: {}", prepared.compiler_source.display());
+            println!("  compiled_as: separate translation units");
         }
         println!("  opt: {}", opt_level.as_str());
         println!("  stages: {}", stage_list);
@@ -1420,22 +1439,16 @@ fn execute_case_cell(
         }
     }
 
-    let request = CaptureRequest {
-        input: prepared.compiler_source.clone(),
-        requested: requested.clone(),
-        opt_level,
-    };
-
     let references = run_reference_compilers(&prepared, case, opt_level, &config.tools);
     let mut artifacts = ExecutionArtifacts {
-        requested,
+        requested: requested.clone(),
         armfortas: None,
         armfortas_failure: None,
         references,
         consistency_issues: Vec::new(),
     };
 
-    match capture_from_path(&request) {
+    match capture_prepared_input(&prepared, &requested, opt_level) {
         Ok(result) => artifacts.armfortas = Some(result),
         Err(failure) => artifacts.armfortas_failure = Some(failure),
     }
@@ -1570,6 +1583,33 @@ fn execute_case_cell(
     Ok(outcome)
 }
 
+fn capture_prepared_input(
+    prepared: &PreparedInput,
+    requested: &BTreeSet<Stage>,
+    opt_level: OptLevel,
+) -> Result<CaptureResult, CaptureFailure> {
+    if prepared.is_graph() {
+        let work_root = prepared
+            .temp_root
+            .as_deref()
+            .expect("prepared graph input must own a work directory");
+        capture_graph(
+            &prepared.compiler_source,
+            &prepared.graph_sources,
+            requested,
+            opt_level,
+            work_root,
+        )
+    } else {
+        let request = CaptureRequest {
+            input: prepared.compiler_source.clone(),
+            requested: requested.clone(),
+            opt_level,
+        };
+        capture_from_path(&request)
+    }
+}
+
 fn prepare_case_input(
     case: &CaseSpec,
     suite: &SuiteSpec,
@@ -1578,7 +1618,7 @@ fn prepare_case_input(
     if case.graph_files.is_empty() {
         return Ok(PreparedInput {
             compiler_source: case.source.clone(),
-            generated_source: None,
+            graph_sources: Vec::new(),
             temp_root: None,
         });
     }
@@ -1597,42 +1637,14 @@ fn prepare_case_input(
         )
     })?;
 
-    let extension = case
-        .source
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .filter(|ext| !ext.is_empty())
-        .unwrap_or("f90");
-    let generated_source = temp_root.join(format!(
-        "{}_graph.{}",
-        sanitize_component(&case.name),
-        extension
-    ));
-
-    let mut combined = String::new();
-    for (index, file) in case.graph_files.iter().enumerate() {
-        let text = fs::read_to_string(file)
-            .map_err(|e| format!("cannot read graph file '{}': {}", file.display(), e))?;
-        if index > 0 {
-            combined.push('\n');
-        }
-        combined.push_str(&text);
-        if !text.ends_with('\n') {
-            combined.push('\n');
-        }
+    for file in &case.graph_files {
+        fs::metadata(file)
+            .map_err(|e| format!("cannot inspect graph file '{}': {}", file.display(), e))?;
     }
 
-    fs::write(&generated_source, combined).map_err(|e| {
-        format!(
-            "cannot write generated graph input '{}': {}",
-            generated_source.display(),
-            e
-        )
-    })?;
-
     Ok(PreparedInput {
-        compiler_source: generated_source.clone(),
-        generated_source: Some(generated_source),
+        compiler_source: case.source.clone(),
+        graph_sources: case.graph_files.clone(),
         temp_root: Some(temp_root),
     })
 }
@@ -1688,14 +1700,38 @@ fn evaluate_positive_expectations(case: &CaseSpec, result: &CaptureResult) -> Re
                 let source = fs::read_to_string(&case.source)
                     .map_err(|e| format!("cannot read '{}': {}", case.source.display(), e))?;
                 let checks = extract_checks(&source);
-                if checks.is_empty() {
+                let file_checks = extract_file_checks(&source, &case.source)?;
+                if checks.is_empty() && file_checks.is_empty() {
                     return Err(format!(
-                        "case '{}' requested check-comments but '{}' has no ! CHECK: lines",
+                        "case '{}' requested check-comments but '{}' has no supported \
+                         ! CHECK:, ! FILE_CHECK:, or ! FILE_NOT: lines",
                         case.name,
                         case.source.display()
                     ));
                 }
-                match_checks(&checks, text, &case.name)?;
+                if !checks.is_empty() {
+                    match_checks(&checks, text, &case.name)?;
+                }
+                if !file_checks.is_empty() {
+                    if !matches!(*target, Target::RunStdout) {
+                        return Err(format!(
+                            "case '{}' uses FILE_CHECK/FILE_NOT but applies check-comments to {}; \
+                             file directives require run.stdout check-comments",
+                            case.name,
+                            target_name(*target)
+                        ));
+                    }
+                    let run = result
+                        .get(Stage::Run)
+                        .and_then(CapturedStage::as_run)
+                        .ok_or_else(|| {
+                            format!(
+                                "case '{}' uses FILE_CHECK/FILE_NOT but has no captured run stage",
+                                case.name
+                            )
+                        })?;
+                    match_file_checks(&file_checks, &run.files, &case.source)?;
+                }
             }
             Expectation::Contains { target, needle } => {
                 let text = target_text(result, target)?;
@@ -1847,17 +1883,26 @@ fn target_text<'a>(result: &'a CaptureResult, target: &Target) -> Result<&'a str
             None => Err(format!("missing captured stage '{}'", stage.as_str())),
         },
         Target::RunStdout => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stdout),
+            Some(run) => captured_output_text(&run.stdout, "run.stdout"),
             None => Err("missing captured run stage".into()),
         },
         Target::RunStderr => match result.get(Stage::Run).and_then(CapturedStage::as_run) {
-            Some(run) => Ok(&run.stderr),
+            Some(run) => captured_output_text(&run.stderr, "run.stderr"),
             None => Err("missing captured run stage".into()),
         },
         Target::RunExitCode => {
             Err("run.exit_code is numeric; use 'expect run.exit_code equals <int>'".into())
         }
     }
+}
+
+fn captured_output_text<'a>(bytes: &'a [u8], target: &str) -> Result<&'a str, String> {
+    std::str::from_utf8(bytes).map_err(|error| {
+        format!(
+            "{target} is not valid UTF-8 (first invalid byte at offset {})",
+            error.valid_up_to()
+        )
+    })
 }
 
 fn target_int(result: &CaptureResult, target: &Target) -> Result<i32, String> {
@@ -1978,76 +2023,103 @@ fn run_consistency_checks(
 ) -> Vec<ConsistencyIssue> {
     let mut failures = Vec::new();
     for check in &case.consistency_checks {
-        let issue = match check {
-            ConsistencyCheck::CliObjVsSystemAs => {
-                run_cli_obj_vs_system_as(&prepared.compiler_source, opt_level, tools)
+        let issue = if prepared.is_graph()
+            && !matches!(
+                check,
+                ConsistencyCheck::CliRunReproducible
+                    | ConsistencyCheck::CaptureRunVsCliRun
+                    | ConsistencyCheck::CaptureRunReproducible
+            ) {
+            unsupported_graph_consistency_issue(*check, opt_level)
+        } else {
+            match check {
+                ConsistencyCheck::CliObjVsSystemAs => {
+                    run_cli_obj_vs_system_as(&prepared.compiler_source, opt_level, tools)
+                }
+                ConsistencyCheck::CliAsmReproducible => run_cli_asm_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    tools,
+                ),
+                ConsistencyCheck::CliObjReproducible => run_cli_obj_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    tools,
+                ),
+                ConsistencyCheck::CliRunReproducible => {
+                    run_cli_run_reproducible(prepared, opt_level, case.repeat_count, tools)
+                }
+                ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
+                    prepared,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
+                    &prepared.compiler_source,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
+                ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
+                    prepared,
+                    opt_level,
+                    case.repeat_count,
+                    capture_result,
+                    tools,
+                ),
             }
-            ConsistencyCheck::CliAsmReproducible => run_cli_asm_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                tools,
-            ),
-            ConsistencyCheck::CliObjReproducible => run_cli_obj_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                tools,
-            ),
-            ConsistencyCheck::CliRunReproducible => run_cli_run_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                tools,
-            ),
-            ConsistencyCheck::CaptureAsmVsCliAsm => run_capture_asm_vs_cli_asm(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureObjVsCliObj => run_capture_obj_vs_cli_obj(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureRunVsCliRun => run_capture_run_vs_cli_run(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureAsmReproducible => run_capture_asm_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureObjReproducible => run_capture_obj_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
-            ConsistencyCheck::CaptureRunReproducible => run_capture_run_reproducible(
-                &prepared.compiler_source,
-                opt_level,
-                case.repeat_count,
-                capture_result,
-                tools,
-            ),
         };
         if let Some(issue) = issue {
             failures.push(issue);
         }
     }
     failures
+}
+
+fn unsupported_graph_consistency_issue(
+    check: ConsistencyCheck,
+    opt_level: OptLevel,
+) -> Option<ConsistencyIssue> {
+    let temp_root = next_consistency_temp_root(opt_level);
+    Some(ConsistencyIssue {
+        check,
+        summary: "consistency check has no graph-aware artifact contract".into(),
+        repeat_count: None,
+        unique_variant_count: None,
+        varying_components: Vec::new(),
+        stable_components: Vec::new(),
+        detail: format!(
+            "consistency check '{}' cannot be applied to a graph as if its entry source were the whole program",
+            check.as_str()
+        ),
+        temp_root,
+    })
 }
 
 fn format_consistency_issues(issues: &[ConsistencyIssue]) -> String {
@@ -2120,14 +2192,14 @@ fn run_cli_obj_vs_system_as(
         asm_path.display().to_string(),
     ];
     let as_command = render_command(tools.system_as_bin(), &as_args);
-    let as_output = match Command::new(tools.system_as_bin())
-        .args([
+    let as_output = match run_managed(
+        Command::new(tools.system_as_bin()).args([
             "-o",
             asm_obj_path.to_str().unwrap(),
             asm_path.to_str().unwrap(),
-        ])
-        .output()
-    {
+        ]),
+        CommandClass::Tool,
+    ) {
         Ok(output) => output,
         Err(err) => {
             return Some(ConsistencyIssue {
@@ -2445,7 +2517,7 @@ fn run_cli_obj_reproducible(
 }
 
 fn run_cli_run_reproducible(
-    source: &Path,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     repeat_count: usize,
     tools: &ToolchainConfig,
@@ -2471,8 +2543,8 @@ fn run_cli_run_reproducible(
     let mut runs = Vec::new();
     for index in 0..repeat_count {
         let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
-        let build_command = match compile_with_driver(
-            source,
+        let build_command = match compile_prepared_with_driver(
+            prepared,
             opt_level,
             DriverEmitMode::Binary,
             &binary_path,
@@ -2494,7 +2566,8 @@ fn run_cli_run_reproducible(
             }
         };
         let run_command = render_binary_run_command(&binary_path);
-        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+        let run_sandbox = temp_root.join(format!("cli_run_{:02}.sandbox", index));
+        let run = match run_binary_capture(&binary_path, &run_sandbox, &run_command) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -2908,7 +2981,7 @@ fn run_capture_obj_vs_cli_obj(
 }
 
 fn run_capture_run_vs_cli_run(
-    source: &Path,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
@@ -2932,7 +3005,7 @@ fn run_capture_run_vs_cli_run(
         });
     }
 
-    let capture_command = render_capture_command(source, opt_level, Stage::Run);
+    let capture_command = render_prepared_capture_command(prepared, opt_level, Stage::Run);
     let capture_run = match capture_run_stage(capture_result) {
         Ok(run) => run.clone(),
         Err(detail) => {
@@ -2968,8 +3041,8 @@ fn run_capture_run_vs_cli_run(
     let mut mismatch_indices = Vec::new();
     for index in 0..repeat_count {
         let binary_path = temp_root.join(format!("cli_run_{:02}.out", index));
-        let build_command = match compile_with_driver(
-            source,
+        let build_command = match compile_prepared_with_driver(
+            prepared,
             opt_level,
             DriverEmitMode::Binary,
             &binary_path,
@@ -2991,7 +3064,8 @@ fn run_capture_run_vs_cli_run(
             }
         };
         let run_command = render_binary_run_command(&binary_path);
-        let run = match run_binary_capture(&binary_path, &temp_root, &run_command) {
+        let run_sandbox = temp_root.join(format!("cli_run_{:02}.sandbox", index));
+        let run = match run_binary_capture(&binary_path, &run_sandbox, &run_command) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3388,7 +3462,7 @@ fn run_capture_obj_reproducible(
 }
 
 fn run_capture_run_reproducible(
-    source: &Path,
+    prepared: &PreparedInput,
     opt_level: OptLevel,
     repeat_count: usize,
     capture_result: &CaptureResult,
@@ -3412,7 +3486,7 @@ fn run_capture_run_reproducible(
         });
     }
 
-    let command = render_capture_command(source, opt_level, Stage::Run);
+    let command = render_prepared_capture_command(prepared, opt_level, Stage::Run);
     let initial_run = match capture_run_stage(capture_result) {
         Ok(run) => run.clone(),
         Err(detail) => {
@@ -3450,7 +3524,11 @@ fn run_capture_run_reproducible(
     }];
 
     for index in 1..repeat_count {
-        let run = match capture_run_from_testing(source, opt_level) {
+        let run = match capture_prepared_run(
+            prepared,
+            opt_level,
+            &temp_root.join(format!("capture_graph_{:02}", index)),
+        ) {
             Ok(run) => run,
             Err(detail) => {
                 return Some(ConsistencyIssue {
@@ -3539,8 +3617,173 @@ fn run_reference_compilers(
     case.reference_compilers
         .iter()
         .copied()
-        .map(|compiler| run_reference_case(&prepared.compiler_source, opt_level, compiler, tools))
+        .map(|compiler| {
+            if prepared.is_graph() {
+                run_reference_graph(&prepared.graph_sources, opt_level, compiler, tools)
+            } else {
+                run_reference_case(&prepared.compiler_source, opt_level, compiler, tools)
+            }
+        })
         .collect()
+}
+
+fn run_reference_graph(
+    sources: &[PathBuf],
+    opt_level: OptLevel,
+    compiler: ReferenceCompiler,
+    tools: &ToolchainConfig,
+) -> ReferenceResult {
+    let temp_root = next_report_temp_root(compiler, opt_level);
+    let binary = temp_root.join("reference.out");
+    let compiler_bin = tools.reference_binary(compiler);
+    if let Err(err) = fs::create_dir_all(&temp_root) {
+        return ReferenceResult::infrastructure_error(
+            compiler,
+            compiler_bin.to_string(),
+            format!("cannot create temp dir '{}': {}", temp_root.display(), err),
+        );
+    }
+    let _temp_cleanup = ReferenceTempCleanup(temp_root.clone());
+
+    let mut commands = Vec::new();
+    let mut compile_stdout = String::new();
+    let mut compile_stderr = String::new();
+    let mut objects = vec![None; sources.len()];
+    for index in 0..sources.len() {
+        let source = &sources[index];
+        let object = temp_root.join(format!("unit_{:04}.o", index));
+        let mut args = vec![opt_level.as_flag().to_string(), "-c".to_string()];
+        if source_uses_cpp(source) {
+            args.push("-cpp".to_string());
+        }
+        args.push("-I".to_string());
+        args.push(temp_root.display().to_string());
+        args.push("-J".to_string());
+        args.push(temp_root.display().to_string());
+        args.push(source.display().to_string());
+        args.push("-o".to_string());
+        args.push(object.display().to_string());
+        let command = render_command(compiler_bin, &args);
+        commands.push(command.clone());
+        let output = match run_managed(
+            Command::new(compiler_bin)
+                .current_dir(&temp_root)
+                .args(&args),
+            CommandClass::Compile,
+        ) {
+            Ok(output) => output,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&temp_root);
+                return ReferenceResult::infrastructure_error(
+                    compiler,
+                    commands.join("\n"),
+                    format!("cannot run {}: {}", compiler_bin, err),
+                );
+            }
+        };
+        append_command_output(&mut compile_stdout, index, source, &output.stdout);
+        append_command_output(&mut compile_stderr, index, source, &output.stderr);
+        if !output.status.success() {
+            let result = ReferenceResult {
+                compiler,
+                compile_command: commands.join("\n"),
+                compile_exit_code: output.status.code().unwrap_or(-1),
+                compile_stdout,
+                compile_stderr,
+                run: None,
+                run_error: None,
+            };
+            let _ = fs::remove_dir_all(&temp_root);
+            return result;
+        }
+        objects[index] = Some(object);
+    }
+
+    let mut link_args = Vec::with_capacity(objects.len() + 2);
+    for (index, object) in objects.into_iter().enumerate() {
+        let Some(object) = object else {
+            let _ = fs::remove_dir_all(&temp_root);
+            return ReferenceResult::infrastructure_error(
+                compiler,
+                commands.join("\n"),
+                format!(
+                    "graph source [{}] '{}' did not produce an object",
+                    index,
+                    sources[index].display()
+                ),
+            );
+        };
+        link_args.push(object.display().to_string());
+    }
+    link_args.push("-o".to_string());
+    link_args.push(binary.display().to_string());
+    let link_command = render_command(compiler_bin, &link_args);
+    commands.push(link_command);
+    let link = match run_managed(
+        Command::new(compiler_bin)
+            .current_dir(&temp_root)
+            .args(&link_args),
+        CommandClass::Compile,
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return ReferenceResult::infrastructure_error(
+                compiler,
+                commands.join("\n"),
+                format!("cannot run {}: {}", compiler_bin, err),
+            );
+        }
+    };
+    append_command_output(
+        &mut compile_stdout,
+        sources.len(),
+        Path::new("<link>"),
+        &link.stdout,
+    );
+    append_command_output(
+        &mut compile_stderr,
+        sources.len(),
+        Path::new("<link>"),
+        &link.stderr,
+    );
+
+    let mut result = ReferenceResult {
+        compiler,
+        compile_command: commands.join("\n"),
+        compile_exit_code: link.status.code().unwrap_or(-1),
+        compile_stdout,
+        compile_stderr,
+        run: None,
+        run_error: None,
+    };
+    if link.status.success() {
+        let run_command = render_binary_run_command(&binary);
+        match run_binary_capture(&binary, &temp_root.join("run_sandbox"), &run_command) {
+            Ok(run) => result.run = Some(run),
+            Err(err) => {
+                result.run_error = Some(err);
+            }
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    result
+}
+
+fn append_command_output(destination: &mut String, index: usize, source: &Path, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    if !destination.is_empty() {
+        destination.push('\n');
+    }
+    destination.push_str(&format!(
+        "===== graph command [{:04}] {} =====\n",
+        index,
+        source.display()
+    ));
+    destination.push_str(&String::from_utf8_lossy(bytes));
 }
 
 fn run_reference_case(
@@ -3571,14 +3814,17 @@ fn run_reference_case(
             format!("cannot create temp dir '{}': {}", temp_root.display(), err),
         );
     }
+    let _temp_cleanup = ReferenceTempCleanup(temp_root.clone());
 
-    let compile = match Command::new(compiler_bin)
-        .current_dir(&temp_root)
-        .args(&args)
-        .output()
-    {
+    let compile = match run_managed(
+        Command::new(compiler_bin)
+            .current_dir(&temp_root)
+            .args(&args),
+        CommandClass::Compile,
+    ) {
         Ok(output) => output,
         Err(err) => {
+            let _ = fs::remove_dir_all(&temp_root);
             return ReferenceResult::infrastructure_error(
                 compiler,
                 command_string,
@@ -3598,16 +3844,11 @@ fn run_reference_case(
     };
 
     if compile.status.success() {
-        match Command::new(&binary).current_dir(&temp_root).output() {
-            Ok(output) => {
-                result.run = Some(RunCapture {
-                    exit_code: output.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                });
-            }
+        let run_command = render_binary_run_command(&binary);
+        match run_binary_capture(&binary, &temp_root.join("run_sandbox"), &run_command) {
+            Ok(run) => result.run = Some(run),
             Err(err) => {
-                result.run_error = Some(format!("cannot run '{}': {}", binary.display(), err));
+                result.run_error = Some(err);
             }
         }
     }
@@ -3620,6 +3861,14 @@ fn source_uses_cpp(source: &Path) -> bool {
     fs::read_to_string(source)
         .map(|text| text.lines().any(|line| line.trim_start().starts_with('#')))
         .unwrap_or(false)
+}
+
+struct ReferenceTempCleanup(PathBuf);
+
+impl Drop for ReferenceTempCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3648,9 +3897,7 @@ fn compile_with_driver(
         args.push("-o".to_string());
         args.push(output.display().to_string());
 
-        let compile = Command::new(binary)
-            .args(&args)
-            .output()
+        let compile = run_managed(Command::new(binary).args(&args), CommandClass::Compile)
             .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
         if !compile.status.success() {
             let stderr = String::from_utf8_lossy(&compile.stderr);
@@ -3666,6 +3913,69 @@ fn compile_with_driver(
             .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
     }
     Ok(command)
+}
+
+fn compile_prepared_with_driver(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+    tools: &ToolchainConfig,
+) -> Result<String, String> {
+    if !prepared.is_graph() {
+        return compile_with_driver(&prepared.compiler_source, opt_level, mode, output, tools);
+    }
+    if mode != DriverEmitMode::Binary {
+        return Err(format!(
+            "graph CLI adapter does not define a single '{}' artifact",
+            match mode {
+                DriverEmitMode::Asm => "assembly",
+                DriverEmitMode::Obj => "object",
+                DriverEmitMode::Binary => unreachable!(),
+            }
+        ));
+    }
+
+    let module_output_dir = graph_module_output_dir(output);
+    let command = render_prepared_armfortas_command(prepared, opt_level, mode, output, tools);
+    if let Some(binary) = tools.armfortas_external_bin() {
+        let mut args = vec![opt_level.as_flag().to_string()];
+        args.push("-J".to_string());
+        args.push(module_output_dir.display().to_string());
+        args.extend(
+            prepared
+                .compiler_sources()
+                .iter()
+                .map(|source| source.display().to_string()),
+        );
+        args.push("-o".to_string());
+        args.push(output.display().to_string());
+        let compile = run_managed(Command::new(binary).args(&args), CommandClass::Compile)
+            .map_err(|err| format!("{} failed:\ncannot run '{}': {}", command, binary, err))?;
+        if !compile.status.success() {
+            return Err(format!(
+                "{} failed:\n{}",
+                command,
+                String::from_utf8_lossy(&compile.stderr).trim_end()
+            ));
+        }
+    } else {
+        compile_graph_output(
+            prepared.compiler_sources(),
+            opt_level,
+            output,
+            module_output_dir,
+        )
+        .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
+    }
+    Ok(command)
+}
+
+fn graph_module_output_dir(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn render_armfortas_command(
@@ -3687,6 +3997,35 @@ fn render_armfortas_command(
     render_command(tools.armfortas_command_name(), &args)
 }
 
+fn render_prepared_armfortas_command(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    mode: DriverEmitMode,
+    output: &Path,
+    tools: &ToolchainConfig,
+) -> String {
+    if !prepared.is_graph() {
+        return render_armfortas_command(&prepared.compiler_source, opt_level, mode, output, tools);
+    }
+    let mut args = vec![opt_level.as_flag().to_string()];
+    match mode {
+        DriverEmitMode::Asm => args.push("-S".to_string()),
+        DriverEmitMode::Obj => args.push("-c".to_string()),
+        DriverEmitMode::Binary => {}
+    }
+    args.push("-J".to_string());
+    args.push(graph_module_output_dir(output).display().to_string());
+    args.extend(
+        prepared
+            .compiler_sources()
+            .iter()
+            .map(|source| source.display().to_string()),
+    );
+    args.push("-o".to_string());
+    args.push(output.display().to_string());
+    render_command(tools.armfortas_command_name(), &args)
+}
+
 fn render_binary_run_command(binary: &Path) -> String {
     render_command(&binary.display().to_string(), &[])
 }
@@ -3697,6 +4036,27 @@ fn render_capture_command(source: &Path, opt_level: OptLevel, stage: Stage) -> S
         opt_level.as_flag(),
         stage.as_str(),
         quote_arg(&source.display().to_string())
+    )
+}
+
+fn render_prepared_capture_command(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    stage: Stage,
+) -> String {
+    if !prepared.is_graph() {
+        return render_capture_command(&prepared.compiler_source, opt_level, stage);
+    }
+    format!(
+        "armfortas::testing graph capture {} --stage {} {}",
+        opt_level.as_flag(),
+        stage.as_str(),
+        prepared
+            .compiler_sources()
+            .iter()
+            .map(|source| quote_arg(&source.display().to_string()))
+            .collect::<Vec<_>>()
+            .join(" ")
     )
 }
 
@@ -3728,6 +4088,25 @@ fn capture_run_from_testing(source: &Path, opt_level: OptLevel) -> Result<RunCap
     capture_run_stage(&result).cloned()
 }
 
+fn capture_prepared_run(
+    prepared: &PreparedInput,
+    opt_level: OptLevel,
+    graph_work_root: &Path,
+) -> Result<RunCapture, String> {
+    if !prepared.is_graph() {
+        return capture_run_from_testing(&prepared.compiler_source, opt_level);
+    }
+    let result = capture_graph(
+        &prepared.compiler_source,
+        &prepared.graph_sources,
+        &BTreeSet::from([Stage::Run]),
+        opt_level,
+        graph_work_root,
+    )
+    .map_err(|failure| failure.to_string())?;
+    capture_run_stage(&result).cloned()
+}
+
 fn capture_text_stage(result: &CaptureResult, stage: Stage) -> Result<&str, String> {
     match result.get(stage) {
         Some(CapturedStage::Text(text)) => Ok(text),
@@ -3752,14 +4131,16 @@ fn capture_run_stage(result: &CaptureResult) -> Result<&RunCapture, String> {
     }
 }
 
-fn run_binary_capture(
-    binary: &Path,
-    current_dir: &Path,
-    command: &str,
-) -> Result<RunCapture, String> {
-    let output = Command::new(binary)
-        .current_dir(current_dir)
-        .output()
+fn run_binary_capture(binary: &Path, sandbox: &Path, command: &str) -> Result<RunCapture, String> {
+    fs::create_dir(sandbox).map_err(|error| {
+        format!(
+            "{} failed:\ncannot create isolated run sandbox '{}': {}",
+            command,
+            sandbox.display(),
+            error
+        )
+    })?;
+    let output = run_managed(Command::new(binary).current_dir(sandbox), CommandClass::Run)
         .map_err(|err| {
             format!(
                 "{} failed:\ncannot run '{}': {}",
@@ -3768,18 +4149,29 @@ fn run_binary_capture(
                 err
             )
         })?;
+    let files = armfortas::testing::snapshot_sandbox_files(sandbox)
+        .map_err(|detail| format!("{} failed:\n{}", command, detail))?;
     Ok(RunCapture {
         exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        files,
     })
 }
 
 fn normalize_run_signature(run: &RunCapture) -> RunSignature {
     RunSignature {
         exit_code: run.exit_code,
-        stdout: normalize_behavior_text(&run.stdout),
-        stderr: normalize_behavior_text(&run.stderr),
+        stdout: normalize_behavior_bytes(&run.stdout),
+        stderr: normalize_behavior_bytes(&run.stderr),
+        files: run.files.clone(),
+    }
+}
+
+fn normalize_behavior_bytes(bytes: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => normalize_behavior_text(text).into_bytes(),
+        Err(_) => bytes.to_vec(),
     }
 }
 
@@ -3861,37 +4253,92 @@ fn format_reference_result(reference: &ReferenceResult) -> String {
 }
 
 fn format_run_capture(run: &RunCapture) -> String {
-    let stdout = if run.stdout.is_empty() {
-        "<empty>".to_string()
-    } else {
-        run.stdout.trim_end().to_string()
-    };
-    let stderr = if run.stderr.is_empty() {
-        "<empty>".to_string()
-    } else {
-        run.stderr.trim_end().to_string()
-    };
+    let stdout = format_captured_output(&run.stdout);
+    let stderr = format_captured_output(&run.stderr);
+    let files = format_file_snapshot(&run.files);
     format!(
-        "exit: {}\nstdout:\n{}\nstderr:\n{}",
-        run.exit_code, stdout, stderr
+        "exit: {}\nstdout:\n{}\nstderr:\n{}\nfiles:\n{}",
+        run.exit_code, stdout, stderr, files
     )
 }
 
 fn format_run_signature(signature: &RunSignature) -> String {
-    let stdout = if signature.stdout.is_empty() {
-        "<empty>".to_string()
-    } else {
-        signature.stdout.clone()
-    };
-    let stderr = if signature.stderr.is_empty() {
-        "<empty>".to_string()
-    } else {
-        signature.stderr.clone()
-    };
+    let stdout = format_captured_output(&signature.stdout);
+    let stderr = format_captured_output(&signature.stderr);
+    let files = format_file_snapshot(&signature.files);
     format!(
-        "exit: {}\nstdout:\n{}\nstderr:\n{}",
-        signature.exit_code, stdout, stderr
+        "exit: {}\nstdout:\n{}\nstderr:\n{}\nfiles:\n{}",
+        signature.exit_code, stdout, stderr, files
     )
+}
+
+fn format_file_snapshot(files: &BTreeMap<String, Vec<u8>>) -> String {
+    if files.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    files
+        .iter()
+        .map(|(path, bytes)| {
+            format!(
+                "{} ({} bytes):\n{}",
+                path,
+                bytes.len(),
+                format_file_preview(bytes)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_file_preview(bytes: &[u8]) -> String {
+    const PREVIEW_LIMIT: usize = 256;
+
+    if bytes.len() <= PREVIEW_LIMIT {
+        return format_captured_output(bytes);
+    }
+
+    let mut preview_len = PREVIEW_LIMIT;
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        while !text.is_char_boundary(preview_len) {
+            preview_len -= 1;
+        }
+    }
+
+    format!(
+        "{}\n... <{} more bytes>",
+        format_captured_output(&bytes[..preview_len]),
+        bytes.len() - preview_len
+    )
+}
+
+fn format_captured_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.trim_end().to_string(),
+        Err(_) => {
+            const DISPLAY_LIMIT: usize = 256;
+            let mut rendered = format!("<non-UTF-8 output: {} bytes> ", bytes.len());
+            for &byte in bytes.iter().take(DISPLAY_LIMIT) {
+                match byte {
+                    b'\\' => rendered.push_str("\\\\"),
+                    b'\n' => rendered.push_str("\\n"),
+                    b'\r' => rendered.push_str("\\r"),
+                    b'\t' => rendered.push_str("\\t"),
+                    0x20..=0x7e => rendered.push(char::from(byte)),
+                    _ => write!(rendered, "\\x{byte:02x}").expect("writing to String cannot fail"),
+                }
+            }
+            if bytes.len() > DISPLAY_LIMIT {
+                write!(rendered, "... <{} more bytes>", bytes.len() - DISPLAY_LIMIT)
+                    .expect("writing to String cannot fail");
+            }
+            rendered
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3955,9 +4402,7 @@ fn object_snapshot(path: &Path, tools: &ToolchainConfig) -> Result<ObjectSnapsho
 }
 
 fn tool_output(tool: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(tool)
-        .args(args)
-        .output()
+    let output = run_managed(Command::new(tool).args(args), CommandClass::Tool)
         .map_err(|e| format!("cannot run {}: {}", tool, e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -4155,6 +4600,9 @@ fn describe_run_difference(
     if expected.stderr != actual.stderr {
         differing.push("stderr");
     }
+    if expected.files != actual.files {
+        differing.push("files");
+    }
 
     if differing.is_empty() {
         return "runtime behavior matched".to_string();
@@ -4173,15 +4621,101 @@ fn describe_run_difference(
         "stdout" => format!(
             "differing runtime components: {}\nfirst differing component: stdout\n{}",
             component_list,
-            describe_text_difference(&expected.stdout, &actual.stdout, left_label, right_label)
+            describe_output_difference(&expected.stdout, &actual.stdout, left_label, right_label)
         ),
         "stderr" => format!(
             "differing runtime components: {}\nfirst differing component: stderr\n{}",
             component_list,
-            describe_text_difference(&expected.stderr, &actual.stderr, left_label, right_label)
+            describe_output_difference(&expected.stderr, &actual.stderr, left_label, right_label)
+        ),
+        "files" => format!(
+            "differing runtime components: {}\nfirst differing component: files\n{}",
+            component_list,
+            describe_file_snapshot_difference(
+                &expected.files,
+                &actual.files,
+                left_label,
+                right_label
+            )
         ),
         _ => unreachable!("only known runtime components are compared"),
     }
+}
+
+fn describe_file_snapshot_difference(
+    expected: &BTreeMap<String, Vec<u8>>,
+    actual: &BTreeMap<String, Vec<u8>>,
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    let paths = expected
+        .keys()
+        .chain(actual.keys())
+        .collect::<BTreeSet<_>>();
+    let path = paths
+        .into_iter()
+        .find(|path| expected.get(*path) != actual.get(*path))
+        .expect("different file snapshots have a differing path");
+
+    match (expected.get(path), actual.get(path)) {
+        (Some(expected), Some(actual)) => format!(
+            "file '{}' differs\n{}",
+            path,
+            describe_byte_difference(expected, actual, left_label, right_label)
+        ),
+        (Some(expected), None) => format!(
+            "file '{}' is present only in {} ({} bytes)",
+            path,
+            left_label,
+            expected.len()
+        ),
+        (None, Some(actual)) => format!(
+            "file '{}' is present only in {} ({} bytes)",
+            path,
+            right_label,
+            actual.len()
+        ),
+        (None, None) => unreachable!("path came from at least one snapshot"),
+    }
+}
+
+fn describe_output_difference(
+    expected: &[u8],
+    actual: &[u8],
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    if let (Ok(expected), Ok(actual)) = (std::str::from_utf8(expected), std::str::from_utf8(actual))
+    {
+        return describe_text_difference(expected, actual, left_label, right_label);
+    }
+
+    describe_byte_difference(expected, actual, left_label, right_label)
+}
+
+fn describe_byte_difference(
+    expected: &[u8],
+    actual: &[u8],
+    left_label: &str,
+    right_label: &str,
+) -> String {
+    let differing_offset = expected
+        .iter()
+        .zip(actual)
+        .position(|(left, right)| left != right)
+        .unwrap_or_else(|| expected.len().min(actual.len()));
+    let byte_label = |bytes: &[u8]| match bytes.get(differing_offset) {
+        Some(byte) => format!("0x{byte:02x}"),
+        None => "<end-of-output>".to_string(),
+    };
+
+    format!(
+        "first differing byte offset: {differing_offset}\n{left_label}: {} ({} bytes)\n{right_label}: {} ({} bytes)",
+        byte_label(expected),
+        expected.len(),
+        byte_label(actual),
+        actual.len()
+    )
 }
 
 fn varying_object_components(snapshots: &[&ObjectSnapshot]) -> Vec<&'static str> {
@@ -4257,29 +4791,43 @@ fn run_components_by_variation(
             "exit_code",
             signatures
                 .iter()
-                .map(|signature| signature.exit_code.to_string())
-                .collect::<Vec<_>>(),
+                .map(|signature| signature.exit_code)
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
         ),
         (
             "stdout",
             signatures
                 .iter()
-                .map(|signature| signature.stdout.clone())
-                .collect::<Vec<_>>(),
+                .map(|signature| signature.stdout.as_slice())
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
         ),
         (
             "stderr",
             signatures
                 .iter()
-                .map(|signature| signature.stderr.clone())
-                .collect::<Vec<_>>(),
+                .map(|signature| signature.stderr.as_slice())
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
+        ),
+        (
+            "files",
+            signatures
+                .iter()
+                .map(|signature| &signature.files)
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1,
         ),
     ];
 
     components
         .into_iter()
-        .filter_map(|(name, values)| {
-            let varies = count_unique_strings(values.iter().map(String::as_str)) > 1;
+        .filter_map(|(name, varies)| {
             if varies == want_varying {
                 Some(name)
             } else {
@@ -4372,6 +4920,36 @@ fn write_behavior_run_artifacts(
         root.join(format!("{}.normalized.txt", prefix)),
         format_run_signature(&signature),
     )?;
+    write_file_snapshot(&root.join(format!("{}.files", prefix)), &run.files)?;
+    Ok(())
+}
+
+fn write_file_snapshot(
+    root: &Path,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), std::io::Error> {
+    fs::create_dir_all(root)?;
+    for (relative, bytes) in files {
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "sandbox snapshot contains unsafe path '{}'",
+                    relative.display()
+                ),
+            ));
+        }
+        let target = root.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(target, bytes)?;
+    }
     Ok(())
 }
 
@@ -4515,21 +5093,15 @@ fn write_case_sources_bundle(
         return Ok(());
     }
 
-    let generated_source = prepared.generated_source.as_ref().ok_or_else(|| {
+    let entry_text = fs::read_to_string(&prepared.compiler_source).map_err(|e| {
         format!(
-            "graph case '{}' was missing a generated compiler source",
-            case.name
-        )
-    })?;
-    let generated_text = fs::read_to_string(generated_source).map_err(|e| {
-        format!(
-            "cannot read generated graph source '{}': {}",
-            generated_source.display(),
+            "cannot read graph entry source '{}': {}",
+            prepared.compiler_source.display(),
             e
         )
     })?;
-    fs::write(bundle_root.join("source.f90"), generated_text)
-        .map_err(|e| format!("cannot write generated bundle source copy: {}", e))?;
+    fs::write(bundle_root.join("source.f90"), entry_text)
+        .map_err(|e| format!("cannot write graph entry bundle source copy: {}", e))?;
 
     let sources_root = bundle_root.join("sources");
     fs::create_dir_all(&sources_root)
@@ -4566,6 +5138,8 @@ fn write_capture_result(root: &Path, result: &CaptureResult) -> Result<(), Strin
                     format!("{}\n", run.exit_code),
                 )
                 .map_err(|e| format!("cannot write run exit-code bundle: {}", e))?;
+                write_file_snapshot(&root.join("run.files"), &run.files)
+                    .map_err(|e| format!("cannot write run file snapshot bundle: {}", e))?;
             }
         }
     }
@@ -4603,6 +5177,8 @@ fn write_reference_bundle(root: &Path, reference: &ReferenceResult) -> Result<()
             format!("{}\n", run.exit_code),
         )
         .map_err(|e| format!("cannot write reference run exit-code bundle: {}", e))?;
+        write_file_snapshot(&ref_root.join("run.files"), &run.files)
+            .map_err(|e| format!("cannot write reference run file snapshot bundle: {}", e))?;
     }
     if let Some(err) = &reference.run_error {
         fs::write(ref_root.join("run.error.txt"), err)
@@ -4881,6 +5457,14 @@ struct Check {
     pattern: String,
 }
 
+#[derive(Debug, Clone)]
+struct FileCheck {
+    line_num: usize,
+    relative_path: String,
+    pattern: String,
+    negative: bool,
+}
+
 fn extract_checks(source: &str) -> Vec<Check> {
     source
         .lines()
@@ -4893,6 +5477,65 @@ fn extract_checks(source: &str) -> Vec<Check> {
             })
         })
         .collect()
+}
+
+fn extract_file_checks(source: &str, source_path: &Path) -> Result<Vec<FileCheck>, String> {
+    let mut checks = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        let (rest, negative) = if let Some(rest) = trimmed.strip_prefix("! FILE_CHECK:") {
+            (rest.trim(), false)
+        } else if let Some(rest) = trimmed.strip_prefix("! FILE_NOT:") {
+            (rest.trim(), true)
+        } else if trimmed.starts_with("! FILE_") {
+            let directive = trimmed
+                .split_once(':')
+                .map(|(name, _)| name)
+                .unwrap_or(trimmed);
+            return Err(format!(
+                "{}:{}: unsupported {} directive in bencch check-comments; \
+                     supported file directives are FILE_CHECK and FILE_NOT",
+                source_path.display(),
+                index + 1,
+                directive
+            ));
+        } else {
+            continue;
+        };
+
+        let Some((raw_path, raw_pattern)) = rest.split_once("=>") else {
+            return Err(format!(
+                "{}:{}: {} must be written as <relative-path> => <substring>",
+                source_path.display(),
+                index + 1,
+                if negative { "FILE_NOT" } else { "FILE_CHECK" }
+            ));
+        };
+        let relative_path = raw_path.trim();
+        if relative_path.is_empty() {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT path cannot be empty",
+                source_path.display(),
+                index + 1
+            ));
+        }
+        if Path::new(relative_path).is_absolute() {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT path must be relative, got '{}'",
+                source_path.display(),
+                index + 1,
+                relative_path
+            ));
+        }
+
+        checks.push(FileCheck {
+            line_num: index + 1,
+            relative_path: relative_path.to_string(),
+            pattern: raw_pattern.trim().to_string(),
+            negative,
+        });
+    }
+    Ok(checks)
 }
 
 fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), String> {
@@ -4917,6 +5560,58 @@ fn match_checks(checks: &[Check], output: &str, case_name: &str) -> Result<(), S
         }
     }
 
+    Ok(())
+}
+
+fn match_file_checks(
+    checks: &[FileCheck],
+    files: &BTreeMap<String, Vec<u8>>,
+    source_path: &Path,
+) -> Result<(), String> {
+    let mut search_offsets: BTreeMap<&str, usize> = BTreeMap::new();
+    for check in checks {
+        let Some(bytes) = files.get(&check.relative_path) else {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT expected sandbox file '{}' to exist",
+                source_path.display(),
+                check.line_num,
+                check.relative_path
+            ));
+        };
+        let text = String::from_utf8_lossy(bytes);
+        if check.negative {
+            if text.contains(&check.pattern) {
+                return Err(format!(
+                    "{}:{}: FILE_CHECK/FILE_NOT failed: substring '{}' appears in sandbox file '{}'\n\
+                     Full file contents:\n{}",
+                    source_path.display(),
+                    check.line_num,
+                    check.pattern,
+                    check.relative_path,
+                    text
+                ));
+            }
+            continue;
+        }
+
+        let search_offset = search_offsets
+            .entry(check.relative_path.as_str())
+            .or_insert(0);
+        if let Some(relative_offset) = text[*search_offset..].find(&check.pattern) {
+            *search_offset += relative_offset + check.pattern.len();
+        } else {
+            return Err(format!(
+                "{}:{}: FILE_CHECK/FILE_NOT failed: substring '{}' not found in sandbox file '{}' from offset {}\n\
+                 Full file contents:\n{}",
+                source_path.display(),
+                check.line_num,
+                check.pattern,
+                check.relative_path,
+                *search_offset,
+                text
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -5190,6 +5885,105 @@ end
         assert!(match_checks(&checks, "omega\nalpha\n", "demo").is_err());
     }
 
+    #[test]
+    fn file_check_comments_reject_wrong_file_contents() {
+        let root = next_report_temp_root(ReferenceCompiler::Gfortran, OptLevel::O0);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("file_contract.f90");
+        fs::write(
+            &source,
+            r#"program file_contract
+  implicit none
+  open(unit=10, file='artifact.txt', status='replace', action='write')
+  write(10, '(I0)') 99
+  close(10)
+  print '(I0)', 42
+end program file_contract
+! CHECK: 42
+! FILE_CHECK: artifact.txt => 42
+! FILE_NOT: artifact.txt => 99
+"#,
+        )
+        .unwrap();
+
+        let case = CaseSpec {
+            name: "file_contract".into(),
+            source: source.clone(),
+            graph_files: Vec::new(),
+            requested: BTreeSet::from([Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: vec![Expectation::CheckComments(Target::RunStdout)],
+            status_rules: Vec::new(),
+        };
+        let request = CaptureRequest {
+            input: source,
+            requested: BTreeSet::from([Stage::Run]),
+            opt_level: OptLevel::O0,
+        };
+        let result = capture_from_path(&request).unwrap();
+        let evaluation = evaluate_positive_expectations(&case, &result);
+
+        let _ = fs::remove_dir_all(&root);
+        let error = evaluation.expect_err("FILE_CHECK mismatch must fail the case");
+        assert!(error.contains("FILE_CHECK/FILE_NOT failed"), "{error}");
+        assert!(error.contains("artifact.txt"), "{error}");
+    }
+
+    #[test]
+    fn file_checks_preserve_order_and_enforce_negative_patterns() {
+        let source_path = Path::new("ordered_file_checks.f90");
+        let checks = extract_file_checks(
+            "! FILE_CHECK: artifact.txt => alpha\n\
+             ! FILE_CHECK: artifact.txt => omega\n\
+             ! FILE_NOT: artifact.txt => forbidden\n",
+            source_path,
+        )
+        .unwrap();
+        let files = BTreeMap::from([(
+            "artifact.txt".to_string(),
+            b"alpha\nmiddle\nomega\n".to_vec(),
+        )]);
+        assert!(match_file_checks(&checks, &files, source_path).is_ok());
+
+        let out_of_order = BTreeMap::from([(
+            "artifact.txt".to_string(),
+            b"omega\nmiddle\nalpha\n".to_vec(),
+        )]);
+        assert!(match_file_checks(&checks, &out_of_order, source_path).is_err());
+
+        let forbidden = BTreeMap::from([(
+            "artifact.txt".to_string(),
+            b"alpha\nomega\nforbidden\n".to_vec(),
+        )]);
+        let error = match_file_checks(&checks, &forbidden, source_path).unwrap_err();
+        assert!(error.contains("substring 'forbidden' appears"), "{error}");
+    }
+
+    #[test]
+    fn malformed_and_unsupported_file_directives_fail_closed() {
+        let source_path = Path::new("invalid_file_checks.f90");
+        let malformed =
+            extract_file_checks("! FILE_CHECK: artifact.txt\n", source_path).unwrap_err();
+        assert!(
+            malformed.contains("<relative-path> => <substring>"),
+            "{malformed}"
+        );
+
+        let unsupported =
+            extract_file_checks("! FILE_EXISTS: artifact.txt\n", source_path).unwrap_err();
+        assert!(
+            unsupported.contains("unsupported ! FILE_EXISTS"),
+            "{unsupported}"
+        );
+        assert!(
+            unsupported.contains("FILE_CHECK and FILE_NOT"),
+            "{unsupported}"
+        );
+    }
+
     fn run_only_result(stdout: &str, stderr: &str, exit_code: i32) -> CaptureResult {
         CaptureResult {
             input: PathBuf::from("demo.f90"),
@@ -5198,8 +5992,9 @@ end
                 Stage::Run,
                 CapturedStage::Run(RunCapture {
                     exit_code,
-                    stdout: stdout.into(),
-                    stderr: stderr.into(),
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: stderr.as_bytes().to_vec(),
+                    files: BTreeMap::new(),
                 }),
             )]),
         }
@@ -5219,8 +6014,9 @@ end
             compile_stderr: String::new(),
             run: Some(RunCapture {
                 exit_code,
-                stdout: stdout.into(),
-                stderr: stderr.into(),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+                files: BTreeMap::new(),
             }),
             run_error: None,
         }
@@ -5293,8 +6089,12 @@ end
             Stage::Run,
             CapturedStage::Run(RunCapture {
                 exit_code: 1,
-                stdout: "oops\n".into(),
-                stderr: "broken\n".into(),
+                stdout: b"oops\n".to_vec(),
+                stderr: b"broken\n".to_vec(),
+                files: BTreeMap::from([(
+                    "nested/armfortas.bin".to_string(),
+                    vec![0x00, 0xff, 0x7f],
+                )]),
             }),
         );
         let artifacts = ExecutionArtifacts {
@@ -5315,8 +6115,12 @@ end
                 compile_stderr: String::new(),
                 run: Some(RunCapture {
                     exit_code: 0,
-                    stdout: "hello\n".into(),
-                    stderr: String::new(),
+                    stdout: b"hello\n".to_vec(),
+                    stderr: Vec::new(),
+                    files: BTreeMap::from([(
+                        "reference.txt".to_string(),
+                        b"reference bytes\n".to_vec(),
+                    )]),
                 }),
                 run_error: None,
             }],
@@ -5370,7 +6174,7 @@ end
         };
         let prepared = PreparedInput {
             compiler_source: source.clone(),
-            generated_source: None,
+            graph_sources: Vec::new(),
             temp_root: None,
         };
 
@@ -5380,12 +6184,34 @@ end
         assert!(bundle.join("source.f90").exists());
         assert!(bundle.join("armfortas").join("ir.txt").exists());
         assert!(bundle.join("armfortas").join("run.stdout.txt").exists());
+        assert_eq!(
+            fs::read(
+                bundle
+                    .join("armfortas")
+                    .join("run.files")
+                    .join("nested")
+                    .join("armfortas.bin")
+            )
+            .unwrap(),
+            vec![0x00, 0xff, 0x7f]
+        );
         assert!(bundle.join("armfortas").join("error.txt").exists());
         assert!(bundle
             .join("references")
             .join("gfortran")
             .join("run.stdout.txt")
             .exists());
+        assert_eq!(
+            fs::read(
+                bundle
+                    .join("references")
+                    .join("gfortran")
+                    .join("run.files")
+                    .join("reference.txt")
+            )
+            .unwrap(),
+            b"reference bytes\n"
+        );
         assert!(bundle.join("consistency").join("summary.txt").exists());
         let consistency_summary =
             fs::read_to_string(bundle.join("consistency").join("summary.txt")).unwrap();
@@ -5429,7 +6255,28 @@ end
     }
 
     #[test]
-    fn materializes_graph_input_in_declared_file_order() {
+    fn file_snapshot_artifact_writer_rejects_parent_traversal() {
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_snapshot_path_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        let snapshot_root = root.join("snapshot");
+        let escaped = root.join("escaped.bin");
+        fs::create_dir_all(&root).unwrap();
+
+        let error = write_file_snapshot(
+            &snapshot_root,
+            &BTreeMap::from([("../escaped.bin".to_string(), b"escape".to_vec())]),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!escaped.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preserves_graph_translation_units_as_authored_inputs() {
         let root = std::env::temp_dir().join("afs_tests_graph_materialize");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -5457,14 +6304,186 @@ end
         };
 
         let prepared = prepare_case_input(&case, &suite, OptLevel::O0).unwrap();
-        let generated = fs::read_to_string(&prepared.compiler_source).unwrap();
-        assert!(generated.contains("module math_values"));
-        assert!(generated.contains("program main"));
-        assert!(
-            generated.find("module math_values").unwrap() < generated.find("program main").unwrap()
-        );
+        assert_eq!(prepared.compiler_source, main);
+        assert_eq!(prepared.graph_sources, vec![module, main]);
+        assert!(prepared.temp_root.is_some());
 
         cleanup_prepared_input(&prepared);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_capture_compiles_modules_separately_and_links_all_objects() {
+        if armfortas::testing::native_e2e_level_support("-O0").is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_graph_multitu_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let module = root.join("answer_values.f90");
+        let main = root.join("main.f90");
+        fs::write(
+            &module,
+            "module answer_values\n  implicit none\ncontains\n  integer function answer() result(value)\n    value = 42\n  end function answer\nend module answer_values\n",
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            "program main\n  use answer_values, only : answer\n  implicit none\n  print *, answer()\nend program main\n",
+        )
+        .unwrap();
+
+        let suite = SuiteSpec {
+            name: "modules/separate-graph".into(),
+            path: root.join("graph.afs"),
+            cases: Vec::new(),
+        };
+        let case = CaseSpec {
+            name: "module_use".into(),
+            source: main.clone(),
+            // Deliberately put the consumer first. The graph adapter must use
+            // the real dependency scan, not declaration order or concatenation.
+            graph_files: vec![main.clone(), module.clone()],
+            requested: BTreeSet::from([Stage::Ast, Stage::Sema, Stage::Run]),
+            opt_levels: vec![OptLevel::O0],
+            repeat_count: 2,
+            reference_compilers: Vec::new(),
+            consistency_checks: Vec::new(),
+            expectations: Vec::new(),
+            status_rules: Vec::new(),
+        };
+
+        let prepared = prepare_case_input(&case, &suite, OptLevel::O0).unwrap();
+        let result = capture_prepared_input(&prepared, &case.requested, OptLevel::O0).unwrap();
+        let run = capture_run_stage(&result).unwrap();
+        assert_eq!(run.exit_code, 0);
+        let stdout = run.stdout_text().expect("graph stdout should be UTF-8");
+        assert!(
+            stdout.split_whitespace().any(|field| field == "42"),
+            "graph binary did not execute the separately compiled module: {stdout:?}"
+        );
+
+        let ast = capture_text_stage(&result, Stage::Ast).unwrap();
+        assert!(ast.contains(&format!("[0000] {}", main.display())));
+        assert!(ast.contains(&format!("[0001] {}", module.display())));
+
+        let work_root = prepared.temp_root.as_ref().unwrap();
+        assert!(work_root.join("answer_values.amod").is_file());
+        assert!(work_root.join("answer_values.mod").is_file());
+        assert!(work_root.join("unit_0000.o").is_file());
+        assert!(work_root.join("unit_0001.o").is_file());
+
+        cleanup_prepared_input(&prepared);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_cli_build_keeps_module_artifacts_out_of_the_process_cwd() {
+        if armfortas::testing::native_e2e_level_support("-O0").is_err() {
+            return;
+        }
+        let suffix = next_report_suffix(OptLevel::O0).replace('-', "_");
+        let module_name = format!("bencch_hc004_{}", suffix);
+        let root = std::env::temp_dir().join(format!("afs_tests_graph_cli_{}", suffix));
+        let source_root = root.join("src");
+        let output_root = root.join("out");
+        let module = source_root.join("provider.f90");
+        let main = source_root.join("main.f90");
+        let binary = output_root.join("graph.out");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&output_root).unwrap();
+        fs::write(
+            &module,
+            format!(
+                "module {module_name}\n  implicit none\ncontains\n  integer function answer() result(value)\n    value = 42\n  end function answer\nend module {module_name}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            format!(
+                "program main\n  use {module_name}, only : answer\n  implicit none\n  print *, answer()\nend program main\n"
+            ),
+        )
+        .unwrap();
+
+        let current_dir = std::env::current_dir().unwrap();
+        let leaked_amod = current_dir.join(format!("{module_name}.amod"));
+        let leaked_mod = current_dir.join(format!("{module_name}.mod"));
+        assert!(!leaked_amod.exists());
+        assert!(!leaked_mod.exists());
+
+        compile_graph_output(&[main, module], OptLevel::O0, &binary, &output_root).unwrap();
+
+        assert!(binary.is_file());
+        assert!(output_root.join(format!("{module_name}.amod")).is_file());
+        assert!(output_root.join(format!("{module_name}.mod")).is_file());
+        assert!(!leaked_amod.exists());
+        assert!(!leaked_mod.exists());
+
+        let run = run_managed(&mut Command::new(&binary), CommandClass::Run).unwrap();
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stdout)
+            .split_whitespace()
+            .any(|field| field == "42"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reference_graph_compiles_each_source_then_links_distinct_objects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_reference_graph_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let module = root.join("provider.f90");
+        let main = root.join("main.f90");
+        let log = root.join("commands.log");
+        let fake_compiler = root.join("fake-gfortran");
+        fs::write(&module, "module provider\nend module provider\n").unwrap();
+        fs::write(&main, "program main\nuse provider\nend program main\n").unwrap();
+        fs::write(
+            &fake_compiler,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nout=''\ncompile=0\nwant_output=0\nfor arg in \"$@\"; do\n  if [ \"$want_output\" -eq 1 ]; then out=\"$arg\"; want_output=0; continue; fi\n  case \"$arg\" in\n    -c) compile=1 ;;\n    -o) want_output=1 ;;\n  esac\ndone\nif [ -z \"$out\" ]; then exit 64; fi\nif [ \"$compile\" -eq 1 ]; then\n  : > \"$out\"\nelse\n  printf '#!/bin/sh\\nprintf \"42\\\\n\"\\n' > \"$out\"\n  chmod +x \"$out\"\nfi\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_compiler).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_compiler, permissions).unwrap();
+
+        let mut tools = ToolchainConfig::from_env();
+        tools.gfortran = fake_compiler.display().to_string();
+        let result = run_reference_graph(
+            &[module.clone(), main.clone()],
+            OptLevel::O0,
+            ReferenceCompiler::Gfortran,
+            &tools,
+        );
+        assert_eq!(result.compile_exit_code, 0, "{}", result.compile_stderr);
+        assert_eq!(result.run.unwrap().stdout, b"42\n");
+
+        let commands = fs::read_to_string(&log).unwrap();
+        let commands = commands.lines().collect::<Vec<_>>();
+        assert_eq!(commands.len(), 3, "{commands:#?}");
+        assert!(commands[0].contains(&module.display().to_string()));
+        assert!(!commands[0].contains(&main.display().to_string()));
+        assert!(commands[1].contains(&main.display().to_string()));
+        assert!(!commands[1].contains(&module.display().to_string()));
+        assert!(commands[2].contains("unit_0000.o"));
+        assert!(commands[2].contains("unit_0001.o"));
+        assert!(!commands[2].contains(".f90"));
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -5475,7 +6494,6 @@ end
         fs::create_dir_all(&root).unwrap();
         let module = root.join("math_values.f90");
         let main = root.join("main.f90");
-        let generated = root.join("generated.f90");
         fs::write(
             &module,
             "module math_values\n integer :: answer = 42\nend module\n",
@@ -5486,7 +6504,6 @@ end
             "program main\n use math_values\n print *, answer\nend program\n",
         )
         .unwrap();
-        fs::write(&generated, "module math_values\n integer :: answer = 42\nend module\n\nprogram main\n use math_values\n print *, answer\nend program\n").unwrap();
 
         let suite = SuiteSpec {
             name: "modules/bundles".into(),
@@ -5522,13 +6539,17 @@ end
             consistency_issues: Vec::new(),
         };
         let prepared = PreparedInput {
-            compiler_source: generated.clone(),
-            generated_source: Some(generated.clone()),
+            compiler_source: main.clone(),
+            graph_sources: vec![module.clone(), main.clone()],
             temp_root: None,
         };
 
         let bundle = write_failure_bundle(&suite, &case, &prepared, &outcome, &artifacts).unwrap();
         assert!(bundle.join("source.f90").exists());
+        assert_eq!(
+            fs::read_to_string(bundle.join("source.f90")).unwrap(),
+            fs::read_to_string(&main).unwrap()
+        );
         assert!(bundle.join("sources").join("00_math_values.f90").exists());
         assert!(bundle.join("sources").join("01_main.f90").exists());
 
@@ -5612,6 +6633,42 @@ end
     }
 
     #[test]
+    fn differential_rejects_filesystem_side_effect_mismatch() {
+        let mut result = run_only_result("same output\n", "", 0);
+        let arm_files =
+            BTreeMap::from([("artifact.txt".to_string(), b"armfortas bytes\n".to_vec())]);
+        result
+            .stages
+            .get_mut(&Stage::Run)
+            .and_then(|stage| match stage {
+                CapturedStage::Run(run) => Some(run),
+                CapturedStage::Text(_) => None,
+            })
+            .unwrap()
+            .files = arm_files.clone();
+
+        let mut references = vec![reference_run(
+            ReferenceCompiler::Gfortran,
+            "same output\n",
+            "",
+            0,
+        )];
+        references[0].run.as_mut().unwrap().files =
+            BTreeMap::from([("artifact.txt".to_string(), b"gfortran bytes\n".to_vec())]);
+
+        let error = compare_differential(&result, &references).unwrap_err();
+        assert!(error.contains("files"), "{error}");
+        assert!(error.contains("artifact.txt"), "{error}");
+
+        references[0].run.as_mut().unwrap().files = arm_files;
+        assert!(compare_differential(&result, &references).is_ok());
+
+        references[0].run.as_mut().unwrap().files.clear();
+        let missing_error = compare_differential(&result, &references).unwrap_err();
+        assert!(missing_error.contains("artifact.txt"), "{missing_error}");
+    }
+
+    #[test]
     fn consistency_diff_reports_first_mismatch() {
         let detail = describe_text_difference("alpha\nbeta\n", "alpha\ngamma\n", "left", "right");
         assert!(detail.contains("first differing line: 2"));
@@ -5668,13 +6725,15 @@ end
     fn run_diff_reports_changed_components() {
         let left = RunCapture {
             exit_code: 0,
-            stdout: "alpha\nbeta\n".into(),
-            stderr: String::new(),
+            stdout: b"alpha\nbeta\n".to_vec(),
+            stderr: Vec::new(),
+            files: BTreeMap::new(),
         };
         let right = RunCapture {
             exit_code: 0,
-            stdout: "alpha\ngamma\n".into(),
-            stderr: String::new(),
+            stdout: b"alpha\ngamma\n".to_vec(),
+            stderr: Vec::new(),
+            files: BTreeMap::new(),
         };
 
         let detail = describe_run_difference(&left, &right, "capture run", "cli run 2");
@@ -5685,23 +6744,201 @@ end
     }
 
     #[test]
+    fn run_diff_reports_exact_file_content_and_presence_changes() {
+        let left = RunCapture {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x00, 0xff])]),
+        };
+        let right = RunCapture {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x00, 0xfe])]),
+        };
+
+        let detail = describe_run_difference(&left, &right, "capture run", "cli run");
+        assert!(
+            detail.contains("first differing component: files"),
+            "{detail}"
+        );
+        assert!(detail.contains("file 'artifact.bin' differs"), "{detail}");
+        assert!(
+            detail.contains("first differing byte offset: 1"),
+            "{detail}"
+        );
+        assert!(detail.contains("capture run: 0xff"), "{detail}");
+        assert!(detail.contains("cli run: 0xfe"), "{detail}");
+
+        let mut missing = right;
+        missing.files.clear();
+        let presence = describe_run_difference(&left, &missing, "capture run", "cli run");
+        assert!(
+            presence.contains("file 'artifact.bin' is present only in capture run"),
+            "{presence}"
+        );
+    }
+
+    #[test]
+    fn file_snapshot_preview_is_bounded_without_splitting_utf8() {
+        let mut bytes = vec![b'a'; 255];
+        bytes.extend_from_slice("é".as_bytes());
+        bytes.extend_from_slice(b"tail");
+
+        let preview = format_file_preview(&bytes);
+        assert!(!preview.contains("<non-UTF-8 output"), "{preview}");
+        assert!(preview.contains("<6 more bytes>"), "{preview}");
+        assert!(!preview.contains("tail"), "{preview}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_capture_distinguishes_invalid_utf8_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_invalid_utf8_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ff = root.join("emit_ff");
+        let fe = root.join("emit_fe");
+        fs::write(&ff, "#!/bin/sh\nprintf '\\377'\n").unwrap();
+        fs::write(&fe, "#!/bin/sh\nprintf '\\376'\n").unwrap();
+        fs::set_permissions(&ff, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&fe, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let ff_run = run_binary_capture(&ff, &root.join("ff-run"), "emit ff").unwrap();
+        let fe_run = run_binary_capture(&fe, &root.join("fe-run"), "emit fe").unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(ff_run.exit_code, 0);
+        assert_eq!(fe_run.exit_code, 0);
+        assert_eq!(ff_run.stdout, vec![0xff]);
+        assert_eq!(fe_run.stdout, vec![0xfe]);
+        assert_ne!(
+            normalize_run_signature(&ff_run),
+            normalize_run_signature(&fe_run),
+            "distinct invalid UTF-8 byte streams must not compare equal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_capture_snapshots_nested_binary_side_effects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "afs_tests_file_snapshot_{}",
+            next_report_suffix(OptLevel::O0)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let writer = root.join("write_file");
+        let staged_writer = root.join("write_file.staged");
+        fs::write(
+            &staged_writer,
+            "#!/bin/sh\nmkdir nested\nprintf '\\000\\377\\177' > nested/artifact.bin\n",
+        )
+        .unwrap();
+        fs::set_permissions(&staged_writer, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(staged_writer, &writer).unwrap();
+
+        let run =
+            run_binary_capture(&writer, &root.join("run-sandbox"), "write binary file").unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(
+            run.files,
+            BTreeMap::from([("nested/artifact.bin".to_string(), vec![0x00, 0xff, 0x7f])])
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_run_output_fails_text_checks_and_renders_exact_bytes() {
+        let result = CaptureResult {
+            input: PathBuf::from("invalid-output.f90"),
+            opt_level: OptLevel::O0,
+            stages: BTreeMap::from([(
+                Stage::Run,
+                CapturedStage::Run(RunCapture {
+                    exit_code: 0,
+                    stdout: vec![0xff],
+                    stderr: Vec::new(),
+                    files: BTreeMap::new(),
+                }),
+            )]),
+        };
+
+        let error = target_text(&result, &Target::RunStdout).unwrap_err();
+        assert!(error.contains("run.stdout is not valid UTF-8"), "{error}");
+        assert!(error.contains("offset 0"), "{error}");
+
+        let left = result
+            .get(Stage::Run)
+            .and_then(CapturedStage::as_run)
+            .unwrap();
+        let right = RunCapture {
+            exit_code: 0,
+            stdout: vec![0xfe],
+            stderr: Vec::new(),
+            files: BTreeMap::new(),
+        };
+        assert!(format_run_capture(left).contains("\\xff"));
+        let detail = describe_run_difference(left, &right, "left", "right");
+        assert!(
+            detail.contains("first differing byte offset: 0"),
+            "{detail}"
+        );
+        assert!(detail.contains("left: 0xff"), "{detail}");
+        assert!(detail.contains("right: 0xfe"), "{detail}");
+        assert!(!detail.contains('\u{fffd}'), "{detail}");
+    }
+
+    #[test]
     fn run_component_variation_classifies_stdout_only_instability() {
         let first = RunSignature {
             exit_code: 0,
-            stdout: "alpha".into(),
-            stderr: String::new(),
+            stdout: b"alpha".to_vec(),
+            stderr: Vec::new(),
+            files: BTreeMap::new(),
         };
         let second = RunSignature {
             exit_code: 0,
-            stdout: "beta".into(),
-            stderr: String::new(),
+            stdout: b"beta".to_vec(),
+            stderr: Vec::new(),
+            files: BTreeMap::new(),
         };
         let signatures = vec![&first, &second];
 
         assert_eq!(varying_run_components(&signatures), vec!["stdout"]);
         assert_eq!(
             stable_run_components(&signatures),
-            vec!["exit_code", "stderr"]
+            vec!["exit_code", "stderr", "files"]
+        );
+    }
+
+    #[test]
+    fn run_component_variation_classifies_file_only_instability() {
+        let first = RunSignature {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x00])]),
+        };
+        let second = RunSignature {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            files: BTreeMap::from([("artifact.bin".to_string(), vec![0x01])]),
+        };
+        let signatures = vec![&first, &second];
+
+        assert_eq!(varying_run_components(&signatures), vec!["files"]);
+        assert_eq!(
+            stable_run_components(&signatures),
+            vec!["exit_code", "stdout", "stderr"]
         );
     }
 

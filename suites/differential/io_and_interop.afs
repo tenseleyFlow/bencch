@@ -1,9 +1,19 @@
 suite "differential/io-and-interop"
 
 case "file_io_refs"
-source "../../../test_programs/file_io.f90"
+source "../../fixtures/runtime/file_side_effect_exact.f90"
+opts => O0,O1,O2,O3,Ofast
 armfortas => run
 differential => gfortran, flang-new
+expect run.stdout check-comments
+expect run.exit_code equals 0
+end
+
+case "file_io_size_refs"
+source "../../fixtures/runtime/file_side_effect_exact.f90"
+opts => Os
+armfortas => run
+differential => gfortran
 expect run.stdout check-comments
 expect run.exit_code equals 0
 end

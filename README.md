@@ -105,6 +105,27 @@ Environment overrides work too:
 BENCCH_ARMFORTAS_BIN=./target/debug/armfortas cargo run -p afs-tests -- run --suite consistency/object
 ```
 
+Every compiler, generated program, inspection tool, and project command runs in
+a managed process group. The runner drains both output streams concurrently,
+retains at most 16 MiB per stream, and treats timeout, cancellation, incomplete
+capture, and output truncation as hard harness failures. On Unix, expiry
+terminates the command's entire process group, including descendants that
+inherited the capture pipes, and reaps the direct child.
+
+The conservative defaults can be overridden with positive integer values:
+
+- `BENCCH_COMPILE_TIMEOUT_SECS` (default `120`)
+- `BENCCH_RUN_TIMEOUT_SECS` (default `30`)
+- `BENCCH_TOOL_TIMEOUT_SECS` (default `60`)
+- `BENCCH_PROJECT_TIMEOUT_SECS` (default `1800`)
+- `BENCCH_KILL_GRACE_MS` (default `1000`)
+- `BENCCH_OUTPUT_LIMIT_BYTES` (default `16777216`, independently for stdout and
+  stderr)
+
+Malformed, zero, and excessive limit values fail closed before the command is
+launched. Project reports record `TIMEOUT`, `CANCELLED`, `OUTPUT_LIMIT`, and
+`HARNESS_FAILURE` separately and retain the bounded partial output.
+
 ## Suite Format
 
 Suites are plain text files under `suites/`.
@@ -123,7 +144,8 @@ expect run.exit_code equals 0
 end
 ```
 
-Graph cases use `entry` plus ordered `file` lines:
+Graph cases use `entry` plus `file` lines in reference-compilation dependency
+order:
 
 ```text
 suite "modules/runtime-graphs"
@@ -139,9 +161,15 @@ expect run.stdout check-comments
 end
 ```
 
-Today the armfortas adapter materializes graph cases into one generated source
-in declared file order before capture/compile. The authored files still stay in
-the failure bundle.
+Graph members remain separate translation units. The armfortas adapter
+preprocesses and captures each authored file independently, resolves module
+dependencies with the compiler's graph scanner, exchanges real `.amod`/`.mod`
+artifacts through an isolated case directory, emits one object per source, and
+links those objects for `obj`/`run` checks. Reference compilers compile the
+listed files in authored dependency order and then link their distinct objects;
+they do not reuse armfortas dependency decisions. Failure bundles store the
+entry source as `source.f90` and preserve every authored member under
+`sources/`.
 
 Common things the runner understands:
 
@@ -161,6 +189,10 @@ The suite DSL is for orchestration:
 - reporting and bundles
 
 Leaf assertions should come from shared source directives whenever possible.
+`expect run.stdout check-comments` enforces ordered `! CHECK:` lines together
+with `! FILE_CHECK:` and `! FILE_NOT:` against the captured run sandbox.
+Other `! FILE_*` directives fail closed until bencch implements their exact
+root-harness semantics.
 
 ## Notes
 

@@ -15,8 +15,7 @@ entry "../../fixtures/modules/module_procedure/main.f90"
 file "../../fixtures/modules/module_procedure/ops.f90"
 file "../../fixtures/modules/module_procedure/main.f90"
 armfortas => ir
-expect ir contains "func @add_one"
-xfail "Module procedures are called but not lowered into IR functions."
+expect ir contains "func @afs_modproc_ops_add_one"
 end
 
 case "reexport_chain_ir_values"

@@ -5,7 +5,5 @@ entry "../../fixtures/modules/module_procedure/main.f90"
 file "../../fixtures/modules/module_procedure/ops.f90"
 file "../../fixtures/modules/module_procedure/main.f90"
 armfortas => asm, obj
-expect asm contains ".globl _add_one"
-expect obj not-contains "(undefined) external _add_one"
-xfail "Module procedures are called but not emitted into backend artifacts."
+expect asm contains "afs_modproc_ops_add_one"
 end

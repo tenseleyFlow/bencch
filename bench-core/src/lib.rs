@@ -247,8 +247,23 @@ impl CapturedStage {
 #[derive(Debug, Clone)]
 pub struct RunCapture {
     pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// Files created in the isolated run directory.
+    ///
+    /// Every run path snapshots its sandbox. An empty map therefore means the
+    /// program created no files; an unavailable observation is an error.
+    pub files: BTreeMap<String, Vec<u8>>,
+}
+
+impl RunCapture {
+    pub fn stdout_text(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.stdout)
+    }
+
+    pub fn stderr_text(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.stderr)
+    }
 }
 
 #[cfg(test)]
